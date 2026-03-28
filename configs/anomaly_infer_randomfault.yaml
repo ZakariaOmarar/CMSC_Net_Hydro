@@ -1,0 +1,15 @@
+artifact_path: results/cnf/anomaly/flow.pt
+latent_root: artifacts/latents/001_All_RandomFault.npz
+output_path: results/cnf/anomaly/randomfault_infer_with_timestamps.json
+window_s: 5.0
+overlap: 0.5
+smoother_k: 20
+smoother_decay: 0.9
+transition_policy: context_only
+transition_factor: 1.5
+mode_artifact_path: results/cnf/mode/mode_classifier.pt
+healthy_latent_root: artifacts/latents
+mode_consistency_window: 5
+mode_stable_min_windows: 3
+mode_z_threshold: 3.0
+device: cpu

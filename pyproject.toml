@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "CSMC_Net"
+version = "0.1.0"
+description = "CSMC_Net: multimodal acoustic-vibration ingestion and feature pipeline for hydropower thesis work"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26",
+    "scipy>=1.12",
+    "librosa>=0.10",
+    "pywavelets>=1.6",
+    "pydantic>=2.5",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=4.1",
+]
+dl = [
+    "torch>=2.2",
+    "scikit-learn>=1.4",
+    "umap-learn>=0.5",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
