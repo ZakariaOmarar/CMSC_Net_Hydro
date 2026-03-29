@@ -30,6 +30,7 @@ class ModelReportRow:
     alongside that anomaly model. Fields are None when the corresponding
     artifact was not found.
     """
+
     model_name: str
     anomaly_checkpoint_path: str | None
     anomaly_summary_path: str | None
@@ -41,6 +42,8 @@ class ModelReportRow:
     anomaly_full_score_std: float | None
     anomaly_n_full_anomalies: int | None
     anomaly_full_anomaly_rate: float | None
+    anomaly_healthy_fpr: float | None
+    anomaly_rf_detection_rate: float | None
     mode_checkpoint_path: str | None
     mode_summary_path: str | None
     mode_validation_accuracy: float | None
@@ -287,9 +290,7 @@ def _build_row(
     n_full_anomalies_raw = anomaly_summary.get("n_full_anomalies")
     n_full_anomalies = (
         int(n_full_anomalies_raw)
-        if isinstance(
-            n_full_anomalies_raw, (int, float, np.integer, np.floating, str)
-        )
+        if isinstance(n_full_anomalies_raw, (int, float, np.integer, np.floating, str))
         else None
     )
 
@@ -316,12 +317,14 @@ def _build_row(
         anomaly_full_score_mean=_as_float_or_none(
             anomaly_summary.get("full_score_mean")
         ),
-        anomaly_full_score_std=_as_float_or_none(
-            anomaly_summary.get("full_score_std")
-        ),
+        anomaly_full_score_std=_as_float_or_none(anomaly_summary.get("full_score_std")),
         anomaly_n_full_anomalies=n_full_anomalies,
         anomaly_full_anomaly_rate=_as_float_or_none(
             anomaly_summary.get("full_anomaly_rate")
+        ),
+        anomaly_healthy_fpr=_as_float_or_none(anomaly_summary.get("healthy_fpr")),
+        anomaly_rf_detection_rate=_as_float_or_none(
+            anomaly_summary.get("rf_detection_rate")
         ),
         mode_checkpoint_path=(
             str(mode_checkpoint_path) if mode_checkpoint_path is not None else None
@@ -494,6 +497,8 @@ def to_payload(rows: list[ModelReportRow]) -> dict[str, Any]:
                 "anomaly_full_score_std": r.anomaly_full_score_std,
                 "anomaly_n_full_anomalies": r.anomaly_n_full_anomalies,
                 "anomaly_full_anomaly_rate": r.anomaly_full_anomaly_rate,
+                "anomaly_healthy_fpr": r.anomaly_healthy_fpr,
+                "anomaly_rf_detection_rate": r.anomaly_rf_detection_rate,
                 "mode_checkpoint_path": r.mode_checkpoint_path,
                 "mode_summary_path": r.mode_summary_path,
                 "mode_validation_accuracy": r.mode_validation_accuracy,

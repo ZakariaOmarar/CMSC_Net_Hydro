@@ -146,30 +146,40 @@ def split_train_val_indices(
     val_ratio: float = 0.2,
     seed: int = 42,
 ) -> tuple[np.ndarray, np.ndarray]:
+    """Stratified window-level split that keeps every recording ID present in both sets.
+
+    Splitting by recording ID (assigning whole recordings to one set) causes
+    mode collapse when each recording ID is a single operating mode — the flow
+    trains on one mode and never sees the others in validation. Instead we split
+    each recording's windows proportionally so every mode appears in both train
+    and val, which is the correct behaviour for a conditional density model.
+    """
     if not (0.0 < val_ratio < 1.0):
         raise ValueError("val_ratio must be in (0, 1)")
 
     unique_ids = np.unique(recording_ids.astype(str))
     rng = np.random.default_rng(seed)
 
-    if unique_ids.shape[0] >= 2:
-        shuffled = unique_ids.copy()
-        rng.shuffle(shuffled)
-        n_val_ids = max(1, int(round(shuffled.shape[0] * val_ratio)))
-        val_set = set(shuffled[:n_val_ids].tolist())
-        val_mask = np.asarray([rid in val_set for rid in recording_ids], dtype=bool)
-    else:
-        idx = np.arange(recording_ids.shape[0])
-        rng.shuffle(idx)
-        n_val = max(1, int(round(recording_ids.shape[0] * val_ratio)))
-        val_mask = np.zeros(recording_ids.shape[0], dtype=bool)
-        val_mask[idx[:n_val]] = True
+    train_parts: list[np.ndarray] = []
+    val_parts: list[np.ndarray] = []
 
-    train_mask = ~val_mask
-    if not np.any(train_mask) or not np.any(val_mask):
+    for uid in unique_ids:
+        uid_idx = np.where(np.asarray(recording_ids.astype(str)) == uid)[0]
+        shuffled = uid_idx.copy()
+        rng.shuffle(shuffled)
+        n_val = max(1, int(round(int(shuffled.shape[0]) * val_ratio)))
+        # Guarantee at least one window stays in train.
+        n_val = min(n_val, int(shuffled.shape[0]) - 1)
+        val_parts.append(shuffled[:n_val])
+        train_parts.append(shuffled[n_val:])
+
+    train_idx = np.concatenate(train_parts, axis=0)
+    val_idx = np.concatenate(val_parts, axis=0)
+
+    if train_idx.size == 0 or val_idx.size == 0:
         raise ValueError("Train/val split produced empty partition")
 
-    return np.where(train_mask)[0], np.where(val_mask)[0]
+    return train_idx, val_idx
 
 
 def split_healthy_train_val_test_indices(

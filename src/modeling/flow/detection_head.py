@@ -61,12 +61,15 @@ class FlowConfig:
         n_layers: Number of affine coupling layers. More layers improve expressivity
             but increase training cost.
         hidden_dim: Hidden unit count in each CouplingMLP.
+        dropout: Dropout probability applied after the FiLM layer in each CouplingMLP.
+            Regularises the flow against overfitting on small datasets.
     """
 
     feature_dim: int = 64
     d_ctx: int = 32
     n_layers: int = 8
     hidden_dim: int = 256
+    dropout: float = 0.0
 
     def __post_init__(self) -> None:
         if int(self.feature_dim) <= 0:
@@ -79,11 +82,14 @@ class FlowConfig:
             raise ValueError("d_ctx must be > 0")
         if int(self.hidden_dim) <= 0:
             raise ValueError("hidden_dim must be > 0")
+        if not (0.0 <= float(self.dropout) < 1.0):
+            raise ValueError("dropout must be in [0, 1)")
 
         object.__setattr__(self, "feature_dim", int(self.feature_dim))
         object.__setattr__(self, "n_layers", int(self.n_layers))
         object.__setattr__(self, "d_ctx", int(self.d_ctx))
         object.__setattr__(self, "hidden_dim", int(self.hidden_dim))
+        object.__setattr__(self, "dropout", float(self.dropout))
 
     @property
     def d_model(self) -> int:
@@ -124,11 +130,17 @@ class CouplingMLP(nn.Module):
     """FiLM-conditioned MLP producing affine coupling parameters s and t."""
 
     def __init__(
-        self, input_dim: int, hidden_dim: int, output_dim: int, d_ctx: int
+        self,
+        input_dim: int,
+        hidden_dim: int,
+        output_dim: int,
+        d_ctx: int,
+        dropout: float = 0.0,
     ) -> None:
         super().__init__()
         self._fc1 = nn.Linear(input_dim, hidden_dim)
         self._film = FiLM(d_ctx=d_ctx, feature_dim=hidden_dim)
+        self._drop = nn.Dropout(p=float(dropout))
         self._fc2 = nn.Linear(hidden_dim, hidden_dim)
         self._fc3 = nn.Linear(hidden_dim, output_dim * 2)
 
@@ -137,6 +149,7 @@ class CouplingMLP(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         h = F.relu(self._fc1(z1))
         h = self._film(h, c)
+        h = self._drop(h)
         h = F.relu(self._fc2(h))
         out = self._fc3(h)
         s, t = out.chunk(2, dim=-1)
@@ -146,7 +159,9 @@ class CouplingMLP(nn.Module):
 class AffineCouplingLayer(nn.Module):
     """RealNVP affine coupling layer."""
 
-    def __init__(self, feature_dim: int, hidden_dim: int, d_ctx: int) -> None:
+    def __init__(
+        self, feature_dim: int, hidden_dim: int, d_ctx: int, dropout: float = 0.0
+    ) -> None:
         super().__init__()
         if feature_dim % 2 != 0:
             raise ValueError("feature_dim must be even for chunk-based coupling")
@@ -157,6 +172,7 @@ class AffineCouplingLayer(nn.Module):
             hidden_dim=hidden_dim,
             output_dim=self._half,
             d_ctx=d_ctx,
+            dropout=float(dropout),
         )
 
     def forward(
@@ -192,6 +208,7 @@ class ConditionalRealNVP(nn.Module):
                     feature_dim=config.feature_dim,
                     hidden_dim=config.hidden_dim,
                     d_ctx=config.d_ctx,
+                    dropout=config.dropout,
                 )
                 for _ in range(config.n_layers)
             ]

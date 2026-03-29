@@ -551,6 +551,8 @@ def _flow_train_kwargs(cfg: dict[str, Any], *, output_dir: Path) -> dict[str, An
         ),
         "hidden_dim": int(_g(cfg, "hidden_dim", 256)),
         "context_dim": int(_g(cfg, "context_dim", 32)),
+        "dropout": float(_g(cfg, "dropout", 0.0)),
+        "patience": int(_g(cfg, "patience", 0)),
         "val_ratio": float(_g(cfg, "val_ratio", 0.2)),
         "test_ratio": float(_g(cfg, "test_ratio", 0.2)),
         "score_percentile": float(_g(cfg, "score_percentile", 99.0)),

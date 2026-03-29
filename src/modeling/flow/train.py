@@ -54,11 +54,13 @@ from ..core.runtime_utils import apply_standardizer
 from ..core.runtime_utils import enable_global_determinism
 from ..core.runtime_utils import emit_event
 from ..core.runtime_utils import fit_standardizer
+from ..core.runtime_utils import is_healthy_recording_id
 
 
 @dataclass(frozen=True)
 class FlowTrainingArtifacts:
     """Paths of the three files written by train_and_calibrate_flow."""
+
     artifact_path: Path
     threshold_path: Path
     summary_path: Path
@@ -77,6 +79,7 @@ def train_and_calibrate_flow(
     n_layers: int | None = None,
     hidden_dim: int = 256,
     context_dim: int = 32,
+    dropout: float = 0.0,
     val_ratio: float = 0.2,
     test_ratio: float = 0.2,
     score_percentile: float = 99.0,
@@ -84,6 +87,7 @@ def train_and_calibrate_flow(
     joint_finetune_epochs: int = 0,
     joint_ntxent_weight: float = 0.1,
     contrastive_temperature: float = 0.2,
+    patience: int = 0,
     seed: int = 42,
     device: str = "cpu",
     log_every: int = 10,
@@ -110,6 +114,8 @@ def train_and_calibrate_flow(
         raise ValueError("context_dim must be > 0")
     if checkpoint_every < 1:
         raise ValueError("checkpoint_every must be >= 1")
+    if patience < 0:
+        raise ValueError("patience must be >= 0")
 
     determinism = enable_global_determinism(int(seed))
 
@@ -158,6 +164,7 @@ def train_and_calibrate_flow(
         d_ctx=int(context_dim),
         n_layers=int(layer_count),
         hidden_dim=int(hidden_dim),
+        dropout=float(dropout),
     )
 
     torch_device = torch.device(device)
@@ -174,13 +181,13 @@ def train_and_calibrate_flow(
     )
     pretrain_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         pretrain_optimizer,
-        T_max=100,
+        T_max=max(pretrain_context_epochs, 1),
     )
 
     optimizer = torch.optim.Adam(flow.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
-        T_max=100,
+        T_max=max(epochs, 1),
     )
 
     checkpoint_file = Path(checkpoint_path) if checkpoint_path is not None else None
@@ -344,6 +351,13 @@ def train_and_calibrate_flow(
     for p in context_encoder.parameters():
         p.requires_grad = False
 
+    # Track the best-val-NLL checkpoint in memory so we always save the
+    # generalization-optimal model rather than the final (often overfit) epoch.
+    _best_val_nll: float = float("inf")
+    _best_flow_state: dict | None = None
+    _best_ctx_state: dict | None = None
+    _epochs_without_improvement: int = 0
+
     for epoch in range(int(flow_epoch_done) + 1, epochs + 1):
         train_loss = train_flow_epoch(
             flow,
@@ -378,6 +392,17 @@ def train_and_calibrate_flow(
             }
         )
 
+        # Best-model tracking: keep a copy of the weights with the lowest val NLL.
+        if np.isfinite(val_nll) and float(val_nll) < _best_val_nll:
+            _best_val_nll = float(val_nll)
+            _best_flow_state = {k: v.clone() for k, v in flow.state_dict().items()}
+            _best_ctx_state = {
+                k: v.clone() for k, v in context_encoder.state_dict().items()
+            }
+            _epochs_without_improvement = 0
+        else:
+            _epochs_without_improvement += 1
+
         if epoch == 1 or epoch == epochs or (epoch % log_every == 0):
             emit_event(
                 "flow_train_epoch",
@@ -386,6 +411,7 @@ def train_and_calibrate_flow(
                 epochs=int(epochs),
                 train_nll=float(train_loss),
                 val_nll=float(val_nll),
+                best_val_nll=float(_best_val_nll),
                 lr=float(optimizer.param_groups[0]["lr"]),
             )
 
@@ -401,6 +427,23 @@ def train_and_calibrate_flow(
                 joint_scheduler_state=None,
             )
 
+        # Early stopping: halt if val NLL has not improved for `patience` epochs.
+        if patience > 0 and _epochs_without_improvement >= int(patience):
+            emit_event(
+                "early_stopping",
+                quiet=quiet,
+                epoch=int(epoch),
+                patience=int(patience),
+                best_val_nll=float(_best_val_nll),
+            )
+            break
+
+    # Restore the best generalising weights before final scoring and saving.
+    if _best_flow_state is not None:
+        flow.load_state_dict(_best_flow_state)
+    if _best_ctx_state is not None:
+        context_encoder.load_state_dict(_best_ctx_state)
+
     if joint_finetune_epochs > 0:
         for p in context_encoder.parameters():
             p.requires_grad = True
@@ -412,7 +455,7 @@ def train_and_calibrate_flow(
         )
         joint_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             joint_optimizer,
-            T_max=100,
+            T_max=max(joint_finetune_epochs, 1),
         )
 
         if (
@@ -576,6 +619,40 @@ def train_and_calibrate_flow(
         else 0.0
     )
 
+    # Per-recording-class score statistics: separates healthy FPR from RF
+    # detection rate so the two are not conflated in the aggregate metric.
+    full_rids = full_dataset.recording_id.astype(str)
+    recording_class_stats: dict[str, dict[str, float | int]] = {}
+    for uid in sorted(np.unique(full_rids)):
+        uid_mask = full_rids == uid
+        uid_scores = full_scores[uid_mask]
+        uid_n_flagged = int(np.sum(uid_scores > float(threshold)))
+        uid_n = int(uid_scores.shape[0])
+        recording_class_stats[uid] = {
+            "n_windows": uid_n,
+            "score_mean": float(np.mean(uid_scores)),
+            "score_std": float(np.std(uid_scores)),
+            "n_flagged": uid_n_flagged,
+            "flag_rate": float(uid_n_flagged) / float(uid_n) if uid_n > 0 else 0.0,
+        }
+    healthy_mask = np.asarray(
+        [is_healthy_recording_id(r) for r in full_rids], dtype=bool
+    )
+    healthy_full_scores = full_scores[healthy_mask]
+    n_healthy_flagged = int(np.sum(healthy_full_scores > float(threshold)))
+    healthy_fpr = (
+        float(n_healthy_flagged) / float(healthy_full_scores.shape[0])
+        if healthy_full_scores.shape[0] > 0
+        else 0.0
+    )
+    rf_full_scores = full_scores[~healthy_mask]
+    n_rf_flagged = int(np.sum(rf_full_scores > float(threshold)))
+    rf_detection_rate = (
+        float(n_rf_flagged) / float(rf_full_scores.shape[0])
+        if rf_full_scores.shape[0] > 0
+        else 0.0
+    )
+
     emit_event(
         "training_done",
         quiet=quiet,
@@ -649,12 +726,14 @@ def train_and_calibrate_flow(
         "epochs": int(epochs),
         "trained_epochs": int(len(history)),
         "batch_size": int(batch_size),
+        "patience": int(patience),
+        "best_val_nll": float(_best_val_nll),
         "optimizer": {
             "name": "Adam",
             "lr": float(lr),
             "weight_decay": float(weight_decay),
             "scheduler": "CosineAnnealingLR",
-            "t_max": 100,
+            "t_max": int(epochs),
             "grad_clip": float(grad_clip),
         },
         "threshold": float(threshold),
@@ -680,6 +759,9 @@ def train_and_calibrate_flow(
         ),
         "n_full_anomalies": int(n_full_anomalies),
         "full_anomaly_rate": float(full_anomaly_rate),
+        "healthy_fpr": float(healthy_fpr),
+        "rf_detection_rate": float(rf_detection_rate),
+        "recording_class_stats": recording_class_stats,
         "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
         "checkpoint": {
             "path": str(checkpoint_file) if checkpoint_file is not None else None,

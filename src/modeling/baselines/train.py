@@ -71,6 +71,7 @@ OCSVMGamma = Literal["scale", "auto"] | float
 @dataclass(frozen=True)
 class BaselineTrainingArtifacts:
     """Paths of the two files written by train_baseline_model."""
+
     artifact_path: Path
     summary_path: Path
 
@@ -717,6 +718,40 @@ def train_baseline_model(
         else 0.0
     )
 
+    # Per-recording-class score statistics: separates healthy FPR from RF
+    # detection rate so the two are not conflated in the aggregate metric.
+    full_rids = full_dataset.recording_id.astype(str)
+    recording_class_stats: dict[str, dict[str, float | int]] = {}
+    for uid in sorted(np.unique(full_rids)):
+        uid_mask = full_rids == uid
+        uid_scores = eval_scores[uid_mask]
+        uid_n_flagged = int(np.sum(uid_scores > branch.threshold))
+        uid_n = int(uid_scores.shape[0])
+        recording_class_stats[uid] = {
+            "n_windows": uid_n,
+            "score_mean": float(np.mean(uid_scores)),
+            "score_std": float(np.std(uid_scores)),
+            "n_flagged": uid_n_flagged,
+            "flag_rate": float(uid_n_flagged) / float(uid_n) if uid_n > 0 else 0.0,
+        }
+    healthy_mask_full = np.asarray(
+        [is_healthy_recording_id(r) for r in full_rids], dtype=bool
+    )
+    healthy_eval_scores = eval_scores[healthy_mask_full]
+    n_healthy_flagged = int(np.sum(healthy_eval_scores > branch.threshold))
+    healthy_fpr = (
+        float(n_healthy_flagged) / float(healthy_eval_scores.shape[0])
+        if healthy_eval_scores.shape[0] > 0
+        else 0.0
+    )
+    rf_eval_scores = eval_scores[~healthy_mask_full]
+    n_rf_flagged = int(np.sum(rf_eval_scores > branch.threshold))
+    rf_detection_rate = (
+        float(n_rf_flagged) / float(rf_eval_scores.shape[0])
+        if rf_eval_scores.shape[0] > 0
+        else 0.0
+    )
+
     # ----- Persist artifact ------------------------------------------------
     artifact: dict[str, object] = {
         "_meta": stamp_artifact_metadata(artifact_type="baseline"),
@@ -768,6 +803,9 @@ def train_baseline_model(
         **_score_stats(eval_scores, "full_score"),
         "n_full_anomalies": int(n_full_anomalies),
         "full_anomaly_rate": float(full_anomaly_rate),
+        "healthy_fpr": float(healthy_fpr),
+        "rf_detection_rate": float(rf_detection_rate),
+        "recording_class_stats": recording_class_stats,
         "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
         "history": branch.history,
         "artifact_path": str(artifact_path),
