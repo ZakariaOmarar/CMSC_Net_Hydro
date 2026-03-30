@@ -744,13 +744,6 @@ def train_baseline_model(
         if healthy_eval_scores.shape[0] > 0
         else 0.0
     )
-    rf_eval_scores = eval_scores[~healthy_mask_full]
-    n_rf_flagged = int(np.sum(rf_eval_scores > branch.threshold))
-    rf_detection_rate = (
-        float(n_rf_flagged) / float(rf_eval_scores.shape[0])
-        if rf_eval_scores.shape[0] > 0
-        else 0.0
-    )
 
     # ----- Persist artifact ------------------------------------------------
     artifact: dict[str, object] = {
@@ -804,7 +797,6 @@ def train_baseline_model(
         "n_full_anomalies": int(n_full_anomalies),
         "full_anomaly_rate": float(full_anomaly_rate),
         "healthy_fpr": float(healthy_fpr),
-        "rf_detection_rate": float(rf_detection_rate),
         "recording_class_stats": recording_class_stats,
         "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
         "history": branch.history,

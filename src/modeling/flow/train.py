@@ -645,13 +645,6 @@ def train_and_calibrate_flow(
         if healthy_full_scores.shape[0] > 0
         else 0.0
     )
-    rf_full_scores = full_scores[~healthy_mask]
-    n_rf_flagged = int(np.sum(rf_full_scores > float(threshold)))
-    rf_detection_rate = (
-        float(n_rf_flagged) / float(rf_full_scores.shape[0])
-        if rf_full_scores.shape[0] > 0
-        else 0.0
-    )
 
     emit_event(
         "training_done",
@@ -760,7 +753,6 @@ def train_and_calibrate_flow(
         "n_full_anomalies": int(n_full_anomalies),
         "full_anomaly_rate": float(full_anomaly_rate),
         "healthy_fpr": float(healthy_fpr),
-        "rf_detection_rate": float(rf_detection_rate),
         "recording_class_stats": recording_class_stats,
         "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
         "checkpoint": {

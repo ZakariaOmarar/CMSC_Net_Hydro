@@ -32,31 +32,15 @@ class ModelReportRow:
     """
 
     model_name: str
-    anomaly_checkpoint_path: str | None
-    anomaly_summary_path: str | None
     anomaly_threshold: float | None
     anomaly_score_percentile: float | None
     anomaly_healthy_val_score_mean: float | None
     anomaly_healthy_val_score_std: float | None
-    anomaly_full_score_mean: float | None
-    anomaly_full_score_std: float | None
     anomaly_n_full_anomalies: int | None
-    anomaly_full_anomaly_rate: float | None
     anomaly_healthy_fpr: float | None
-    anomaly_rf_detection_rate: float | None
-    mode_checkpoint_path: str | None
-    mode_summary_path: str | None
-    mode_validation_accuracy: float | None
-    mode_validation_macro_f1: float | None
-    mode_cv_accuracy_std: float | None
-    mode_cv_macro_f1_std: float | None
-    mode_cv_folds: int | None
     mode_test_accuracy: float | None
     mode_test_macro_f1: float | None
-    mode_checkpoint_found: bool
     mode_score_for_ranking: float
-    mode_ranking_metric: str
-    anomaly_checkpoint_found: bool
 
 
 _EXPECTED_MODELS = ("cnf", "ocsvm", "lstm_ae", "cnn_ae")
@@ -204,8 +188,6 @@ def _collect_model_reports_from_manifest(
 
     rows.sort(
         key=lambda r: (
-            1 if r.anomaly_checkpoint_found else 0,
-            1 if r.mode_checkpoint_found else 0,
             r.mode_score_for_ranking,
             r.mode_test_accuracy or -1.0,
         ),
@@ -224,23 +206,14 @@ def _as_float_or_none(value: object) -> float | None:
 
 def _ranking_score(
     *,
-    cv_macro_f1_mean: float | None,
     test_macro_f1: float | None,
     test_accuracy: float | None,
-    validation_macro_f1: float | None,
-    validation_accuracy: float | None,
-) -> tuple[float, str]:
-    if cv_macro_f1_mean is not None:
-        return float(cv_macro_f1_mean), "cv_macro_f1_mean"
+) -> float:
     if test_macro_f1 is not None:
-        return float(test_macro_f1), "test_macro_f1"
+        return float(test_macro_f1)
     if test_accuracy is not None:
-        return float(test_accuracy), "test_accuracy"
-    if validation_macro_f1 is not None:
-        return float(validation_macro_f1), "validation_macro_f1"
-    if validation_accuracy is not None:
-        return float(validation_accuracy), "validation_accuracy"
-    return float("-inf"), "none"
+        return float(test_accuracy)
+    return float("-inf")
 
 
 def _build_row(
@@ -256,35 +229,11 @@ def _build_row(
     anomaly_summary = anomaly_summary or {}
     mode_summary = mode_summary or {}
 
-    mode_val_acc = _as_float_or_none(mode_summary.get("validation_accuracy"))
-    if mode_val_acc is None:
-        mode_val_acc = _as_float_or_none(mode_summary.get("best_val_accuracy"))
-
-    mode_val_f1 = _as_float_or_none(mode_summary.get("validation_macro_f1"))
-    if mode_val_f1 is None:
-        mode_val_f1 = _as_float_or_none(mode_summary.get("best_val_macro_f1"))
-
-    cv = mode_summary.get("cv")
-    cv_macro_f1_mean: float | None = None
-    cv_macro_f1_std: float | None = None
-    cv_accuracy_std: float | None = None
-    cv_folds: int | None = None
-    if isinstance(cv, dict):
-        cv_macro_f1_mean = _as_float_or_none(cv.get("macro_f1_mean"))
-        cv_macro_f1_std = _as_float_or_none(cv.get("macro_f1_std"))
-        cv_accuracy_std = _as_float_or_none(cv.get("accuracy_std"))
-        cv_folds_raw = cv.get("n_folds")
-        if isinstance(cv_folds_raw, (int, float, np.integer, np.floating, str)):
-            cv_folds = int(cv_folds_raw)
-
     mode_test_acc = _as_float_or_none(mode_summary.get("test_accuracy"))
     mode_test_f1 = _as_float_or_none(mode_summary.get("test_macro_f1"))
-    score, metric = _ranking_score(
-        cv_macro_f1_mean=cv_macro_f1_mean,
+    score = _ranking_score(
         test_macro_f1=mode_test_f1,
         test_accuracy=mode_test_acc,
-        validation_macro_f1=mode_val_f1,
-        validation_accuracy=mode_val_acc,
     )
 
     n_full_anomalies_raw = anomaly_summary.get("n_full_anomalies")
@@ -296,14 +245,6 @@ def _build_row(
 
     return ModelReportRow(
         model_name=model_name,
-        anomaly_checkpoint_path=(
-            str(anomaly_checkpoint_path)
-            if anomaly_checkpoint_path is not None
-            else None
-        ),
-        anomaly_summary_path=(
-            str(anomaly_summary_path) if anomaly_summary_path is not None else None
-        ),
         anomaly_threshold=_as_float_or_none(anomaly_summary.get("threshold")),
         anomaly_score_percentile=_as_float_or_none(
             anomaly_summary.get("score_percentile")
@@ -314,39 +255,11 @@ def _build_row(
         anomaly_healthy_val_score_std=_as_float_or_none(
             anomaly_summary.get("healthy_val_score_std")
         ),
-        anomaly_full_score_mean=_as_float_or_none(
-            anomaly_summary.get("full_score_mean")
-        ),
-        anomaly_full_score_std=_as_float_or_none(anomaly_summary.get("full_score_std")),
         anomaly_n_full_anomalies=n_full_anomalies,
-        anomaly_full_anomaly_rate=_as_float_or_none(
-            anomaly_summary.get("full_anomaly_rate")
-        ),
         anomaly_healthy_fpr=_as_float_or_none(anomaly_summary.get("healthy_fpr")),
-        anomaly_rf_detection_rate=_as_float_or_none(
-            anomaly_summary.get("rf_detection_rate")
-        ),
-        mode_checkpoint_path=(
-            str(mode_checkpoint_path) if mode_checkpoint_path is not None else None
-        ),
-        mode_summary_path=(
-            str(mode_summary_path) if mode_summary_path is not None else None
-        ),
-        mode_validation_accuracy=mode_val_acc,
-        mode_validation_macro_f1=mode_val_f1,
-        mode_cv_accuracy_std=cv_accuracy_std,
-        mode_cv_macro_f1_std=cv_macro_f1_std,
-        mode_cv_folds=cv_folds,
         mode_test_accuracy=mode_test_acc,
         mode_test_macro_f1=mode_test_f1,
-        mode_checkpoint_found=bool(
-            mode_checkpoint_path is not None and mode_checkpoint_path.exists()
-        ),
         mode_score_for_ranking=float(score),
-        mode_ranking_metric=metric,
-        anomaly_checkpoint_found=bool(
-            anomaly_checkpoint_path is not None and anomaly_checkpoint_path.exists()
-        ),
     )
 
 
@@ -468,8 +381,6 @@ def collect_model_reports(
 
     rows.sort(
         key=lambda r: (
-            1 if r.anomaly_checkpoint_found else 0,
-            1 if r.mode_checkpoint_found else 0,
             r.mode_score_for_ranking,
             r.mode_test_accuracy or -1.0,
         ),
@@ -479,7 +390,7 @@ def collect_model_reports(
 
 
 def to_payload(rows: list[ModelReportRow]) -> dict[str, Any]:
-    n_trained = int(sum(1 for r in rows if r.anomaly_checkpoint_found))
+    n_trained = int(sum(1 for r in rows if r.anomaly_threshold is not None))
     return {
         "n_models": int(len(rows)),
         "n_trained_models": n_trained,
@@ -487,31 +398,14 @@ def to_payload(rows: list[ModelReportRow]) -> dict[str, Any]:
             {
                 "rank": int(i + 1),
                 "model_name": r.model_name,
-                "anomaly_checkpoint_path": r.anomaly_checkpoint_path,
-                "anomaly_summary_path": r.anomaly_summary_path,
                 "anomaly_threshold": r.anomaly_threshold,
                 "anomaly_score_percentile": r.anomaly_score_percentile,
                 "anomaly_healthy_val_score_mean": r.anomaly_healthy_val_score_mean,
                 "anomaly_healthy_val_score_std": r.anomaly_healthy_val_score_std,
-                "anomaly_full_score_mean": r.anomaly_full_score_mean,
-                "anomaly_full_score_std": r.anomaly_full_score_std,
                 "anomaly_n_full_anomalies": r.anomaly_n_full_anomalies,
-                "anomaly_full_anomaly_rate": r.anomaly_full_anomaly_rate,
                 "anomaly_healthy_fpr": r.anomaly_healthy_fpr,
-                "anomaly_rf_detection_rate": r.anomaly_rf_detection_rate,
-                "mode_checkpoint_path": r.mode_checkpoint_path,
-                "mode_summary_path": r.mode_summary_path,
-                "mode_validation_accuracy": r.mode_validation_accuracy,
-                "mode_validation_macro_f1": r.mode_validation_macro_f1,
-                "mode_cv_accuracy_std": r.mode_cv_accuracy_std,
-                "mode_cv_macro_f1_std": r.mode_cv_macro_f1_std,
-                "mode_cv_folds": r.mode_cv_folds,
                 "mode_test_accuracy": r.mode_test_accuracy,
                 "mode_test_macro_f1": r.mode_test_macro_f1,
-                "mode_checkpoint_found": r.mode_checkpoint_found,
-                "mode_score_for_ranking": r.mode_score_for_ranking,
-                "mode_ranking_metric": r.mode_ranking_metric,
-                "anomaly_checkpoint_found": r.anomaly_checkpoint_found,
             }
             for i, r in enumerate(rows)
         ],
