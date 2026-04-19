@@ -1,8 +1,8 @@
 model_type: ocsvm
-latent_root: artifacts/latents
-output_dir: results/ocsvm/anomaly
+latent_root: artifacts/latents_second
+output_dir: results/second/ocsvm/anomaly
 artifact_name: anomaly_model
-feature_set: zc
+feature_set: z
 val_ratio: 0.2
 score_percentile: 99.0
 ocsvm_kernel: rbf

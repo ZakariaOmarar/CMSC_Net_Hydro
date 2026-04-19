@@ -151,6 +151,23 @@ def train_and_calibrate_flow(
         x_test = x_test[:, keep_mask]
         x_full = x_full[:, keep_mask]
 
+    # FlowConfig requires an even feature_dim for chunk-based coupling layers.
+    # If dropping constant features left an odd count, remove the one remaining
+    # feature with the lowest variance (least informative).
+    if x_train.shape[1] % 2 != 0:
+        lowest_var_idx = int(np.argmin(np.std(x_train, axis=0)))
+        even_mask = np.ones(x_train.shape[1], dtype=bool)
+        even_mask[lowest_var_idx] = False
+        x_train = x_train[:, even_mask]
+        x_val = x_val[:, even_mask]
+        x_test = x_test[:, even_mask]
+        x_full = x_full[:, even_mask]
+        dropped_feature_count += 1
+        # Update keep_mask so that feature_keep_indices saved to the artifact
+        # correctly maps the 237-dim raw flat vector to the 176-dim model input.
+        original_drop_idx = int(np.flatnonzero(keep_mask)[lowest_var_idx])
+        keep_mask[original_drop_idx] = False
+
     mean, std = fit_standardizer(x_train)
     x_train_n = apply_standardizer(x_train, mean=mean, std=std)
     x_val_n = apply_standardizer(x_val, mean=mean, std=std)

@@ -38,6 +38,9 @@ class ModelReportRow:
     anomaly_healthy_val_score_std: float | None
     anomaly_n_full_anomalies: int | None
     anomaly_healthy_fpr: float | None
+    fault_n_windows_total: int | None
+    fault_n_detected: int | None
+    fault_detection_rate: float | None
     mode_test_accuracy: float | None
     mode_test_macro_f1: float | None
     mode_score_for_ranking: float
@@ -133,10 +136,16 @@ def _resolve_mode_summary_from_manifest(
 
 
 def _collect_model_reports_from_manifest(
-    *, manifest_path: Path
+    *,
+    manifest_path: Path,
+    fault_positions_root: Path | None = None,
 ) -> list[ModelReportRow]:
     jobs = _read_manifest_jobs(Path(manifest_path))
     lookup = _job_lookup(jobs)
+
+    # Derive artifacts_root from the manifest location for flat-layout fallback
+    manifest_dir = Path(manifest_path).parent
+    artifacts_root_fallback = manifest_dir.parent  # reports/ -> artifacts_root/
 
     rows: list[ModelReportRow] = []
     for model_name in _EXPECTED_MODELS:
@@ -174,6 +183,15 @@ def _collect_model_reports_from_manifest(
             )
         )
 
+        if fault_positions_root is not None:
+            fn_total, fn_det, fn_rate = _collect_fault_stats_nested(
+                Path(fault_positions_root), model_name
+            )
+        else:
+            fn_total, fn_det, fn_rate = _collect_fault_stats_flat(
+                artifacts_root_fallback, model_name
+            )
+
         rows.append(
             _build_row(
                 model_name=model_name,
@@ -183,6 +201,9 @@ def _collect_model_reports_from_manifest(
                 mode_checkpoint_path=mode_ckpt_path,
                 mode_summary_path=mode_summary_path,
                 mode_summary=mode_summary,
+                fault_n_windows_total=fn_total,
+                fault_n_detected=fn_det,
+                fault_detection_rate=fn_rate,
             )
         )
 
@@ -216,6 +237,82 @@ def _ranking_score(
     return float("-inf")
 
 
+def _aggregate_fault_stats(
+    infer_paths: list[Path],
+) -> tuple[int | None, int | None, float | None]:
+    """Sum n_windows and n_anomalies across a list of inference result files.
+
+    Returns (total_windows, total_detected, detection_rate) or (None, None, None)
+    if no readable files are found.
+    """
+    total_windows = 0
+    total_detected = 0
+    found_any = False
+    for p in infer_paths:
+        if not p.exists() or not p.is_file():
+            continue
+        try:
+            blob = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        n_win = blob.get("n_windows")
+        n_anom = blob.get("n_anomalies")
+        if isinstance(n_win, (int, float)) and isinstance(n_anom, (int, float)):
+            total_windows += int(n_win)
+            total_detected += int(n_anom)
+            found_any = True
+    if not found_any:
+        return None, None, None
+    rate = float(total_detected) / float(total_windows) if total_windows > 0 else 0.0
+    return total_windows, total_detected, rate
+
+
+# Maps model family -> infer file names to look for in each fault position dir
+_FAULT_INFER_FILES: dict[str, list[str]] = {
+    "cnf": ["cnf_infer.json"],
+    "ocsvm": ["ocsvm_anomaly_infer.json", "infer_randomfault.json"],
+    "lstm_ae": ["lstm_ae_anomaly_infer.json", "infer_randomfault.json"],
+    "cnn_ae": ["cnn_ae_anomaly_infer.json", "infer_randomfault.json"],
+}
+
+
+def _collect_fault_stats_nested(
+    fault_positions_root: Path, model_name: str
+) -> tuple[int | None, int | None, float | None]:
+    """Aggregate fault detection stats from per-position subdirectories."""
+    candidates = _FAULT_INFER_FILES.get(model_name, [])
+    paths: list[Path] = []
+    if fault_positions_root.is_dir():
+        for pos_dir in sorted(fault_positions_root.iterdir()):
+            if not pos_dir.is_dir():
+                continue
+            for name in candidates:
+                p = pos_dir / name
+                if p.exists():
+                    paths.append(p)
+                    break
+    return _aggregate_fault_stats(paths)
+
+
+def _collect_fault_stats_flat(
+    artifacts_root: Path, model_name: str
+) -> tuple[int | None, int | None, float | None]:
+    """Aggregate fault detection stats from flat anomaly dirs (first dataset)."""
+    candidates = [
+        "randomfault_infer_with_timestamps.json",
+        "infer_randomfault.json",
+    ]
+    paths: list[Path] = []
+    anomaly_dirs = sorted((artifacts_root / model_name).glob("anomaly*"))
+    for anomaly_dir in anomaly_dirs:
+        for name in candidates:
+            p = anomaly_dir / name
+            if p.exists():
+                paths.append(p)
+                break
+    return _aggregate_fault_stats(paths)
+
+
 def _build_row(
     *,
     model_name: str,
@@ -225,6 +322,9 @@ def _build_row(
     mode_checkpoint_path: Path | None,
     mode_summary_path: Path | None,
     mode_summary: dict[str, Any] | None,
+    fault_n_windows_total: int | None = None,
+    fault_n_detected: int | None = None,
+    fault_detection_rate: float | None = None,
 ) -> ModelReportRow:
     anomaly_summary = anomaly_summary or {}
     mode_summary = mode_summary or {}
@@ -257,6 +357,9 @@ def _build_row(
         ),
         anomaly_n_full_anomalies=n_full_anomalies,
         anomaly_healthy_fpr=_as_float_or_none(anomaly_summary.get("healthy_fpr")),
+        fault_n_windows_total=fault_n_windows_total,
+        fault_n_detected=fault_n_detected,
+        fault_detection_rate=fault_detection_rate,
         mode_test_accuracy=mode_test_acc,
         mode_test_macro_f1=mode_test_f1,
         mode_score_for_ranking=float(score),
@@ -338,11 +441,15 @@ def collect_model_reports(
     *,
     artifacts_root: Path,
     manifest_path: Path | None = None,
+    fault_positions_root: Path | None = None,
 ) -> list[ModelReportRow]:
     if manifest_path is not None:
         p = Path(manifest_path)
         if p.exists() and p.is_file():
-            return _collect_model_reports_from_manifest(manifest_path=p)
+            return _collect_model_reports_from_manifest(
+                manifest_path=p,
+                fault_positions_root=fault_positions_root,
+            )
 
     root = Path(artifacts_root)
     rows: list[ModelReportRow] = []
@@ -367,6 +474,13 @@ def collect_model_reports(
             model_name=model_name,
         )
 
+        if fault_positions_root is not None:
+            fn_total, fn_det, fn_rate = _collect_fault_stats_nested(
+                Path(fault_positions_root), model_name
+            )
+        else:
+            fn_total, fn_det, fn_rate = _collect_fault_stats_flat(root, model_name)
+
         rows.append(
             _build_row(
                 model_name=model_name,
@@ -376,6 +490,9 @@ def collect_model_reports(
                 mode_checkpoint_path=mode_ckpt_path,
                 mode_summary_path=mode_summary_path,
                 mode_summary=mode_summary,
+                fault_n_windows_total=fn_total,
+                fault_n_detected=fn_det,
+                fault_detection_rate=fn_rate,
             )
         )
 
@@ -404,6 +521,9 @@ def to_payload(rows: list[ModelReportRow]) -> dict[str, Any]:
                 "anomaly_healthy_val_score_std": r.anomaly_healthy_val_score_std,
                 "anomaly_n_full_anomalies": r.anomaly_n_full_anomalies,
                 "anomaly_healthy_fpr": r.anomaly_healthy_fpr,
+                "fault_n_windows_total": r.fault_n_windows_total,
+                "fault_n_detected": r.fault_n_detected,
+                "fault_detection_rate": r.fault_detection_rate,
                 "mode_test_accuracy": r.mode_test_accuracy,
                 "mode_test_macro_f1": r.mode_test_macro_f1,
             }

@@ -515,11 +515,13 @@ def _run_report_job(
     artifacts_root: Path,
     manifest_path: Path,
     output_path: Path,
+    fault_positions_root: Path | None = None,
 ) -> None:
     p = Path(manifest_path)
     rows = _collect_model_reports(
         artifacts_root=artifacts_root,
         manifest_path=p if p.exists() else None,
+        fault_positions_root=fault_positions_root,
     )
     payload = _report_to_payload(rows)
     payload["source_manifest_path"] = str(p) if p.exists() else None
@@ -589,7 +591,6 @@ def _baseline_train_kwargs(
         "feature_set": str(_g(cfg, "feature_set", "zc")),
         "val_ratio": float(_g(cfg, "val_ratio", 0.2)),
         "score_percentile": float(_g(cfg, "score_percentile", 99.0)),
-        "exclude_randomfault": bool(_g(cfg, "exclude_randomfault", True)),
         "ocsvm_kernel": str(_g(cfg, "ocsvm_kernel", "rbf")),
         "ocsvm_gamma": _g(cfg, "ocsvm_gamma", "scale"),
         "ocsvm_nu": (
@@ -833,6 +834,7 @@ def _build_report_job(
     artifacts_root: Path,
     report_output: Path,
     manifest_path: Path,
+    fault_positions_root: Path | None = None,
 ) -> TrainJob:
     return TrainJob(
         name="Consolidated report",
@@ -840,6 +842,7 @@ def _build_report_job(
             artifacts_root=artifacts_root,
             manifest_path=manifest_path,
             output_path=report_output,
+            fault_positions_root=fault_positions_root,
         ),
         description=f"collect_model_reports -> {report_output}",
         output_dir=str(report_output.parent),
@@ -866,7 +869,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-resume-skip-ok", action="store_true")
     parser.add_argument("--max-retries", type=int, default=0)
     parser.add_argument("--retry-backoff-s", type=float, default=1.0)
-    parser.add_argument("--data-root", default="data/All")
+    parser.add_argument("--data-root", default="data/first_test_dataset/All")
     parser.add_argument("--run-id")
     parser.add_argument("--dry-run", action="store_true")
     return parser

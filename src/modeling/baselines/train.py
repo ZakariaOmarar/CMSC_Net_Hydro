@@ -583,7 +583,6 @@ def train_baseline_model(
     feature_set: FeatureSet = "zc",
     val_ratio: float = 0.2,
     score_percentile: float = 99.0,
-    exclude_randomfault: bool = True,
     ocsvm_kernel: str = "rbf",
     ocsvm_gamma: str | float = "scale",
     ocsvm_nu: float = 0.05,
@@ -611,22 +610,21 @@ def train_baseline_model(
     enable_global_determinism(int(seed))
 
     full_dataset = load_latent_dataset(latent_paths)
-    dataset = full_dataset
 
-    # Optionally remove RandomFault recordings before fitting.
-    if exclude_randomfault:
-        mask = np.asarray(
-            [is_healthy_recording_id(str(r)) for r in dataset.recording_id],
-            dtype=bool,
-        )
-        if not np.any(mask):
-            raise ValueError("No healthy windows remain after RandomFault exclusion.")
-        dataset = LatentDataset(
-            z=dataset.z[mask],
-            c=dataset.c[mask],
-            recording_id=dataset.recording_id[mask],
-            is_transition_window=dataset.is_transition_window[mask],
-        )
+    # Remove RandomFault recordings before fitting — they are anomalous by
+    # definition and must not influence the healthy boundary.
+    mask = np.asarray(
+        [is_healthy_recording_id(str(r)) for r in full_dataset.recording_id],
+        dtype=bool,
+    )
+    if not np.any(mask):
+        raise ValueError("No healthy windows remain after RandomFault exclusion.")
+    dataset = LatentDataset(
+        z=full_dataset.z[mask],
+        c=full_dataset.c[mask],
+        recording_id=full_dataset.recording_id[mask],
+        is_transition_window=full_dataset.is_transition_window[mask],
+    )
 
     x_all = build_features(dataset, feature_set=feature_set)
     rid_all = dataset.recording_id.astype(str)
@@ -634,6 +632,22 @@ def train_baseline_model(
 
     train_mask = np.asarray([r in train_ids for r in rid_all], dtype=bool)
     val_mask = np.asarray([r in val_ids for r in rid_all], dtype=bool)
+
+    # If any recording is entirely absent from training (every window went to
+    # val), fall back to a within-recording split so all modes are represented
+    # in both train and val regardless of how many recordings are present.
+    unique_rids = np.unique(rid_all)
+    if len(unique_rids) > 1 and not np.all(np.isin(unique_rids, list(train_ids))):
+        rng = np.random.default_rng(seed)
+        train_mask = np.ones(rid_all.shape[0], dtype=bool)
+        val_mask = np.zeros(rid_all.shape[0], dtype=bool)
+        for rid_name in unique_rids:
+            idx = np.where(rid_all == rid_name)[0]
+            # Shuffle within recording then take last val_ratio fraction as val.
+            shuffled_idx = rng.permutation(idx)
+            n_val_rec = max(1, int(round(len(shuffled_idx) * val_ratio)))
+            val_mask[shuffled_idx[:n_val_rec]] = True
+            train_mask[shuffled_idx[:n_val_rec]] = False
 
     if not np.any(val_mask):
         rng = np.random.default_rng(seed)
@@ -734,6 +748,7 @@ def train_baseline_model(
             "n_flagged": uid_n_flagged,
             "flag_rate": float(uid_n_flagged) / float(uid_n) if uid_n > 0 else 0.0,
         }
+    # FPR is measured only on healthy (non-RandomFault) windows.
     healthy_mask_full = np.asarray(
         [is_healthy_recording_id(r) for r in full_rids], dtype=bool
     )
@@ -754,7 +769,6 @@ def train_baseline_model(
         "std": std,
         "threshold": float(branch.threshold),
         "score_percentile": float(score_percentile),
-        "exclude_randomfault": bool(exclude_randomfault),
         "input_dim": int(x_train_n.shape[1]),
         "train_ids": sorted(train_ids),
         "val_ids": sorted(val_ids),
@@ -790,7 +804,6 @@ def train_baseline_model(
         "n_val": int(x_val.shape[0]),
         "threshold": float(branch.threshold),
         "score_percentile": float(score_percentile),
-        "exclude_randomfault": bool(exclude_randomfault),
         **_score_stats(branch.healthy_train_scores, "healthy_train_score"),
         **_score_stats(branch.healthy_val_scores, "healthy_val_score"),
         **_score_stats(eval_scores, "full_score"),

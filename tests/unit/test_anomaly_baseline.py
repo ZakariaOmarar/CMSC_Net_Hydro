@@ -56,7 +56,6 @@ def test_baseline_train_and_infer_roundtrip(tmp_path, model_type: str) -> None:
         "feature_set": "zc",
         "val_ratio": 0.2,
         "score_percentile": 95.0,
-        "exclude_randomfault": True,
         "seed": 42,
     }
     if model_type in {"lstm_ae", "cnn_ae"}:
@@ -114,7 +113,6 @@ def test_baseline_infer_can_emit_mode_predictions(tmp_path) -> None:
         feature_set="zc",
         val_ratio=0.2,
         score_percentile=95.0,
-        exclude_randomfault=True,
         seed=42,
     )
 

@@ -35,6 +35,7 @@ from ...features import (
     compute_stft_stack,
 )
 from ...ingestion import RecordingScanner, SegmentLoader
+from ...ingestion.adapters import WavVibrationAdapter
 from .preprocessing import (
     ModelVariant,
     build_segmenter,
@@ -300,6 +301,7 @@ def build_latent_cache(
     encoder_checkpoint: Path | None = None,
     reuse_existing: bool = True,
     log_progress: bool = True,
+    adapter: WavVibrationAdapter | None = None,
 ) -> list[LatentBuildSummary]:
     # Reserved for CLI/API compatibility with the flow trainer.
     _ = context_len, device, encoder_checkpoint
@@ -310,7 +312,7 @@ def build_latent_cache(
     if not groups:
         raise FileNotFoundError(f"No recording groups found under {data_root}")
 
-    loader = SegmentLoader()
+    loader = SegmentLoader(adapter=adapter)
     segmenter = build_segmenter(window_s=window_s, overlap=overlap)
     vib_extractor = VibrationEnvelopeExtractor()
     vib_freq_extractor = VibrationFrequencyExtractor()

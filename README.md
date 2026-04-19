@@ -100,7 +100,7 @@ from pathlib import Path
 from src.modeling.latent.builder import build_latent_cache
 
 summaries = build_latent_cache(
-    data_root=Path("data/All"),
+    data_root=Path("data/first_test_dataset/All"),
     output_dir=Path("artifacts/latents"),
     mode="mic_vibration",
 )
