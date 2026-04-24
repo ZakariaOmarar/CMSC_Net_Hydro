@@ -1,0 +1,239 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CMSC · Fault Localization Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+</head>
+<body>
+    <!-- Toast notification -->
+    <div id="toast-container"></div>
+
+    <!-- Progress Banner -->
+    <div id="progress-banner" class="progress-banner hidden">
+        <div class="progress-spinner"></div>
+        <span id="progress-text">Processing…</span>
+    </div>
+
+    <!-- â”€â”€â”€ Top navigation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
+    <nav id="top-nav">
+        <div class="nav-brand">
+            <svg class="nav-logo-icon" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                <circle cx="12" cy="12" r="10"/>
+                <circle cx="12" cy="12" r="3" fill="currentColor" opacity="0.5"/>
+                <line x1="12" y1="2"  x2="12" y2="6"/>
+                <line x1="12" y1="18" x2="12" y2="22"/>
+                <line x1="2"  y1="12" x2="6"  y2="12"/>
+                <line x1="18" y1="12" x2="22" y2="12"/>
+            </svg>
+            <div>
+                <div class="nav-title">CMSC · Fault Localization</div>
+                <div class="nav-subtitle">Bench-Top Prototype – Second Dataset</div>
+            </div>
+        </div>
+        <div class="nav-tabs">
+            <button class="tab-btn active" data-tab="overview">Overview</button>
+            <button class="tab-btn" data-tab="detection">Detection</button>
+            <button class="tab-btn" data-tab="localization">Localization</button>
+            <button class="tab-btn" data-tab="reports">Reports</button>
+        </div>
+        <div class="nav-status">
+            <span id="health-indicator" class="health-dot health-unknown"></span>
+            <span id="health-text">Connecting…</span>
+            <span class="nav-divider"></span>
+            <span class="state-pill" id="header-state">--</span>
+            <span class="nav-stat" id="header-segments"></span>
+        </div>
+    </nav>
+
+    <!-- â”€â”€â”€ Context bar (always visible) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
+    <div class="context-bar">
+        <div class="context-bar-inner">
+            <span class="context-label">Segment</span>
+            <select id="segment-selector" class="seg-select">
+                <option value="">-- No segments --</option>
+            </select>
+            <span class="context-sep"></span>
+            <div class="context-status">
+                <span id="status-text">Ready</span>
+                <div id="status-spinner" class="spinner hidden"></div>
+            </div>
+            <div class="context-flex"></div>
+            <button id="btn-train" class="btn btn-accent">⚡Train Models</button>
+            <span id="train-status" class="train-badge badge-not-trained">Not Trained</span>
+        </div>
+    </div><!-- /context-bar -->
+
+    <div id="app-main">
+
+        <!-- TAB 1 - OVERVIEW -->
+        <div class="tab-page tab-active" id="tab-overview">
+            <div class="kpi-row">
+                <div class="kpi-card">
+                    <div class="kpi-label">System Health</div>
+                    <div class="kpi-value" id="header-health">--<span class="kpi-unit">%</span></div>
+                </div>
+                <div class="kpi-card kpi-healthy">
+                    <div class="kpi-label">Healthy Segments</div>
+                    <div class="kpi-value" id="kpi-healthy">--</div>
+                </div>
+                <div class="kpi-card kpi-fault">
+                    <div class="kpi-label">Fault Positions</div>
+                    <div class="kpi-value" id="kpi-faults">--</div>
+                </div>
+                <div class="kpi-card kpi-loc">
+                    <div class="kpi-label">Best Loc. Error</div>
+                    <div class="kpi-value" id="kpi-best-error">--<span class="kpi-unit"> cm</span></div>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-header">
+                    <h2>Operating State Timeline</h2>
+                    <span class="card-hint">Click a bar to select a segment</span>
+                </div>
+                <div id="timeline-chart" class="timeline-chart"></div>
+            </div>
+            <div class="two-col-grid">
+                <div class="card">
+                    <div class="card-header">
+                        <h2>Machine Cross-Section</h2>
+                        <span class="card-hint">X-Y top view</span>
+                    </div>
+                    <div id="machine-diagram" class="machine-diagram">
+                        <div class="placeholder-text">Select a segment</div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header">
+                        <h2>Fault Position Estimates</h2>
+                        <span class="card-hint">3-D scatter - all methods</span>
+                    </div>
+                    <div id="anomaly-region-chart" class="chart-3d">
+                        <div class="placeholder-text">Select a fault segment</div>
+                    </div>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-header"><h2>Alert Feed</h2></div>
+                <div id="alert-feed" class="alert-feed">
+                    <div class="placeholder-text">No alerts</div>
+                </div>
+            </div>
+        </div><!-- /tab-overview -->
+
+        <!-- TAB 2 - DETECTION -->
+        <div class="tab-page" id="tab-detection">
+            <div class="two-col-grid">
+                <div class="card">
+                    <div class="card-header">
+                        <h2>Anomaly Detection</h2>
+                        <span class="card-hint">Segment: <span id="det-seg-label">--</span></span>
+                    </div>
+                    <div id="detection-content" class="detection-content">
+                        <div class="placeholder-text">Select a segment</div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header">
+                        <h2>Anomaly Scores</h2>
+                    </div>
+                    <div id="anomaly-scores-chart" class="detection-content">
+                        <div class="placeholder-text">Train models to view scores</div>
+                    </div>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-header">
+                    <h2>Models Status</h2>
+                    <div class="card-header-actions">
+                        <button id="btn-train-det" class="btn btn-accent btn-sm">Train</button>
+                        <span id="train-status-det" class="train-badge badge-not-trained">Not Trained</span>
+                        <button id="btn-refresh-models" class="btn btn-sm">Refresh</button>
+                    </div>
+                </div>
+                <div id="models-status-grid" class="models-status-grid">
+                    <div class="placeholder-text">No model data</div>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-header">
+                    <h2>System Alerts</h2>
+                    <button id="btn-refresh-alerts" class="btn btn-sm">Refresh</button>
+                </div>
+                <div id="alerts-content">
+                    <table id="alerts-table">
+                        <thead>
+                            <tr>
+                                <th>Position / Time</th>
+                                <th>Level</th>
+                                <th>Method</th>
+                                <th>Message</th>
+                            </tr>
+                        </thead>
+                        <tbody id="alerts-tbody">
+                            <tr class="empty-row"><td colspan="4">No alerts</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div><!-- /tab-detection -->
+
+        <!-- TAB 3 - LOCALIZATION -->
+        <div class="tab-page" id="tab-localization">
+            <div class="two-col-grid">
+                <div class="card">
+                    <div class="card-header">
+                        <h2>Fault Position - 3D View</h2>
+                        <span class="card-hint">All methods</span>
+                    </div>
+                    <div id="localization-content" class="localization-content">
+                        <div class="placeholder-text">Select a fault segment</div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header">
+                        <h2>Machine Cross-Section</h2>
+                        <span class="card-hint">X-Y top view</span>
+                    </div>
+                    <div id="machine-diagram-loc" class="machine-diagram">
+                        <div class="placeholder-text">Select a segment</div>
+                    </div>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-header"><h2>Localization Results</h2></div>
+                <div id="localization-table-content">
+                    <div class="placeholder-text">Select a segment</div>
+                </div>
+            </div>
+        </div><!-- /tab-localization -->
+
+        <!-- TAB 4 - REPORTS -->
+        <div class="tab-page" id="tab-reports">
+            <div class="card">
+                <div class="card-header">
+                    <h2>Localization Error by Method</h2>
+                    <button id="btn-refresh-reports" class="btn btn-sm">Refresh</button>
+                </div>
+                <div id="reports-error-chart" style="min-height:260px">
+                    <div class="placeholder-text">No report data</div>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-header"><h2>Per-Segment Report</h2></div>
+                <div id="reports-table-content">
+                    <div class="placeholder-text">No report data</div>
+                </div>
+            </div>
+        </div><!-- /tab-reports -->
+
+    </div><!-- /app-main -->
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
