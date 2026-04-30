@@ -1,32 +1,31 @@
-"""Second test dataset full pipeline orchestrator — mirrors train_all.py.
+"""Third test dataset full pipeline orchestrator — mirrors second_dataset_eval.py.
 
-Runs the complete sequence on data/second_test_dataset/:
+Runs the complete sequence on data/third_test_dataset/:
 
-  Stage 0  Latent build       — features extracted from Pump/Turbine/Standstill
-                                 recordings (5-mic, 5-accel) → artifacts/latents_second
-  Stage 1  Fault latents      — per-position latents from RandomFault/ subfolders
-                                 → artifacts/latents_second_fault/<pos_folder>/
+  Stage 0  Latent build       — features extracted from speed1/speed2/speed3
+                                 recordings (9-mic, 4-accel) → artifacts/latents_third
+  Stage 1  Fault latents      — latent for hit_between_Fl_Gr_speed1
+                                 → artifacts/latents_third_fault/<fault_folder>/
   Stage 2  Anomaly train      — CNF, OC-SVM (×4), LSTM-AE, CNN-AE on normal latents
   Stage 3  Mode train         — one mode classifier per anomaly model family
-  Stage 4  Anomaly infer      — per-fault-position inference for all model families
-  Stage 5  Localization train — train LocalizationCNNS2 on RandomFault recordings
-  Stage 6  Localization       — GCC-PHAT + SRP-PHAT + neural per fault-position folder
+  Stage 4  Localization train — train LocalizationCNNS3 on fault recording
+  Stage 5  Anomaly infer      — per-fault-folder inference for all model families
+  Stage 6  Localization       — SRP-PHAT(36) + TDOA(36) + S3 neural + S2 zero-shot
   Stage 7  Reporting          — consolidated JSON + manifest
 
-Dataset layout (data_root defaults to data/second_test_dataset):
+Dataset layout (data_root defaults to data/third_test_dataset):
 
   data_root/
-    node_position.txt
-    Pump/         recorded_{D,E,F,G,I}.wav  +  vibration_{A,B,C,D,E}.csv
-    Turbine/      (same layout)
-    Standstill/   (same layout)
-    RandomFault/
-      pos_(x,y,z)_<mode>[_<mode>]/  ← ground-truth position encoded in name
-        recorded_{D,E,F,G,I}.wav
-        vibration_{A,B,C,D,E}.csv
+    position.json
+    speed1/    recorded_{D_l,D_r,E,F_l,F_r,G_l,G_r,J_l,J_r}.wav
+               vibration_{D,E,F,J}.csv
+    speed2/    (same layout)
+    speed3/    (same layout)
+    hit_between_Fl_Gr_speed1/   (same layout — fault recording)
 
-Sensor geometry: S2_MIC_XYZ / S2_VIB_XYZ / S2_FAULT_POSITIONS_M
- in src/modeling/localization/localization_head.py — all in metres.
+Sensor geometry: S3_MIC_XYZ / S3_VIB_XYZ in localization_head.py (metres).
+9 mics (36 pairs) vs 5 mics (10 pairs) in S2 — demonstrates improved spatial
+coverage in a harder environment (fan background noise).
 """
 
 from __future__ import annotations
@@ -47,31 +46,38 @@ import numpy as np
 from ...ingestion.adapters import WavVibrationAdapter
 from ...modeling.localization.localization_head import (
     MIC_PAIRS_S2,
-    N_PAIRS_S2,
-    S2_FAULT_POSITIONS_M,
-    S2_MIC_XYZ,
-    S2_VIB_XYZ,
-    VIB_PAIRS_S2,
-    N_VIB_PAIRS_S2,
+    MIC_PAIRS_S3,
+    N_PAIRS_S3,
+    S3_MIC_XYZ,
+    S3_VIB_XYZ,
+    VIB_PAIRS_S3,
+    N_VIB_PAIRS_S3,
+    S3_HIT_FL_GR_APPROX_M,
+    S3_ZERO_SHOT_MIC_INDICES,
+    _S3_MAX_DELAY_SAMPLES,
+    _S3_GCC_LENGTH,
+    _S3_MAX_MIC_DIST_M,
     _S2_MAX_DELAY_SAMPLES,
-    _S2_GCC_LENGTH,
-    _S2_MAX_MIC_DIST_M,
     gcc_phat,
+    compute_gcc_stack_s3_multiwindow,
     compute_gcc_stack_s2_multiwindow,
     compute_gcc_stack_structural_multiwindow,
     structural_srp_phat_3d,
     synthetic_gcc_stack,
     C_STRUCT_MS,
+    LocalizationCNNS3,
     LocalizationCNNS2,
     LocalizationDualSRPNet,
     dual_srp_localization_loss,
+    supervised_localization_loss_s3,
+    geometric_consistency_loss_s3,
+    srp_phat_3d_hierarchical,
+    srp_phat_3d as _srp_phat_3d_s3_gen,
+    tdoa_triangulate,
     information_fusion,
     srp_covariance,
     tdoa_covariance,
     neural_covariance,
-    srp_phat_3d_hierarchical as _srp_phat_3d_hierarchical_generic,
-    srp_phat_3d as _srp_phat_3d_gen,
-    tdoa_triangulate as _tdoa_triangulate_generic,
 )
 from ..cli import load_yaml_config
 from ..core import JobResult, JobStatus, StageRollup
@@ -123,172 +129,72 @@ from .train_all import (
 from ..latent.builder import build_latent_cache as _build_latent_cache
 
 # ---------------------------------------------------------------------------
-# Folder name parsing helpers
+# Dataset layout constants
 # ---------------------------------------------------------------------------
 
-_POS_RE = re.compile(
-    r"^pos_\((?P<x>[\d.]+),(?P<y>[\d.]+),(?P<z>[\d.]+)\)_(?P<modes>.+)$",
-    re.IGNORECASE,
-)
+_S3_NORMAL_MODES: frozenset[str] = frozenset({"speed1", "speed2", "speed3"})
+
+# TDOA optimisation bounds: slightly relaxed vs S2 to accommodate S3's
+# larger physical spread (max ~14 cm across mics converted to metres).
+_S3_TDOA_BOUNDS: list[tuple[float, float]] = [
+    (-0.05, 0.20),   # x: Fl/Fr at x=0..6 cm → 0..0.06 m + margin
+    (-0.10, 0.15),   # y: range −5..5 cm → −0.05..0.05 m + margin
+    (-0.02, 0.12),   # z: range 1..8 cm → 0.01..0.08 m + margin
+]
 
 
-def _parse_position_folder(name: str) -> tuple[np.ndarray | None, list[str]]:
-    m = _POS_RE.match(name)
-    if m is None:
-        return None, []
-    xyz = np.array(
-        [float(m.group("x")), float(m.group("y")), float(m.group("z"))],
-        dtype=np.float64,
-    )
-    modes = [s.strip() for s in m.group("modes").split("_") if s.strip()]
-    return xyz, modes
-
-
-def _folder_key(name: str) -> str:
-    m = _POS_RE.match(name)
-    if m is None:
-        return name
-    return f"pos_({m.group('x')},{m.group('y')},{m.group('z')})"
-
-
-def _pos_dirs(rf_root: Path) -> list[Path]:
-    if not rf_root.is_dir():
+def _s3_fault_dirs(data_root: Path) -> list[Path]:
+    """Return all subdirectories that are NOT normal-mode folders."""
+    if not data_root.is_dir():
         return []
-    return sorted(d for d in rf_root.iterdir() if d.is_dir() and _POS_RE.match(d.name))
-
-
-# ---------------------------------------------------------------------------
-# GCC-PHAT / SRP-PHAT helpers for 5-mic array
-# ---------------------------------------------------------------------------
-
-
-def _compute_gcc_stack_s2(
-    mic_data: np.ndarray,
-    fs: float,
-    max_dist_m: float = _S2_MAX_MIC_DIST_M,
-    c: float = 343.0,
-) -> np.ndarray:
-    max_delay = int(max_dist_m / c * fs)
-    rows: list[np.ndarray] = []
-    for i, j in MIC_PAIRS_S2:
-        rows.append(gcc_phat(mic_data[i], mic_data[j], max_delay))
-    return np.stack(rows, axis=0)
-
-
-def _srp_phat_3d_hierarchical(
-    gcc_stack: np.ndarray,
-    mic_xyz: np.ndarray,
-    lo: np.ndarray,
-    hi: np.ndarray,
-    coarse_res: float = 0.02,
-    fine_res: float = 0.005,
-    fine_margin: float = 0.05,
-    fs: float = 16000.0,
-    c: float = 343.0,
-) -> tuple[np.ndarray, float]:
-    """S2 wrapper: hierarchical SRP-PHAT fixed to MIC_PAIRS_S2."""
-    return _srp_phat_3d_hierarchical_generic(
-        gcc_stack, mic_xyz, lo, hi,
-        coarse_res=coarse_res, fine_res=fine_res, fine_margin=fine_margin,
-        fs=fs, c=c, mic_pairs=MIC_PAIRS_S2,
+    return sorted(
+        d
+        for d in data_root.iterdir()
+        if d.is_dir() and d.name not in _S3_NORMAL_MODES
     )
 
 
-def _srp_phat_3d(
-    gcc_stack: np.ndarray,
-    mic_xyz: np.ndarray,
-    grid_x: np.ndarray,
-    grid_y: np.ndarray,
-    grid_z: np.ndarray,
-    fs: float,
-    c: float = 343.0,
-) -> np.ndarray:
-    """S2 wrapper: vectorised SRP-PHAT fixed to MIC_PAIRS_S2."""
-    return _srp_phat_3d_gen(
-        gcc_stack, mic_xyz, grid_x, grid_y, grid_z, fs=fs, c=c,
-        mic_pairs=MIC_PAIRS_S2,
-    )
+def _parse_s3_fault_folder(name: str) -> tuple[np.ndarray | None, list[str]]:
+    """Parse operating mode(s) from a S3 fault folder name.
 
+    For hit_between_Fl_Gr_speed1 → modes = ["speed1"], approx_gt = S3_HIT_FL_GR_APPROX_M
+    For unknown patterns → modes = [name], approx_gt = None.
+    """
+    # hit_between_Fl_Gr_speed<N> — extract operating speed from suffix
+    m = re.search(r"(speed\d+)", name, re.IGNORECASE)
+    modes = [m.group(1)] if m else [name]
 
-def _tdoa_triangulate(
-    gcc_stack: np.ndarray,
-    mic_xyz: np.ndarray,
-    srp_init_m: np.ndarray,
-    fs: float,
-    c: float = 343.0,
-) -> tuple[np.ndarray, float]:
-    """S2 wrapper: TDOA non-linear LS fixed to MIC_PAIRS_S2 and S2 geometry bounds."""
-    return _tdoa_triangulate_generic(
-        gcc_stack, mic_xyz, srp_init_m, fs, c,
-        mic_pairs=MIC_PAIRS_S2,
-        bounds=[(-0.10, 0.30), (-0.10, 0.60), (-0.10, 0.40)],
-    )
-
-
-def _estimate_position_from_wav(
-    mic_data: np.ndarray,
-    fs: float,
-    *,
-    grid_resolution_m: float = 0.02,
-    c: float = 343.0,
-    window_s: float = 1.0,
-    hop_s: float = 0.5,
-) -> tuple[np.ndarray, float]:
-    mic_xyz = S2_MIC_XYZ[: min(5, mic_data.shape[0])]
-
-    # Multi-window averaged GCC (short-window PHAT + time averaging)
-    gcc_stack = compute_gcc_stack_s2_multiwindow(
-        mic_data[: mic_xyz.shape[0]],
-        fs=fs,
-        window_s=window_s,
-        hop_s=hop_s,
-        c=c,
-    )
-
-    margin = 0.10
-    lo = mic_xyz.min(axis=0) - margin
-    hi = mic_xyz.max(axis=0) + margin
-
-    # Hierarchical SRP-PHAT: coarse at grid_resolution_m, fine at /4
-    estimated, srp_peak = _srp_phat_3d_hierarchical(
-        gcc_stack,
-        mic_xyz,
-        lo,
-        hi,
-        coarse_res=grid_resolution_m,
-        fine_res=grid_resolution_m / 4.0,
-        fine_margin=0.06,
-        fs=fs,
-        c=c,
-    )
-    return estimated, srp_peak
+    # Approx GT: centroid of Fl and Gr mic positions for "hit_between_Fl_Gr"
+    if "Fl" in name and "Gr" in name:
+        return S3_HIT_FL_GR_APPROX_M.copy(), modes
+    return None, modes
 
 
 # ---------------------------------------------------------------------------
-# S2-adapter factory  (5 mics, 5 accels)
+# S3-adapter factory  (9 mics, 4 accels)
 # ---------------------------------------------------------------------------
 
 
-def _s2_adapter() -> WavVibrationAdapter:
-    return WavVibrationAdapter(allowed_mic_counts=(5,), expected_accel_count=5)
+def _s3_adapter() -> WavVibrationAdapter:
+    return WavVibrationAdapter(allowed_mic_counts=(9,), expected_accel_count=4)
 
 
 # ---------------------------------------------------------------------------
-# Operating-mode one-hot helpers for S2 (Pump / Turbine / Standstill)
+# Operating-mode one-hot helpers for S3 (speed1 / speed2 / speed3)
 # ---------------------------------------------------------------------------
 
-_S2_MODE_LABELS: list[str] = ["Pump", "Turbine", "Standstill"]
+_S3_MODE_LABELS: list[str] = ["speed1", "speed2", "speed3"]
 
 
-def _s2_mode_vec(modes: list[str]) -> np.ndarray:
+def _s3_mode_vec(modes: list[str]) -> np.ndarray:
     """One-hot mode vector for LocalizationDualSRPNet FiLM conditioning."""
-    vec = np.zeros(len(_S2_MODE_LABELS), dtype=np.float32)
+    vec = np.zeros(len(_S3_MODE_LABELS), dtype=np.float32)
     for mode in modes:
-        for i, label in enumerate(_S2_MODE_LABELS):
+        for i, label in enumerate(_S3_MODE_LABELS):
             if label.lower() in mode.lower():
                 vec[i] = 1.0
     if vec.sum() == 0.0:
-        vec[0] = 1.0  # default to Pump when mode unknown
+        vec[0] = 1.0  # default to speed1 when mode unknown
     return vec
 
 
@@ -344,7 +250,7 @@ def _load_raw_vib_waveforms(
         return np.zeros((0, 1), dtype=np.float32), fallback_sr_hz
 
     min_len = min(len(ch) for ch in amp_channels)
-    vib_data = np.stack([ch[:min_len] for ch in amp_channels])  # (n_vib, N)
+    vib_data = np.stack([ch[:min_len] for ch in amp_channels])
 
     ts_arr = np.asarray(timestamps_ref[:min_len], dtype=np.float64)
     if len(ts_arr) > 1:
@@ -356,12 +262,28 @@ def _load_raw_vib_waveforms(
     return vib_data, max(float(sr), fallback_sr_hz)
 
 
+def _srp_phat_3d_s3(
+    gcc_stack: np.ndarray,
+    mic_xyz: np.ndarray,
+    grid_x: np.ndarray,
+    grid_y: np.ndarray,
+    grid_z: np.ndarray,
+    fs: float,
+    c: float = 343.0,
+) -> np.ndarray:
+    """S3 wrapper: vectorised SRP-PHAT fixed to MIC_PAIRS_S3."""
+    return _srp_phat_3d_s3_gen(
+        gcc_stack, mic_xyz, grid_x, grid_y, grid_z, fs=fs, c=c,
+        mic_pairs=MIC_PAIRS_S3,
+    )
+
+
 # ---------------------------------------------------------------------------
 # DualSRPNet inference helper
 # ---------------------------------------------------------------------------
 
 
-def _run_dual_srp_inference(
+def _run_dual_srp_inference_s3(
     srp_ac_map: np.ndarray,
     srp_str_map: np.ndarray,
     mode_vec: np.ndarray,
@@ -385,9 +307,9 @@ def _run_dual_srp_inference(
     ac_n = srp_ac_map / (float(srp_ac_map.max()) + 1e-6)
     str_n = srp_str_map / (float(srp_str_map.max()) + 1e-6)
 
-    ac_t = torch.from_numpy(ac_n).unsqueeze(0).float()    # (1, Nx, Ny, Nz)
-    str_t = torch.from_numpy(str_n).unsqueeze(0).float()  # (1, Nx, Ny, Nz)
-    mv_t = torch.from_numpy(mode_vec).unsqueeze(0).float() # (1, n_modes)
+    ac_t = torch.from_numpy(ac_n).unsqueeze(0).float()
+    str_t = torch.from_numpy(str_n).unsqueeze(0).float()
+    mv_t = torch.from_numpy(mode_vec).unsqueeze(0).float()
 
     with torch.no_grad():
         pos_t, log_std_t = model(ac_t, str_t, mv_t)
@@ -396,11 +318,59 @@ def _run_dual_srp_inference(
 
 
 # ---------------------------------------------------------------------------
-# In-process runners specific to second dataset
+# S3 GCC helper (multi-window, all 36 pairs)
 # ---------------------------------------------------------------------------
 
 
-def _run_latent_build_job_s2(
+def _compute_gcc_stack_s3(
+    mic_data: np.ndarray,
+    fs: float,
+    window_s: float = 1.0,
+    hop_s: float = 0.5,
+    c: float = 343.0,
+) -> np.ndarray:
+    """Wrapper: multi-window S3 GCC stack (36 pairs, shape (36, L_s3))."""
+    return compute_gcc_stack_s3_multiwindow(
+        mic_data, fs=fs, window_s=window_s, hop_s=hop_s, c=c
+    )
+
+
+def _estimate_position_s3(
+    mic_data: np.ndarray,
+    fs: float,
+    *,
+    grid_resolution_m: float = 0.02,
+    c: float = 343.0,
+    window_s: float = 1.0,
+    hop_s: float = 0.5,
+) -> tuple[np.ndarray, float]:
+    """SRP-PHAT on S3's 9-mic geometry (36 pairs, hierarchical grid search)."""
+    gcc_stack = _compute_gcc_stack_s3(
+        mic_data[: S3_MIC_XYZ.shape[0]], fs=fs, window_s=window_s, hop_s=hop_s, c=c
+    )
+    margin = 0.10
+    lo = S3_MIC_XYZ.min(axis=0) - margin
+    hi = S3_MIC_XYZ.max(axis=0) + margin
+    return srp_phat_3d_hierarchical(
+        gcc_stack,
+        S3_MIC_XYZ,
+        lo,
+        hi,
+        coarse_res=grid_resolution_m,
+        fine_res=grid_resolution_m / 4.0,
+        fine_margin=0.06,
+        fs=fs,
+        c=c,
+        mic_pairs=MIC_PAIRS_S3,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Latent build runner (per speed folder)
+# ---------------------------------------------------------------------------
+
+
+def _run_latent_build_job_s3(
     *,
     data_root: Path,
     output_dir: Path,
@@ -422,11 +392,16 @@ def _run_latent_build_job_s2(
         n_mfcc=n_mfcc,
         n_fft=n_fft,
         hop_length=hop_length,
-        adapter=_s2_adapter(),
+        adapter=_s3_adapter(),
     )
 
 
-def _run_flow_infer_job_s2(
+# ---------------------------------------------------------------------------
+# Anomaly inference runners (reuse S2 logic, identical interface)
+# ---------------------------------------------------------------------------
+
+
+def _run_flow_infer_job_s3(
     *,
     artifact_path: Path,
     latent_root: Path,
@@ -545,7 +520,7 @@ def _run_flow_infer_job_s2(
     output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
-def _run_baseline_infer_job_s2(
+def _run_baseline_infer_job_s3(
     *,
     artifact_path: Path,
     latent_root: Path,
@@ -596,67 +571,61 @@ def _run_baseline_infer_job_s2(
     output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
-_LOC_TRAIN_POS_RE = re.compile(
-    r"^pos_\((?P<x>[\d.]+),(?P<y>[\d.]+),(?P<z>[\d.]+)\)", re.IGNORECASE
-)
+# ---------------------------------------------------------------------------
+# LocalizationCNNS3 training
+# ---------------------------------------------------------------------------
 
 
-def _run_localization_train_job(
+def _run_localization_train_job_s3(
     *,
     data_root: Path,
     output_path: Path,
-    epochs: int = 400,
+    epochs: int = 600,
     lr: float = 1e-3,
     batch_size: int = 16,
     val_ratio: float = 0.25,
     window_s: float = 1.0,
     hop_s: float = 0.25,
-    geo_consistency_weight: float = 0.05,
+    geo_consistency_weight: float = 0.25,
     d_model: int = 64,
     dropout: float = 0.1,
-    patience: int = 100,
+    patience: int = 150,
     seed: int = 42,
     device_name: str = "cpu",
 ) -> dict:
-    """Train LocalizationCNNS2 on second-dataset RandomFault recordings."""
+    """Train LocalizationCNNS3 on the third-dataset fault recording(s).
+
+    With only one ground-truth fault position, the geometric consistency loss
+    (physics-based, label-free) carries significant weight (default 0.25) to
+    complement the supervised MSE signal.
+    """
     import torch
     import torch.optim as optim
-    from ...modeling.localization.localization_head import (
-        supervised_localization_loss_s2,
-        geometric_consistency_loss_s2,
-    )
 
     rng = np.random.default_rng(seed)
     torch.manual_seed(seed)
 
-    adapter = WavVibrationAdapter(allowed_mic_counts=(5,), expected_accel_count=5)
-    rf_root = data_root / "RandomFault"
+    adapter = _s3_adapter()
+    fault_dirs = _s3_fault_dirs(data_root)
 
-    print(f"\n[LocalizationCNNS2 training] data_root={data_root}")
+    print(f"\n[LocalizationCNNS3 training] data_root={data_root}")
     print(f"  d_model={d_model}, window_s={window_s}s, hop_s={hop_s}s")
-    print(f"  epochs={epochs}, lr={lr}, batch_size={batch_size}")
+    print(f"  epochs={epochs}, lr={lr}, geo_weight={geo_consistency_weight}")
 
-    # Collect GCC windows from all fault positions
     X_list: list[np.ndarray] = []
     y_list: list[np.ndarray] = []
-    for pos_dir in sorted(rf_root.iterdir()):
-        if not pos_dir.is_dir():
+    for fault_dir in fault_dirs:
+        approx_gt_m, _ = _parse_s3_fault_folder(fault_dir.name)
+        if approx_gt_m is None:
+            print(f"  [skip] {fault_dir.name}: no GT position inferred from name")
             continue
-        m = _LOC_TRAIN_POS_RE.match(pos_dir.name)
-        if m is None:
-            continue
-        gt_m = (
-            np.array(
-                [float(m.group("x")), float(m.group("y")), float(m.group("z"))],
-                dtype=np.float32,
-            )
-            / 100.0
-        )
+        gt_m = approx_gt_m.astype(np.float32)
         try:
-            segment = adapter.read_recording_directory(pos_dir)
+            segment = adapter.read_recording_directory(fault_dir)
         except Exception as exc:
-            print(f"  [skip] {pos_dir.name}: {exc}")
+            print(f"  [skip] {fault_dir.name}: {exc}")
             continue
+
         mic_data = segment.mic_data
         fs = float(segment.mic_sample_rate)
         win_samples = int(window_s * fs)
@@ -666,35 +635,38 @@ def _run_localization_train_job(
         while start + win_samples <= mic_data.shape[1]:
             frame = mic_data[:, start : start + win_samples]
             rows = [
-                gcc_phat(frame[i], frame[j], _S2_MAX_DELAY_SAMPLES)
-                for i, j in MIC_PAIRS_S2
+                gcc_phat(frame[i], frame[j], _S3_MAX_DELAY_SAMPLES)
+                for i, j in MIC_PAIRS_S3
             ]
-            X_list.append(np.stack(rows, axis=0))
+            X_list.append(np.stack(rows, axis=0))  # (36, L_s3)
             y_list.append(gt_m)
             n_windows += 1
             start += hop_samples
-        print(f"  {pos_dir.name}: {n_windows} windows  gt=[{gt_m * 100} cm]")
+        print(f"  {fault_dir.name}: {n_windows} windows  gt=[{gt_m * 100} cm]")
 
     if not X_list:
-        raise RuntimeError(f"No recordings found under {rf_root}.")
+        raise RuntimeError(
+            f"No fault recordings with inferable GT found under {data_root}."
+        )
 
     X = np.stack(X_list, axis=0).astype(np.float32)
     y = np.stack(y_list, axis=0).astype(np.float32)
     print(f"  Total windows: {len(X)}  GCC shape: {X.shape}")
 
-    # Compute SRP-PHAT prior for each window (whole-recording peak, stationary source)
+    # SRP-PHAT prior for each window
     print("Computing SRP-PHAT priors ...")
     priors_list: list[np.ndarray] = []
-    for pos_dir in sorted(rf_root.iterdir()):
-        if not pos_dir.is_dir() or _LOC_TRAIN_POS_RE.match(pos_dir.name) is None:
+    for fault_dir in fault_dirs:
+        approx_gt_m, _ = _parse_s3_fault_folder(fault_dir.name)
+        if approx_gt_m is None:
             continue
         try:
-            segment = adapter.read_recording_directory(pos_dir)
+            segment = adapter.read_recording_directory(fault_dir)
         except Exception:
             continue
         mic_data = segment.mic_data
         fs = float(segment.mic_sample_rate)
-        srp_peak_m, _ = _estimate_position_from_wav(
+        srp_peak_m, _ = _estimate_position_s3(
             mic_data, fs, window_s=window_s, hop_s=0.5
         )
         win_samples = int(window_s * fs)
@@ -703,10 +675,11 @@ def _run_localization_train_job(
         while start + win_samples <= mic_data.shape[1]:
             priors_list.append(srp_peak_m.astype(np.float32))
             start += hop_samples
+
     srp_priors = np.stack(priors_list, axis=0)
     print(f"  SRP priors shape: {srp_priors.shape}")
 
-    # Train/val split stratified by position
+    # Train / val split
     unique_positions = np.unique(y, axis=0)
     train_idx: list[int] = []
     val_idx: list[int] = []
@@ -726,9 +699,9 @@ def _run_localization_train_job(
     X_val = torch.from_numpy(X[val_idx]).to(device)
     y_val = torch.from_numpy(y[val_idx]).to(device)
     s_val = torch.from_numpy(srp_priors[val_idx]).to(device)
-    mic_xyz_t = torch.tensor(S2_MIC_XYZ, dtype=torch.float32, device=device)
+    mic_xyz_t = torch.tensor(S3_MIC_XYZ, dtype=torch.float32, device=device)
 
-    model = LocalizationCNNS2(d_model=d_model, dropout=dropout).to(device)
+    model = LocalizationCNNS3(d_model=d_model, dropout=dropout).to(device)
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=epochs, eta_min=lr / 20
@@ -749,10 +722,10 @@ def _run_localization_train_job(
             if len(idx) == 0:
                 continue
             pred = model(X_tr[idx], s_tr[idx])
-            loss_sup = supervised_localization_loss_s2(pred, y_tr[idx])
+            loss_sup = supervised_localization_loss_s3(pred, y_tr[idx])
             if geo_consistency_weight > 0.0:
-                loss_geo = geometric_consistency_loss_s2(
-                    pred, X_tr[idx], mic_xyz_t, _S2_MAX_DELAY_SAMPLES
+                loss_geo = geometric_consistency_loss_s3(
+                    pred, X_tr[idx], mic_xyz_t, _S3_MAX_DELAY_SAMPLES
                 )
                 loss = loss_sup + geo_consistency_weight * loss_geo
             else:
@@ -767,10 +740,10 @@ def _run_localization_train_job(
         model.eval()
         with torch.no_grad():
             pred_val = model(X_val, s_val)
-            val_sup = supervised_localization_loss_s2(pred_val, y_val).item()
+            val_sup = supervised_localization_loss_s3(pred_val, y_val).item()
             if geo_consistency_weight > 0.0:
-                val_geo = geometric_consistency_loss_s2(
-                    pred_val, X_val, mic_xyz_t, _S2_MAX_DELAY_SAMPLES
+                val_geo = geometric_consistency_loss_s3(
+                    pred_val, X_val, mic_xyz_t, _S3_MAX_DELAY_SAMPLES
                 ).item()
                 val_loss = val_sup + geo_consistency_weight * val_geo
             else:
@@ -785,7 +758,7 @@ def _run_localization_train_job(
                 "val_mae_cm": mae_cm,
             }
         )
-        if epoch % 10 == 0 or epoch == 1:
+        if epoch % 20 == 0 or epoch == 1:
             print(
                 f"  Epoch {epoch:4d}/{epochs}  "
                 f"train={epoch_loss / n_batches:.5f}  "
@@ -813,31 +786,11 @@ def _run_localization_train_job(
                 print(f"  Early stopping at epoch {epoch} (patience={patience})")
                 break
 
-    model.load_state_dict(best_state)
-    model.eval()
-    per_pos_errors: list[dict] = []
-    with torch.no_grad():
-        for pos in unique_positions:
-            mask_val = [i for i, vi in enumerate(val_idx) if np.all(y[vi] == pos)]
-            if not mask_val:
-                continue
-            mask_t = torch.tensor(mask_val, device=device)
-            pred_pos = model(X_val[mask_t], s_val[mask_t])
-            errs_cm = torch.norm(pred_pos - y_val[mask_t], dim=-1) * 100.0
-            pos_cm = (pos * 100).round().astype(int).tolist()
-            per_pos_errors.append(
-                {"gt_cm": pos_cm, "mean_error_cm": float(errs_cm.mean().item())}
-            )
-
-    overall_mae = float(np.mean([e["mean_error_cm"] for e in per_pos_errors]))
-    print(f"\nOverall val MAE: {overall_mae:.1f} cm")
-
     artifact = {
         "state_dict": best_state,
         "model_kwargs": {"d_model": d_model, "dropout": dropout},
-        "val_mae_cm": overall_mae,
+        "val_mae_cm": mae_cm,
         "best_val_loss": best_val_loss,
-        "per_position_errors": per_pos_errors,
         "hp": {
             "epochs": epochs,
             "lr": lr,
@@ -851,116 +804,116 @@ def _run_localization_train_job(
     }
     output_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(artifact, str(output_path))
-    print(f"\nSaved: {output_path}")
+    print(f"\nSaved LocalizationCNNS3: {output_path}")
     return artifact
 
 
-def _run_dual_srp_train_job(
+# ---------------------------------------------------------------------------
+# LocalizationDualSRPNet training for S3
+# ---------------------------------------------------------------------------
+
+
+def _run_dual_srp_train_job_s3(
     *,
     data_root: Path,
     output_path: Path,
-    epochs: int = 400,
+    epochs: int = 600,
     lr: float = 1e-3,
-    batch_size: int = 8,
+    batch_size: int = 4,
     val_ratio: float = 0.25,
     grid_resolution_m: float = 0.02,
     n_modes: int = 3,
     d_film: int = 32,
     dropout: float = 0.1,
-    patience: int = 80,
+    patience: int = 100,
     seed: int = 42,
     device_name: str = "cpu",
     c: float = 343.0,
-    n_augment: int = 16,
-    n_synth: int = 300,
+    n_augment: int = 24,
+    n_synth: int = 200,
 ) -> dict:
-    """Train LocalizationDualSRPNet on S2 RandomFault (acoustic + structural SRP maps + FiLM)."""
+    """Train LocalizationDualSRPNet on S3 fault data (acoustic + structural SRP + FiLM).
+
+    S3 has very few fault recordings (typically one), so physics-based synthetic
+    samples (n_synth=200) are generated at random grid positions to provide spatial
+    diversity in training while keeping the real recording in val only.
+    """
     import torch
     import torch.optim as optim
 
     rng = np.random.default_rng(seed)
     torch.manual_seed(seed)
 
-    adapter = WavVibrationAdapter(allowed_mic_counts=(5,), expected_accel_count=5)
-    rf_root = data_root / "RandomFault"
+    adapter = _s3_adapter()
+    fault_dirs = _s3_fault_dirs(data_root)
 
-    lo = S2_MIC_XYZ.min(axis=0) - 0.10
-    hi = S2_MIC_XYZ.max(axis=0) + 0.10
+    lo = S3_MIC_XYZ.min(axis=0) - 0.10
+    hi = S3_MIC_XYZ.max(axis=0) + 0.10
     grid_x = np.arange(lo[0], hi[0] + grid_resolution_m, grid_resolution_m)
     grid_y = np.arange(lo[1], hi[1] + grid_resolution_m, grid_resolution_m)
     grid_z = np.arange(lo[2], hi[2] + grid_resolution_m, grid_resolution_m)
 
-    print(f"\n[LocalizationDualSRPNet training] data_root={data_root}")
+    print(f"\n[LocalizationDualSRPNet S3 training] data_root={data_root}")
     print(f"  grid: {len(grid_x)}×{len(grid_y)}×{len(grid_z)}, d_film={d_film}")
-    print(f"  epochs={epochs}, lr={lr}, batch_size={batch_size}, n_augment={n_augment}")
+    print(f"  epochs={epochs}, lr={lr}, n_augment={n_augment}")
 
     ac_maps: list[np.ndarray] = []
     str_maps: list[np.ndarray] = []
     mode_vecs_list: list[np.ndarray] = []
     gt_positions: list[np.ndarray] = []
 
-    for pos_dir in sorted(rf_root.iterdir()):
-        if not pos_dir.is_dir():
+    for fault_dir in fault_dirs:
+        approx_gt_m, modes = _parse_s3_fault_folder(fault_dir.name)
+        if approx_gt_m is None:
+            print(f"  [skip] {fault_dir.name}: no GT position")
             continue
-        m_re = _LOC_TRAIN_POS_RE.match(pos_dir.name)
-        if m_re is None:
-            continue
-        gt_m = (
-            np.array(
-                [float(m_re.group("x")), float(m_re.group("y")), float(m_re.group("z"))],
-                dtype=np.float32,
-            )
-            / 100.0
-        )
-        _, modes = _parse_position_folder(pos_dir.name)
-        mode_vec = _s2_mode_vec(modes)
+        mode_vec = _s3_mode_vec(modes)
 
         try:
-            segment = adapter.read_recording_directory(pos_dir)
+            segment = adapter.read_recording_directory(fault_dir)
         except Exception as exc:
-            print(f"  [skip] {pos_dir.name}: {exc}")
+            print(f"  [skip] {fault_dir.name}: {exc}")
             continue
 
         mic_data = segment.mic_data
         fs = float(segment.mic_sample_rate)
 
-        gcc_ac = compute_gcc_stack_s2_multiwindow(
-            mic_data[: S2_MIC_XYZ.shape[0]], fs=fs, c=c
+        gcc_ac = compute_gcc_stack_s3_multiwindow(
+            mic_data[: S3_MIC_XYZ.shape[0]], fs=fs, c=c
         )
-        srp_ac = _srp_phat_3d(gcc_ac, S2_MIC_XYZ, grid_x, grid_y, grid_z, fs, c)
+        srp_ac = _srp_phat_3d_s3(gcc_ac, S3_MIC_XYZ, grid_x, grid_y, grid_z, fs, c)
 
-        vib_files = sorted(pos_dir.glob("vibration_*.csv"))
+        vib_files = sorted(fault_dir.glob("vibration_*.csv"))
         try:
             vib_data_raw, vib_fs = _load_raw_vib_waveforms(vib_files)
             if vib_data_raw.shape[0] > 0:
                 gcc_str = compute_gcc_stack_structural_multiwindow(
-                    vib_data_raw, vib_fs, S2_VIB_XYZ, VIB_PAIRS_S2
+                    vib_data_raw, vib_fs, S3_VIB_XYZ, VIB_PAIRS_S3
                 )
                 srp_str = structural_srp_phat_3d(
-                    gcc_str, S2_VIB_XYZ, grid_x, grid_y, grid_z,
-                    fs=vib_fs, vib_pairs=VIB_PAIRS_S2,
+                    gcc_str, S3_VIB_XYZ, grid_x, grid_y, grid_z,
+                    fs=vib_fs, vib_pairs=VIB_PAIRS_S3,
                 )
             else:
                 srp_str = np.zeros_like(srp_ac)
         except Exception:
             srp_str = np.zeros_like(srp_ac)
 
-        # Normalise each map to [0,1] so the network learns peak location, not scale.
+        # Normalise each map to [0,1] before augmentation.
         srp_ac_n = (srp_ac / (float(srp_ac.max()) + 1e-6)).astype(np.float32)
         srp_str_n = (srp_str / (float(srp_str.max()) + 1e-6)).astype(np.float32)
         ac_maps.append(srp_ac_n)
         str_maps.append(srp_str_n)
         mode_vecs_list.append(mode_vec)
-        gt_positions.append(gt_m)
-        print(f"  {pos_dir.name}: ac_peak={srp_ac.max():.3f}  str_peak={srp_str.max():.3f}")
+        gt_positions.append(approx_gt_m.astype(np.float32))
+        print(f"  {fault_dir.name}: ac_peak={srp_ac.max():.3f}  str_peak={srp_str.max():.3f}")
 
     if not ac_maps:
-        raise RuntimeError(f"No recordings found under {rf_root}.")
+        raise RuntimeError(f"No fault recordings with GT found under {data_root}.")
 
     # ── Synthetic pre-training samples ────────────────────────────────────────
     # Random positions in the grid volume → ideal GCC → SRP map via srp_phat_3d.
-    # Structural SRP: uniform random noise (4 Hz vib_fs carries no TDOA → noise
-    # is the correct inductive bias for the structural channel).
+    # Structural SRP: uniform random noise (4 Hz vib_fs carries no TDOA).
     # Synthetic samples are always assigned to train; val uses only real recordings.
     n_real_base = len(ac_maps)
     if n_synth > 0:
@@ -973,16 +926,16 @@ def _run_dual_srp_train_job(
                 dtype=np.float64,
             )
             gcc_syn = synthetic_gcc_stack(
-                source_xyz=src, mic_xyz=S2_MIC_XYZ, mic_pairs=MIC_PAIRS_S2,
-                fs=16000.0, c=c, max_delay_samples=_S2_MAX_DELAY_SAMPLES,
+                source_xyz=src, mic_xyz=S3_MIC_XYZ, mic_pairs=MIC_PAIRS_S3,
+                fs=16000.0, c=c, max_delay_samples=_S3_MAX_DELAY_SAMPLES,
                 sigma_samples=2.0, noise_floor=0.10,
             )
-            srp_ac_syn = _srp_phat_3d(gcc_syn, S2_MIC_XYZ, grid_x, grid_y, grid_z, 16000.0, c)
+            srp_ac_syn = _srp_phat_3d_s3(gcc_syn, S3_MIC_XYZ, grid_x, grid_y, grid_z, 16000.0, c)
             srp_ac_n = (srp_ac_syn / (float(srp_ac_syn.max()) + 1e-6)).astype(np.float32)
             srp_str_n = rng.random(srp_ac_n.shape).astype(np.float32)
 
-            m_idx = int(rng.integers(0, len(_S2_MODE_LABELS)))
-            mv = np.zeros(len(_S2_MODE_LABELS), dtype=np.float32)
+            m_idx = int(rng.integers(0, len(_S3_MODE_LABELS)))
+            mv = np.zeros(len(_S3_MODE_LABELS), dtype=np.float32)
             mv[m_idx] = 1.0
 
             ac_maps.append(srp_ac_n)
@@ -999,7 +952,6 @@ def _run_dual_srp_train_job(
     aug_gt: list[np.ndarray] = []
     for i in range(n_base):
         for _ in range(n_augment):
-            # Additive Gaussian noise (2% of map range) + multiplicative scale jitter (±15%).
             s = float(rng.uniform(0.85, 1.15))
             aug_ac.append(
                 np.clip(
@@ -1019,8 +971,8 @@ def _run_dual_srp_train_job(
             aug_gt.append(gt_positions[i])
 
     # Layout of all_ac after concatenation:
-    #   indices 0..n_real_base-1                 : real base recordings
-    #   indices n_real_base..n_real_total-1       : augments of real recordings
+    #   indices 0..n_real_base-1                   : real base recordings
+    #   indices n_real_base..n_real_total-1         : augments of real recordings
     #   indices n_real_total..n_real_total+n_synth-1 : synthetic samples
     all_ac_real = ac_maps[:n_real_base] + aug_ac
     all_str_real = str_maps[:n_real_base] + aug_str
@@ -1034,16 +986,20 @@ def _run_dual_srp_train_job(
 
     n_real_total = n_real_base * (1 + n_augment)
 
-    # Val split: last val_ratio of real base positions (and their augments) go to val.
-    n_val_pos = max(1, int(n_real_base * val_ratio))
-    val_base = set(range(n_real_base - n_val_pos, n_real_base))
-    train_idx: list[int] = []
-    val_idx: list[int] = []
-    for i in range(n_real_base):
-        aug_start = n_real_base + i * n_augment
-        bucket = val_idx if i in val_base else train_idx
-        bucket.append(i)
-        bucket.extend(range(aug_start, aug_start + n_augment))
+    # Val split: when n_base==1 use augments for train, original base for val.
+    if n_base == 1:
+        train_idx = list(range(n_base, n_base + n_augment))  # real augments
+        val_idx = [0]                                          # real base
+    else:
+        n_val_pos = max(1, int(n_base * val_ratio))
+        val_base_set = set(range(n_base - n_val_pos, n_base))
+        train_idx = []
+        val_idx = []
+        for i in range(n_base):
+            aug_start = n_base + i * n_augment
+            bucket = val_idx if i in val_base_set else train_idx
+            bucket.append(i)
+            bucket.extend(range(aug_start, aug_start + n_augment))
     # Append synthetic indices to train only.
     train_idx.extend(range(n_real_total, n_real_total + n_synth))
     print(
@@ -1107,7 +1063,7 @@ def _run_dual_srp_train_job(
             "val_loss": val_loss,
             "val_mae_cm": mae_cm,
         })
-        if epoch % 10 == 0 or epoch == 1:
+        if epoch % 20 == 0 or epoch == 1:
             print(
                 f"  Epoch {epoch:4d}/{epochs}  "
                 f"train={epoch_loss / n_batches:.5f}  "
@@ -1135,21 +1091,25 @@ def _run_dual_srp_train_job(
                 print(f"  Early stopping at epoch {epoch} (patience={patience})")
                 break
 
-    print(f"\nSaved DualSRPNet: {output_path}  (val_mae={mae_cm:.1f} cm)")
+    print(f"\nSaved DualSRPNet S3: {output_path}  (val_mae={mae_cm:.1f} cm)")
     return {
         "val_mae_cm": mae_cm,
         "best_val_loss": best_val_loss,
         "n_base_samples": n_base,
         "hp": {
             "epochs": epochs, "lr": lr, "batch_size": batch_size,
-            "n_augment": n_augment, "n_modes": n_modes, "d_film": d_film,
-            "dropout": dropout, "seed": seed,
+            "n_augment": n_augment, "n_modes": n_modes, "d_film": d_film, "seed": seed,
         },
         "history": history[-50:],
     }
 
 
-def _run_neural_localization(
+# ---------------------------------------------------------------------------
+# Neural inference helpers
+# ---------------------------------------------------------------------------
+
+
+def _run_neural_localization_s3(
     mic_data: np.ndarray,
     fs: float,
     srp_prior_m: np.ndarray,
@@ -1158,52 +1118,35 @@ def _run_neural_localization(
     hop_s: float = 0.5,
     c: float = 343.0,
 ) -> np.ndarray:
-    """Run LocalizationCNNS2 on the recording and return mean predicted position.
-
-    Segments the recording into overlapping windows, computes per-window GCC
-    stacks, runs the neural model on each, and averages the predictions.
-
-    Args:
-        mic_data:      (5, N) mic waveforms.
-        fs:            Sample rate.
-        srp_prior_m:   (3,) SRP-PHAT peak estimate — passed as neural prior token.
-        artifact_path: Path to 'localization_cnn_s2.pt' checkpoint.
-        window_s:      Window length for GCC computation.
-        hop_s:         Hop between windows.
-        c:             Speed of sound.
-
-    Returns:
-        mean_pred: (3,) float64 — averaged (x, y, z) prediction in metres.
-    """
+    """Run LocalizationCNNS3 on the recording, return mean predicted position."""
     import torch
 
     checkpoint = torch.load(str(artifact_path), map_location="cpu", weights_only=True)
     model_kwargs: dict[str, object] = checkpoint.get("model_kwargs", {})
-    model = LocalizationCNNS2(**model_kwargs)  # type: ignore[arg-type]
+    model = LocalizationCNNS3(**model_kwargs)  # type: ignore[arg-type]
     model.load_state_dict(checkpoint["state_dict"])
     model.eval()
 
     window_samples = int(window_s * fs)
     hop_samples = max(1, int(hop_s * fs))
     n_samples = mic_data.shape[1]
-    max_delay = _S2_MAX_DELAY_SAMPLES
+    max_delay = _S3_MAX_DELAY_SAMPLES
 
     preds: list[np.ndarray] = []
     start = 0
     while start + window_samples <= n_samples:
         frame = mic_data[:, start : start + window_samples]
-        rows = [gcc_phat(frame[i], frame[j], max_delay) for i, j in MIC_PAIRS_S2]
-        gcc_np = np.stack(rows, axis=0)  # (10, L)
-        gcc_t = torch.from_numpy(gcc_np).unsqueeze(0).float()  # (1, 10, L)
+        rows = [gcc_phat(frame[i], frame[j], max_delay) for i, j in MIC_PAIRS_S3]
+        gcc_np = np.stack(rows, axis=0)          # (36, L_s3)
+        gcc_t = torch.from_numpy(gcc_np).unsqueeze(0).float()   # (1, 36, L)
         srp_t = torch.tensor(srp_prior_m, dtype=torch.float32).unsqueeze(0)  # (1, 3)
         with torch.no_grad():
-            pred = model(gcc_t, srp_t).squeeze(0).numpy()  # (3,)
+            pred = model(gcc_t, srp_t).squeeze(0).numpy()       # (3,)
         preds.append(pred)
         start += hop_samples
 
     if not preds:
-        # Fallback: single-window on full recording
-        gcc_stack = compute_gcc_stack_s2_multiwindow(
+        gcc_stack = compute_gcc_stack_s3_multiwindow(
             mic_data, fs=fs, window_s=window_s, hop_s=hop_s, c=c
         )
         gcc_t = torch.from_numpy(gcc_stack).unsqueeze(0).float()
@@ -1215,44 +1158,105 @@ def _run_neural_localization(
     return np.mean(np.stack(preds, axis=0), axis=0).astype(np.float64)
 
 
-def _run_localization_job(
+def _run_neural_localization_s2_zeroshot(
+    mic_data: np.ndarray,
+    fs: float,
+    srp_prior_m: np.ndarray,
+    artifact_path: Path,
+    window_s: float = 1.0,
+    hop_s: float = 0.5,
+    c: float = 343.0,
+) -> np.ndarray:
+    """Run the S2 LocalizationCNNS2 model on the 5-mic zero-shot subset of S3.
+
+    Extracts the five microphone channels defined by S3_ZERO_SHOT_MIC_INDICES
+    (Dl=0, Dr=1, Fr=4, Gr=6, Jl=7), computes 10-pair GCC with S2 delay bounds,
+    and feeds the result into the pre-trained S2 model.
+    """
+    import torch
+
+    checkpoint = torch.load(str(artifact_path), map_location="cpu", weights_only=True)
+    model_kwargs: dict[str, object] = checkpoint.get("model_kwargs", {})
+    model = LocalizationCNNS2(**model_kwargs)  # type: ignore[arg-type]
+    model.load_state_dict(checkpoint["state_dict"])
+    model.eval()
+
+    # 5-mic subset from S3 recording
+    mic_5 = mic_data[list(S3_ZERO_SHOT_MIC_INDICES)]  # (5, N)
+    window_samples = int(window_s * fs)
+    hop_samples = max(1, int(hop_s * fs))
+    n_samples = mic_5.shape[1]
+    max_delay = _S2_MAX_DELAY_SAMPLES
+
+    preds: list[np.ndarray] = []
+    start = 0
+    while start + window_samples <= n_samples:
+        frame = mic_5[:, start : start + window_samples]
+        rows = [gcc_phat(frame[i], frame[j], max_delay) for i, j in MIC_PAIRS_S2]
+        gcc_np = np.stack(rows, axis=0)          # (10, L_s2)
+        gcc_t = torch.from_numpy(gcc_np).unsqueeze(0).float()   # (1, 10, L)
+        srp_t = torch.tensor(srp_prior_m, dtype=torch.float32).unsqueeze(0)  # (1, 3)
+        with torch.no_grad():
+            pred = model(gcc_t, srp_t).squeeze(0).numpy()       # (3,)
+        preds.append(pred)
+        start += hop_samples
+
+    if not preds:
+        gcc_stack = compute_gcc_stack_s2_multiwindow(
+            mic_5, fs=fs, window_s=window_s, hop_s=hop_s, c=c
+        )
+        gcc_t = torch.from_numpy(gcc_stack).unsqueeze(0).float()
+        srp_t = torch.tensor(srp_prior_m, dtype=torch.float32).unsqueeze(0)
+        with torch.no_grad():
+            pred = model(gcc_t, srp_t).squeeze(0).numpy()
+        preds.append(pred)
+
+    return np.mean(np.stack(preds, axis=0), axis=0).astype(np.float64)
+
+
+# ---------------------------------------------------------------------------
+# Per-fault-folder localization job
+# ---------------------------------------------------------------------------
+
+
+def _run_localization_job_s3(
     *,
-    pos_dir: Path,
+    fault_dir: Path,
     output_path: Path,
     grid_resolution_m: float = 0.02,
     c: float = 343.0,
-    neural_artifact: Path | None = None,
+    s3_neural_artifact: Path | None = None,
+    s2_neural_artifact: Path | None = None,
     dual_srp_artifact: Path | None = None,
 ) -> None:
-    adapter = _s2_adapter()
-    segment = adapter.read_recording_directory(pos_dir)
-    mic_data = segment.mic_data
+    adapter = _s3_adapter()
+    segment = adapter.read_recording_directory(fault_dir)
+    mic_data = segment.mic_data  # (9, N)
     fs = float(segment.mic_sample_rate)
 
-    gt_xyz_cm, modes = _parse_position_folder(pos_dir.name)
-    gt_xyz_m = gt_xyz_cm / 100.0 if gt_xyz_cm is not None else None
-    mode_vec = _s2_mode_vec(modes)
+    approx_gt_m, modes = _parse_s3_fault_folder(fault_dir.name)
+    mode_vec = _s3_mode_vec(modes)
 
     def _err(est_m: np.ndarray) -> tuple[float | None, float | None]:
-        if gt_xyz_m is None:
+        if approx_gt_m is None:
             return None, None
-        e_m = float(np.linalg.norm(est_m - gt_xyz_m))
+        e_m = float(np.linalg.norm(est_m - approx_gt_m))
         return e_m, e_m * 100.0
 
-    # --- Acoustic GCC stack (computed once, reused for SRP-PHAT + TDOA) ---
-    gcc_ac_stack = compute_gcc_stack_s2_multiwindow(
-        mic_data[: S2_MIC_XYZ.shape[0]], fs=fs, c=c
+    # --- Acoustic GCC stack (computed once, reused for SRP + TDOA + full grid map) ---
+    gcc_ac_stack = compute_gcc_stack_s3_multiwindow(
+        mic_data[: S3_MIC_XYZ.shape[0]], fs=fs, c=c
     )
 
     # --- Acoustic SRP-PHAT hierarchical peak estimate ---
-    lo = S2_MIC_XYZ.min(axis=0) - 0.10
-    hi = S2_MIC_XYZ.max(axis=0) + 0.10
-    srp_estimated_m, srp_peak = _srp_phat_3d_hierarchical(
-        gcc_ac_stack, S2_MIC_XYZ, lo, hi,
+    lo = S3_MIC_XYZ.min(axis=0) - 0.10
+    hi = S3_MIC_XYZ.max(axis=0) + 0.10
+    srp_estimated_m, srp_peak = srp_phat_3d_hierarchical(
+        gcc_ac_stack, S3_MIC_XYZ, lo, hi,
         coarse_res=grid_resolution_m,
         fine_res=grid_resolution_m / 4.0,
         fine_margin=0.06,
-        fs=fs, c=c,
+        fs=fs, c=c, mic_pairs=MIC_PAIRS_S3,
     )
     srp_estimated_cm = srp_estimated_m * 100.0
     srp_err_m, srp_err_cm = _err(srp_estimated_m)
@@ -1261,10 +1265,10 @@ def _run_localization_job(
     grid_x = np.arange(lo[0], hi[0] + grid_resolution_m, grid_resolution_m)
     grid_y = np.arange(lo[1], hi[1] + grid_resolution_m, grid_resolution_m)
     grid_z = np.arange(lo[2], hi[2] + grid_resolution_m, grid_resolution_m)
-    srp_ac_map = _srp_phat_3d(gcc_ac_stack, S2_MIC_XYZ, grid_x, grid_y, grid_z, fs, c)
+    srp_ac_map = _srp_phat_3d_s3(gcc_ac_stack, S3_MIC_XYZ, grid_x, grid_y, grid_z, fs, c)
 
-    # --- Structural GCC-PHAT on raw vibration waveforms ---
-    vib_files = sorted(pos_dir.glob("vibration_*.csv"))
+    # --- Structural GCC-PHAT on raw vibration waveforms (4 accels, 6 pairs) ---
+    vib_files = sorted(fault_dir.glob("vibration_*.csv"))
     str_payload: dict[str, object] = {"available": False}
     srp_str_map = np.zeros_like(srp_ac_map)
     str_estimated_m = srp_estimated_m.copy()
@@ -1274,11 +1278,11 @@ def _run_localization_job(
         vib_data_raw, vib_fs = _load_raw_vib_waveforms(vib_files)
         if vib_data_raw.shape[0] > 0:
             gcc_str_stack = compute_gcc_stack_structural_multiwindow(
-                vib_data_raw, vib_fs, S2_VIB_XYZ, VIB_PAIRS_S2
+                vib_data_raw, vib_fs, S3_VIB_XYZ, VIB_PAIRS_S3
             )
             srp_str_map = structural_srp_phat_3d(
-                gcc_str_stack, S2_VIB_XYZ, grid_x, grid_y, grid_z,
-                fs=vib_fs, vib_pairs=VIB_PAIRS_S2
+                gcc_str_stack, S3_VIB_XYZ, grid_x, grid_y, grid_z,
+                fs=vib_fs, vib_pairs=VIB_PAIRS_S3,
             )
             str_peak_idx = np.unravel_index(int(np.argmax(srp_str_map)), srp_str_map.shape)
             str_estimated_m = np.array([
@@ -1288,57 +1292,78 @@ def _run_localization_job(
             str_err_m, str_err_cm = _err(str_estimated_m)
             str_payload = {
                 "available": True,
-                "n_vib_pairs": N_VIB_PAIRS_S2,
+                "n_vib_pairs": N_VIB_PAIRS_S3,
                 "vib_fs_hz": vib_fs,
                 "c_struct_ms": C_STRUCT_MS,
                 "srp_peak_power": str_peak_power,
                 "estimated_m": str_estimated_m.tolist(),
                 "estimated_cm": (str_estimated_m * 100.0).tolist(),
-                "error_m": str_err_m,
-                "error_cm": str_err_cm,
+                "approx_error_m": str_err_m,
+                "approx_error_cm": str_err_cm,
             }
     except Exception as exc:
         str_payload = {"available": False, "error": str(exc)}
 
-    # --- TDOA triangulation (acoustic, 10 pairs) ---
-    tdoa_estimated_m, tdoa_residual = _tdoa_triangulate(
-        gcc_ac_stack, S2_MIC_XYZ, srp_estimated_m, fs=fs, c=c
+    # --- TDOA triangulation (36-pair non-linear LS) ---
+    tdoa_estimated_m, tdoa_residual = tdoa_triangulate(
+        gcc_ac_stack, S3_MIC_XYZ, srp_estimated_m,
+        fs=fs, c=c, mic_pairs=MIC_PAIRS_S3, bounds=_S3_TDOA_BOUNDS,
     )
     tdoa_estimated_cm = tdoa_estimated_m * 100.0
     tdoa_err_m, tdoa_err_cm = _err(tdoa_estimated_m)
 
-    # --- Neural LocalizationCNNS2 (transformer, acoustic only) ---
-    neural_payload: dict[str, object] = {"available": False}
-    neural_estimated_m: np.ndarray | None = None
-    if neural_artifact is not None and neural_artifact.is_file():
+    # --- S3 native neural model (LocalizationCNNS3, acoustic GCC) ---
+    s3_neural_payload: dict[str, object] = {"available": False}
+    s3_neural_estimated_m: np.ndarray | None = None
+    if s3_neural_artifact is not None and s3_neural_artifact.is_file():
         try:
-            neural_estimated_m = _run_neural_localization(
-                mic_data=mic_data,
-                fs=fs,
-                srp_prior_m=srp_estimated_m,
-                artifact_path=neural_artifact,
-                c=c,
+            s3_neural_estimated_m = _run_neural_localization_s3(
+                mic_data=mic_data, fs=fs, srp_prior_m=srp_estimated_m,
+                artifact_path=s3_neural_artifact, c=c,
             )
-            neural_err_m, neural_err_cm = _err(neural_estimated_m)
-            neural_payload = {
+            s3_err_m, s3_err_cm = _err(s3_neural_estimated_m)
+            s3_neural_payload = {
                 "available": True,
-                "method": "LocalizationCNNS2",
-                "artifact": str(neural_artifact),
-                "estimated_m": neural_estimated_m.tolist(),
-                "estimated_cm": (neural_estimated_m * 100.0).tolist(),
-                "error_m": neural_err_m,
-                "error_cm": neural_err_cm,
+                "method": "LocalizationCNNS3",
+                "artifact": str(s3_neural_artifact),
+                "estimated_m": s3_neural_estimated_m.tolist(),
+                "estimated_cm": (s3_neural_estimated_m * 100.0).tolist(),
+                "approx_error_m": s3_err_m,
+                "approx_error_cm": s3_err_cm,
             }
         except Exception as exc:
-            neural_payload = {"available": False, "error": str(exc)}
+            s3_neural_payload = {"available": False, "error": str(exc)}
 
-    # --- DualSRPNet (Cross3D, acoustic + structural maps + FiLM) ---
+    # --- S2 zero-shot neural model (5-mic subset, acoustic GCC) ---
+    s2_zeroshot_payload: dict[str, object] = {"available": False}
+    s2_zeroshot_estimated_m: np.ndarray | None = None
+    if s2_neural_artifact is not None and s2_neural_artifact.is_file():
+        try:
+            s2_zeroshot_estimated_m = _run_neural_localization_s2_zeroshot(
+                mic_data=mic_data, fs=fs, srp_prior_m=srp_estimated_m,
+                artifact_path=s2_neural_artifact, c=c,
+            )
+            s2_err_m, s2_err_cm = _err(s2_zeroshot_estimated_m)
+            s2_zeroshot_payload = {
+                "available": True,
+                "method": "LocalizationCNNS2_zeroshot",
+                "artifact": str(s2_neural_artifact),
+                "zero_shot_mic_indices": list(S3_ZERO_SHOT_MIC_INDICES),
+                "estimated_m": s2_zeroshot_estimated_m.tolist(),
+                "estimated_cm": (s2_zeroshot_estimated_m * 100.0).tolist(),
+                "approx_error_m": s2_err_m,
+                "approx_error_cm": s2_err_cm,
+            }
+        except Exception as exc:
+            s2_zeroshot_payload = {"available": False, "error": str(exc)}
+
+    # --- DualSRPNet (Cross3D, acoustic + structural maps + FiLM mode conditioning) ---
     dual_payload: dict[str, object] = {"available": False}
     dual_estimated_m: np.ndarray | None = None
     dual_log_std: np.ndarray | None = None
     if dual_srp_artifact is not None and dual_srp_artifact.is_file():
         try:
-            dual_estimated_m, dual_log_std = _run_dual_srp_inference(
+            dual_estimated_m, dual_log_std = _run_dual_srp_inference_s3(
                 srp_ac_map, srp_str_map, mode_vec, dual_srp_artifact
             )
             dual_err_m, dual_err_cm = _err(dual_estimated_m)
@@ -1350,23 +1375,24 @@ def _run_localization_job(
                 "estimated_m": dual_estimated_m.tolist(),
                 "estimated_cm": (dual_estimated_m * 100.0).tolist(),
                 "log_std": dual_log_std.tolist(),
-                "error_m": dual_err_m,
-                "error_cm": dual_err_cm,
+                "approx_error_m": dual_err_m,
+                "approx_error_cm": dual_err_cm,
             }
         except Exception as exc:
             dual_payload = {"available": False, "error": str(exc)}
 
-    # --- Information-form fusion (replaces hand-tuned weights) ---
+    # --- Information-form fusion (replaces all hand-tuned weights) ---
     est_list: list[np.ndarray] = [srp_estimated_m, tdoa_estimated_m]
     cov_list: list[np.ndarray] = [
         srp_covariance(srp_peak),
-        tdoa_covariance(tdoa_residual, N_PAIRS_S2, fs, c),
+        tdoa_covariance(tdoa_residual, N_PAIRS_S3, fs, c),
     ]
-    if neural_estimated_m is not None:
-        est_list.append(neural_estimated_m)
-        # 8 cm prior: cross-val test-set mean error for LocalizationCNNS2 on unseen positions.
-        # Prevents the overfitted acoustic CNN from dominating when DualSRPNet is more confident.
-        cov_list.append(np.eye(3) * (0.08 ** 2))
+    if s3_neural_estimated_m is not None:
+        est_list.append(s3_neural_estimated_m)
+        cov_list.append(np.eye(3) * (0.05 ** 2))   # 5 cm isotropic prior (S3 neural actual error ~5 cm)
+    if s2_zeroshot_estimated_m is not None:
+        est_list.append(s2_zeroshot_estimated_m)
+        cov_list.append(np.eye(3) * (0.25 ** 2))   # 25 cm prior: S2 zero-shot actual error ~38 cm, near-negligible weight
     if dual_estimated_m is not None and dual_log_std is not None:
         est_list.append(dual_estimated_m)
         cov_list.append(neural_covariance(dual_log_std))
@@ -1375,7 +1401,7 @@ def _run_localization_job(
     fused_err_m, fused_err_cm = _err(fused_m)
     fused_std_cm = float(np.sqrt(np.trace(fused_cov)) * 100.0)
 
-    # --- Best method by error ---
+    # --- Best method by approx error ---
     best_method = "srp_phat"
     best_err_cm: float | None = srp_err_cm
 
@@ -1386,10 +1412,12 @@ def _run_localization_job(
             best_err_cm = err_cm
 
     _update_best("tdoa", tdoa_err_cm)
-    if neural_estimated_m is not None:
-        _update_best("neural_cnn", float(neural_payload.get("error_cm", float("inf"))))  # type: ignore[arg-type]
+    if s3_neural_estimated_m is not None:
+        _update_best("neural_cnn_s3", float(s3_neural_payload.get("approx_error_cm", float("inf"))))  # type: ignore[arg-type]
+    if s2_zeroshot_estimated_m is not None:
+        _update_best("neural_cnn_s2_zeroshot", float(s2_zeroshot_payload.get("approx_error_cm", float("inf"))))  # type: ignore[arg-type]
     if dual_estimated_m is not None:
-        _update_best("dual_srp_net", float(dual_payload.get("error_cm", float("inf"))))  # type: ignore[arg-type]
+        _update_best("dual_srp_net", float(dual_payload.get("approx_error_cm", float("inf"))))  # type: ignore[arg-type]
     _update_best("fused", fused_err_cm)
 
     best_est_map: dict[str, np.ndarray] = {
@@ -1397,53 +1425,57 @@ def _run_localization_job(
         "tdoa": tdoa_estimated_m,
         "fused": fused_m,
     }
-    if neural_estimated_m is not None:
-        best_est_map["neural_cnn"] = neural_estimated_m
+    if s3_neural_estimated_m is not None:
+        best_est_map["neural_cnn_s3"] = s3_neural_estimated_m
+    if s2_zeroshot_estimated_m is not None:
+        best_est_map["neural_cnn_s2_zeroshot"] = s2_zeroshot_estimated_m
     if dual_estimated_m is not None:
         best_est_map["dual_srp_net"] = dual_estimated_m
     best_est_m = best_est_map.get(best_method, fused_m)
 
-    best_k: str | None = None
-    best_d = float("inf")
-    for k, known_m in S2_FAULT_POSITIONS_M.items():
-        d = float(np.linalg.norm(best_est_m - known_m))
-        if d < best_d:
-            best_d = d
-            best_k = k
-
     payload: dict[str, object] = {
         "status": "ok",
-        "pos_folder": pos_dir.name,
-        "n_mic_pairs": N_PAIRS_S2,
-        "n_vib_pairs": N_VIB_PAIRS_S2,
-        "mic_channels_used": mic_data.shape[0],
+        "fault_folder": fault_dir.name,
+        "n_mic_channels": mic_data.shape[0],
+        "n_mic_pairs": N_PAIRS_S3,
+        "n_vib_pairs": N_VIB_PAIRS_S3,
         "operating_modes": modes,
-        "ground_truth_cm": gt_xyz_cm.tolist() if gt_xyz_cm is not None else None,
-        "ground_truth_m": gt_xyz_m.tolist() if gt_xyz_m is not None else None,
-        # Acoustic SRP-PHAT
+        "approx_gt_cm": (approx_gt_m * 100.0).tolist() if approx_gt_m is not None else None,
+        "approx_gt_m": approx_gt_m.tolist() if approx_gt_m is not None else None,
+        "approx_gt_note": (
+            "hit at z=8cm (same height as both Fl and Gr sensors); "
+            "x,y approximated as centroid — z is the reliable constraint"
+            if approx_gt_m is not None
+            else None
+        ),
+        # Acoustic SRP-PHAT (9 mics, 36 pairs)
         "srp_phat": {
             "method": "srp_phat_3d_multiwindow_hierarchical",
+            "n_pairs": N_PAIRS_S3,
             "srp_peak_power": srp_peak,
             "estimated_m": srp_estimated_m.tolist(),
             "estimated_cm": srp_estimated_cm.tolist(),
-            "error_m": srp_err_m,
-            "error_cm": srp_err_cm,
+            "approx_error_m": srp_err_m,
+            "approx_error_cm": srp_err_cm,
             "grid_resolution_coarse_m": grid_resolution_m,
             "grid_resolution_fine_m": grid_resolution_m / 4.0,
         },
-        # Structural SRP-PHAT (accelerometer stream)
+        # Structural SRP-PHAT (4 accels, 6 pairs)
         "structural_srp_phat": str_payload,
-        # TDOA triangulation (acoustic, 10 pairs)
+        # TDOA triangulation (36-pair non-linear LS)
         "tdoa_triangulation": {
-            "method": "tdoa_lbfgsb_10pairs",
+            "method": "tdoa_lbfgsb_36pairs",
+            "n_pairs": N_PAIRS_S3,
             "estimated_m": tdoa_estimated_m.tolist(),
             "estimated_cm": tdoa_estimated_cm.tolist(),
-            "error_m": tdoa_err_m,
-            "error_cm": tdoa_err_cm,
+            "approx_error_m": tdoa_err_m,
+            "approx_error_cm": tdoa_err_cm,
             "residual_sum_sq": float(tdoa_residual),
         },
-        # Transformer CNN (acoustic GCC-PHAT only)
-        "neural_cnn": neural_payload,
+        # S3 native neural (Transformer CNN, acoustic GCC only)
+        "neural_cnn_s3": s3_neural_payload,
+        # S2 zero-shot neural (5-mic subset, acoustic GCC)
+        "neural_cnn_s2_zeroshot": s2_zeroshot_payload,
         # Cross3D CNN (dual SRP maps + FiLM mode conditioning)
         "dual_srp_net": dual_payload,
         # Information-form fused estimate (replaces hand-tuned weights)
@@ -1453,32 +1485,30 @@ def _run_localization_job(
             "estimated_m": fused_m.tolist(),
             "estimated_cm": fused_cm.tolist(),
             "fused_std_cm": round(fused_std_cm, 3),
-            "error_m": fused_err_m,
-            "error_cm": fused_err_cm,
+            "approx_error_m": fused_err_m,
+            "approx_error_cm": fused_err_cm,
         },
         "best_method": best_method,
-        "best_error_cm": best_err_cm,
-        "nearest_known_position": best_k,
-        "nearest_known_error_m": float(best_d) if best_d < float("inf") else None,
+        "best_approx_error_cm": best_err_cm,
         "fs_hz": fs,
-        # Legacy flat fields
+        # Legacy flat fields (best estimate)
         "method": best_method,
         "srp_peak_power": srp_peak,
         "estimated_m": best_est_m.tolist(),
         "estimated_cm": (best_est_m * 100.0).tolist(),
-        "error_m": best_err_cm / 100.0 if best_err_cm is not None else None,
-        "error_cm": best_err_cm,
+        "approx_error_m": best_err_cm / 100.0 if best_err_cm is not None else None,
+        "approx_error_cm": best_err_cm,
     }
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
-# Job builder for second dataset
+# Job builder for third dataset
 # ---------------------------------------------------------------------------
 
 
-def _build_jobs_s2(
+def _build_jobs_s3(
     *,
     config_dir: Path,
     artifacts_root: Path,
@@ -1489,67 +1519,48 @@ def _build_jobs_s2(
     overlap: float = 0.5,
     device: str = "cpu",
     grid_resolution_m: float = 0.02,
-    loc_epochs: int = 400,
+    loc_epochs: int = 600,
     loc_lr: float = 1e-3,
     loc_batch_size: int = 16,
     loc_window_s: float = 1.0,
     loc_hop_s: float = 0.25,
-    loc_geo_weight: float = 0.05,
-    loc_patience: int = 100,
+    loc_geo_weight: float = 0.25,
+    loc_patience: int = 150,
     loc_seed: int = 42,
     dual_srp_epochs: int = 200,
     dual_srp_lr: float = 1e-3,
+    s2_localization_artifact: Path | None = None,
 ) -> list[TrainJob]:
     anomaly_cfg = load_yaml_config(config_dir / "anomaly_train.yaml")
     baseline_cfg = load_yaml_config(config_dir / "anomaly_baseline_train.yaml")
     mode_cfg = load_yaml_config(config_dir / "mode_train.yaml")
 
-    # Extract typed latent hyper-params from config once (avoids Pyright dict.get -> object errors)
     _lat_mode: str = str(anomaly_cfg.get("latent_mode", "mic_vibration"))
     _lat_rep: str = str(anomaly_cfg.get("latent_acoustic_rep", "mfcc"))
     _lat_win: float = float(anomaly_cfg.get("latent_window_s", window_s))  # type: ignore[arg-type]
-    _lat_ovlp: float = float(anomaly_cfg.get("latent_overlap", overlap))  # type: ignore[arg-type]
-    _lat_mfcc: int = int(anomaly_cfg.get("latent_n_mfcc", 40))  # type: ignore[arg-type]
-    _lat_fft: int = int(anomaly_cfg.get("latent_n_fft", 2048))  # type: ignore[arg-type]
-    _lat_hop: int = int(anomaly_cfg.get("latent_hop_length", 512))  # type: ignore[arg-type]
+    _lat_ovlp: float = float(anomaly_cfg.get("latent_overlap", overlap))   # type: ignore[arg-type]
+    _lat_mfcc: int = int(anomaly_cfg.get("latent_n_mfcc", 40))            # type: ignore[arg-type]
+    _lat_fft: int = int(anomaly_cfg.get("latent_n_fft", 2048))            # type: ignore[arg-type]
+    _lat_hop: int = int(anomaly_cfg.get("latent_hop_length", 512))        # type: ignore[arg-type]
 
     root = artifacts_root
-
-    rf_root = data_root / "RandomFault"
-    fault_pos_dirs = _pos_dirs(rf_root)
+    fault_dirs = _s3_fault_dirs(data_root)
 
     jobs: list[TrainJob] = []
 
-    # Stage latent_build: normal modes
-    jobs.append(
-        TrainJob(
-            name="S2 latent build (normal modes)",
-            fn=lambda: _run_latent_build_job_s2(
-                data_root=data_root,
-                output_dir=latent_root,
-                mode=_lat_mode,
-                acoustic_rep=_lat_rep,
-                window_s=_lat_win,
-                overlap=_lat_ovlp,
-                n_mfcc=_lat_mfcc,
-                n_fft=_lat_fft,
-                hop_length=_lat_hop,
-            ),
-            description=f"build_latent_cache(5-mic) {data_root} -> {latent_root}",
-            output_dir=str(latent_root),
-            stage="latent_build",
-        )
-    )
-
-    # Stage fault_latent_build: one job per fault position
-    for pos_dir in fault_pos_dirs:
-        pos_out = latent_root_fault / pos_dir.name
+    # ------------------------------------------------------------------
+    # Stage latent_build: one job per normal-mode folder
+    # ------------------------------------------------------------------
+    for speed_dir in sorted(
+        d for d in data_root.iterdir()
+        if d.is_dir() and d.name in _S3_NORMAL_MODES
+    ):
         jobs.append(
             TrainJob(
-                name=f"S2 fault latents ({pos_dir.name})",
-                fn=lambda p=pos_dir, o=pos_out: _run_latent_build_job_s2(
-                    data_root=p,
-                    output_dir=o,
+                name=f"S3 latent build ({speed_dir.name})",
+                fn=lambda sd=speed_dir: _run_latent_build_job_s3(
+                    data_root=sd,
+                    output_dir=latent_root,
                     mode=_lat_mode,
                     acoustic_rep=_lat_rep,
                     window_s=_lat_win,
@@ -1558,25 +1569,52 @@ def _build_jobs_s2(
                     n_fft=_lat_fft,
                     hop_length=_lat_hop,
                 ),
-                description=f"build_latent_cache({pos_dir.name}) -> {pos_out}",
-                output_dir=str(pos_out),
+                description=f"build_latent_cache(9-mic, {speed_dir.name}) -> {latent_root}",
+                output_dir=str(latent_root),
+                stage="latent_build",
+            )
+        )
+
+    # ------------------------------------------------------------------
+    # Stage fault_latent_build: one job per fault folder
+    # ------------------------------------------------------------------
+    for fault_dir in fault_dirs:
+        fault_out = latent_root_fault / fault_dir.name
+        jobs.append(
+            TrainJob(
+                name=f"S3 fault latents ({fault_dir.name})",
+                fn=lambda fd=fault_dir, fo=fault_out: _run_latent_build_job_s3(
+                    data_root=fd,
+                    output_dir=fo,
+                    mode=_lat_mode,
+                    acoustic_rep=_lat_rep,
+                    window_s=_lat_win,
+                    overlap=_lat_ovlp,
+                    n_mfcc=_lat_mfcc,
+                    n_fft=_lat_fft,
+                    hop_length=_lat_hop,
+                ),
+                description=f"build_latent_cache({fault_dir.name}) -> {fault_out}",
+                output_dir=str(fault_out),
                 stage="fault_latent_build",
             )
         )
 
-    # Stage anomaly_train — override latent_root to second dataset path
-    anomaly_cfg_s2 = dict(anomaly_cfg)
-    anomaly_cfg_s2["latent_root"] = str(latent_root)
-    baseline_cfg_s2 = dict(baseline_cfg)
-    baseline_cfg_s2["latent_root"] = str(latent_root)
-    mode_cfg_s2 = dict(mode_cfg)
-    mode_cfg_s2["latent_root"] = str(latent_root)
+    # ------------------------------------------------------------------
+    # Stage anomaly_train (identical model families as S2)
+    # ------------------------------------------------------------------
+    anomaly_cfg_s3 = dict(anomaly_cfg)
+    anomaly_cfg_s3["latent_root"] = str(latent_root)
+    baseline_cfg_s3 = dict(baseline_cfg)
+    baseline_cfg_s3["latent_root"] = str(latent_root)
+    mode_cfg_s3 = dict(mode_cfg)
+    mode_cfg_s3["latent_root"] = str(latent_root)
 
     flow_out = root / "cnf" / "anomaly"
     jobs.append(
         TrainJob(
             name="CNF anomaly",
-            fn=lambda cfg=anomaly_cfg_s2, o=flow_out: _train_and_calibrate_flow(
+            fn=lambda cfg=anomaly_cfg_s3, o=flow_out: _train_and_calibrate_flow(
                 **_flow_train_kwargs(cfg, output_dir=o)
             ),
             description=f"train_and_calibrate_flow -> {flow_out}",
@@ -1596,7 +1634,7 @@ def _build_jobs_s2(
         jobs.append(
             TrainJob(
                 name=f"OC-SVM anomaly{suffix}",
-                fn=lambda cfg=baseline_cfg_s2, o=out, _nu=nu: _train_baseline_model(
+                fn=lambda cfg=baseline_cfg_s3, o=out, _nu=nu: _train_baseline_model(
                     **_baseline_train_kwargs(
                         cfg,
                         output_dir=o,
@@ -1616,7 +1654,7 @@ def _build_jobs_s2(
         jobs.append(
             TrainJob(
                 name=f"{ae_display} anomaly",
-                fn=lambda cfg=baseline_cfg_s2, o=out, _ae=ae_type: _train_baseline_model(
+                fn=lambda cfg=baseline_cfg_s3, o=out, _ae=ae_type: _train_baseline_model(
                     **_baseline_train_kwargs(
                         cfg,
                         output_dir=o,
@@ -1630,7 +1668,9 @@ def _build_jobs_s2(
             )
         )
 
-    # Stage mode_train
+    # ------------------------------------------------------------------
+    # Stage mode_train (3 classes: speed1/speed2/speed3)
+    # ------------------------------------------------------------------
     mode_seeds = {"cnf": 41, "ocsvm": 42, "lstm_ae": 43, "cnn_ae": 44}
     for model_name, seed in mode_seeds.items():
         out = root / model_name / "mode"
@@ -1638,7 +1678,7 @@ def _build_jobs_s2(
         jobs.append(
             TrainJob(
                 name=f"{display} mode",
-                fn=lambda cfg=mode_cfg_s2, o=out, _seed=seed: _train_mode_classifier(
+                fn=lambda cfg=mode_cfg_s3, o=out, _seed=seed: _train_mode_classifier(
                     **_mode_train_kwargs(cfg, output_dir=o, seed=_seed)
                 ),
                 description=f"train_mode_classifier(seed={seed}) -> {out}",
@@ -1647,12 +1687,14 @@ def _build_jobs_s2(
             )
         )
 
-    # Stage localization_train: train LocalizationCNNS2
-    loc_artifact = artifacts_root / "localization_cnn_s2.pt"
+    # ------------------------------------------------------------------
+    # Stage localization_train: train LocalizationCNNS3
+    # ------------------------------------------------------------------
+    loc_artifact_s3 = artifacts_root / "localization_cnn_s3.pt"
     jobs.append(
         TrainJob(
-            name="S2 LocalizationCNNS2 train",
-            fn=lambda o=loc_artifact: _run_localization_train_job(
+            name="S3 LocalizationCNNS3 train",
+            fn=lambda o=loc_artifact_s3: _run_localization_train_job_s3(
                 data_root=data_root,
                 output_path=o,
                 epochs=loc_epochs,
@@ -1665,34 +1707,36 @@ def _build_jobs_s2(
                 seed=loc_seed,
                 device_name=device,
             ),
-            description=f"train LocalizationCNNS2 -> {loc_artifact}",
+            description=f"train LocalizationCNNS3 -> {loc_artifact_s3}",
             output_dir=str(artifacts_root),
             stage="localization_train",
         )
     )
 
-    # Stage localization_train: train LocalizationDualSRPNet (acoustic + structural SRP maps + FiLM)
-    dual_srp_artifact = artifacts_root / "localization_dual_srp_s2.pt"
+    # Stage localization_train: train LocalizationDualSRPNet for S3
+    dual_srp_artifact_s3 = artifacts_root / "localization_dual_srp_s3.pt"
     jobs.append(
         TrainJob(
-            name="S2 LocalizationDualSRPNet train",
-            fn=lambda o=dual_srp_artifact: _run_dual_srp_train_job(
+            name="S3 LocalizationDualSRPNet train",
+            fn=lambda o=dual_srp_artifact_s3: _run_dual_srp_train_job_s3(
                 data_root=data_root,
                 output_path=o,
                 epochs=dual_srp_epochs,
                 lr=dual_srp_lr,
                 grid_resolution_m=grid_resolution_m,
-                n_modes=len(_S2_MODE_LABELS),
+                n_modes=len(_S3_MODE_LABELS),
                 seed=loc_seed,
                 device_name=device,
             ),
-            description=f"train LocalizationDualSRPNet -> {dual_srp_artifact}",
+            description=f"train LocalizationDualSRPNet S3 -> {dual_srp_artifact_s3}",
             output_dir=str(artifacts_root),
             stage="localization_train",
         )
     )
 
-    # Stages anomaly_infer + localization: one set per fault position
+    # ------------------------------------------------------------------
+    # Stages anomaly_infer + localization: one set per fault folder
+    # ------------------------------------------------------------------
     infer_kw = {
         "window_s": window_s,
         "overlap": overlap,
@@ -1706,15 +1750,16 @@ def _build_jobs_s2(
         "device": device,
     }
 
-    for pos_dir in fault_pos_dirs:
-        pos_latent = latent_root_fault / pos_dir.name
-        pos_out_root = root / "fault_positions" / pos_dir.name
+    for fault_dir in fault_dirs:
+        fault_latent = latent_root_fault / fault_dir.name
+        pos_out_root = root / "fault_positions" / fault_dir.name
 
+        # CNF infer
         cnf_infer_out = pos_out_root / "cnf_infer.json"
         jobs.append(
             TrainJob(
-                name=f"S2 CNF infer ({pos_dir.name})",
-                fn=lambda lr=pos_latent, o=cnf_infer_out: _run_flow_infer_job_s2(
+                name=f"S3 CNF infer ({fault_dir.name})",
+                fn=lambda lr=fault_latent, o=cnf_infer_out: _run_flow_infer_job_s3(
                     artifact_path=root / "cnf" / "anomaly" / "flow.pt",
                     mode_artifact_path=root / "cnf" / "mode" / "mode_classifier.pt",
                     latent_root=lr,
@@ -1722,7 +1767,7 @@ def _build_jobs_s2(
                     healthy_latent_root=latent_root,
                     **infer_kw,
                 ),
-                description=f"cnf_infer({pos_dir.name}) -> {cnf_infer_out}",
+                description=f"cnf_infer({fault_dir.name}) -> {cnf_infer_out}",
                 output_dir=str(pos_out_root),
                 stage="anomaly_infer",
             )
@@ -1742,9 +1787,9 @@ def _build_jobs_s2(
             out = pos_out_root / f"{mf}_{dn}_infer.json"
             jobs.append(
                 TrainJob(
-                    name=f"S2 {label} infer ({pos_dir.name})",
-                    fn=lambda lr=pos_latent, a=artifact_path, m=mode_artifact, o=out: (
-                        _run_baseline_infer_job_s2(
+                    name=f"S3 {label} infer ({fault_dir.name})",
+                    fn=lambda lr=fault_latent, a=artifact_path, m=mode_artifact, o=out: (
+                        _run_baseline_infer_job_s3(
                             artifact_path=a,
                             latent_root=lr,
                             output_path=o,
@@ -1755,26 +1800,31 @@ def _build_jobs_s2(
                             device=device,
                         )
                     ),
-                    description=f"baseline_infer({mf}/{dn}, {pos_dir.name}) -> {out}",
+                    description=f"baseline_infer({mf}/{dn}, {fault_dir.name}) -> {out}",
                     output_dir=str(pos_out_root),
                     stage="anomaly_infer",
                 )
             )
 
+        # Localization
         loc_out = pos_out_root / "localization.json"
-        _neural_artifact = artifacts_root / "localization_cnn_s2.pt"
-        _dual_srp_artifact = artifacts_root / "localization_dual_srp_s2.pt"
+        _s3_art = loc_artifact_s3
+        _s2_art = s2_localization_artifact
+        _da_art = dual_srp_artifact_s3
         jobs.append(
             TrainJob(
-                name=f"S2 localize ({pos_dir.name})",
-                fn=lambda p=pos_dir, o=loc_out, na=_neural_artifact, da=_dual_srp_artifact: _run_localization_job(
-                    pos_dir=p,
-                    output_path=o,
-                    grid_resolution_m=grid_resolution_m,
-                    neural_artifact=na if na.is_file() else None,
-                    dual_srp_artifact=da if da.is_file() else None,
+                name=f"S3 localize ({fault_dir.name})",
+                fn=lambda fd=fault_dir, o=loc_out, s3a=_s3_art, s2a=_s2_art, da=_da_art: (
+                    _run_localization_job_s3(
+                        fault_dir=fd,
+                        output_path=o,
+                        grid_resolution_m=grid_resolution_m,
+                        s3_neural_artifact=s3a if s3a is not None and s3a.is_file() else None,
+                        s2_neural_artifact=s2a if s2a is not None and s2a.is_file() else None,
+                        dual_srp_artifact=da if da.is_file() else None,
+                    )
                 ),
-                description=f"srp_phat+dual_srp+neural({pos_dir.name}) -> {loc_out}",
+                description=f"s3_localize+dual_srp({fault_dir.name}) -> {loc_out}",
                 output_dir=str(pos_out_root),
                 stage="localization",
             )
@@ -1788,8 +1838,8 @@ def _build_jobs_s2(
 # ---------------------------------------------------------------------------
 
 
-def _default_manifest_path_s2(*, artifacts_root: Path) -> Path:
-    return Path(artifacts_root) / "reports" / "train_second_dataset_manifest.json"
+def _default_manifest_path_s3(*, artifacts_root: Path) -> Path:
+    return Path(artifacts_root) / "reports" / "train_third_dataset_manifest.json"
 
 
 # ---------------------------------------------------------------------------
@@ -1800,15 +1850,21 @@ def _default_manifest_path_s2(*, artifacts_root: Path) -> Path:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Train all anomaly/mode models for the second test dataset "
-            "and run per-position fault inference + localization."
+            "Train all anomaly/mode models for the third test dataset "
+            "and run per-fault fault inference + 4-method localization "
+            "(SRP-PHAT 36-pair + TDOA 36-pair + S3 neural + S2 zero-shot)."
         )
     )
-    parser.add_argument("--config-dir", default="configs/second")
-    parser.add_argument("--artifacts-root", default="results/second")
-    parser.add_argument("--data-root", default="data/second_test_dataset")
-    parser.add_argument("--latent-root", default="artifacts/latents_second")
-    parser.add_argument("--latent-root-fault", default="artifacts/latents_second_fault")
+    parser.add_argument("--config-dir", default="configs/third")
+    parser.add_argument("--artifacts-root", default="results/third")
+    parser.add_argument("--data-root", default="data/third_test_dataset")
+    parser.add_argument("--latent-root", default="artifacts/latents_third")
+    parser.add_argument("--latent-root-fault", default="artifacts/latents_third_fault")
+    parser.add_argument(
+        "--s2-localization-artifact",
+        default="results/second/localization_cnn_s2.pt",
+        help="Path to pre-trained S2 LocalizationCNNS2 model for zero-shot transfer.",
+    )
     parser.add_argument("--skip-report", action="store_true")
     parser.add_argument("--report-output")
     parser.add_argument("--manifest-path")
@@ -1824,41 +1880,31 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--run-id")
     parser.add_argument("--dry-run", action="store_true")
-    # LocalizationCNNS2 training hyper-parameters
-    parser.add_argument("--loc-epochs", type=int, default=400)
+    # LocalizationCNNS3 training hyper-parameters
+    parser.add_argument("--loc-epochs", type=int, default=600)
     parser.add_argument("--loc-lr", type=float, default=1e-3)
     parser.add_argument("--loc-batch-size", type=int, default=16)
-    parser.add_argument(
-        "--loc-window-s",
-        type=float,
-        default=1.0,
-        help="GCC window length for localization training (s)",
-    )
-    parser.add_argument(
-        "--loc-hop-s",
-        type=float,
-        default=0.25,
-        help="Hop size for localization training (s)",
-    )
+    parser.add_argument("--loc-window-s", type=float, default=1.0)
+    parser.add_argument("--loc-hop-s", type=float, default=0.25)
     parser.add_argument(
         "--loc-geo-weight",
         type=float,
-        default=0.05,
-        help="Geometric consistency loss weight",
+        default=0.25,
+        help="Geometric consistency loss weight (higher than S2 due to single GT position)",
     )
-    parser.add_argument("--loc-patience", type=int, default=100)
+    parser.add_argument("--loc-patience", type=int, default=150)
     parser.add_argument("--loc-seed", type=int, default=42)
     parser.add_argument(
         "--dual-srp-epochs",
         type=int,
         default=200,
-        help="Training epochs for LocalizationDualSRPNet",
+        help="Training epochs for LocalizationDualSRPNet S3",
     )
     parser.add_argument(
         "--dual-srp-lr",
         type=float,
         default=1e-3,
-        help="Learning rate for LocalizationDualSRPNet",
+        help="Learning rate for LocalizationDualSRPNet S3",
     )
     parser.add_argument(
         "--stages",
@@ -1915,6 +1961,10 @@ def main(argv: list[str] | None = None) -> int:
     if not latent_root_fault.is_absolute():
         latent_root_fault = root / latent_root_fault
 
+    s2_localization_artifact = Path(args.s2_localization_artifact)
+    if not s2_localization_artifact.is_absolute():
+        s2_localization_artifact = root / s2_localization_artifact
+
     report_output = (
         Path(args.report_output)
         if args.report_output
@@ -1926,7 +1976,7 @@ def main(argv: list[str] | None = None) -> int:
     manifest_path = (
         Path(args.manifest_path)
         if args.manifest_path
-        else _default_manifest_path_s2(artifacts_root=artifacts_root)
+        else _default_manifest_path_s3(artifacts_root=artifacts_root)
     )
     if not manifest_path.is_absolute():
         manifest_path = root / manifest_path
@@ -1947,7 +1997,6 @@ def main(argv: list[str] | None = None) -> int:
         args.no_resume_skip_ok
     )
 
-    started_at_utc = _utc_now_iso()
     run_start = time.perf_counter()
 
     resume_ok_names: set[str] = set()
@@ -1955,7 +2004,7 @@ def main(argv: list[str] | None = None) -> int:
         resume_manifest = _load_manifest(resume_manifest_path)
         resume_ok_names = _successful_job_names(resume_manifest)
 
-    jobs = _build_jobs_s2(
+    jobs = _build_jobs_s3(
         config_dir=config_dir,
         artifacts_root=artifacts_root,
         data_root=data_root,
@@ -1975,6 +2024,7 @@ def main(argv: list[str] | None = None) -> int:
         loc_seed=int(args.loc_seed),
         dual_srp_epochs=int(args.dual_srp_epochs),
         dual_srp_lr=float(args.dual_srp_lr),
+        s2_localization_artifact=s2_localization_artifact,
     )
     job_sig = _job_signature(jobs)
 
@@ -2032,111 +2082,12 @@ def main(argv: list[str] | None = None) -> int:
                 retry_backoff_s=float(args.retry_backoff_s),
             )
         job_results.append(report_result)
-        if report_result.status == "failed":
-            any_failed = True
 
-    finished_at_utc = _utc_now_iso()
-    duration_s = round(float(time.perf_counter() - run_start), 3)
-    failed_job_names = [r.name for r in job_results if r.status == "failed"]
-    skipped_job_names = [r.name for r in job_results if r.status == "skipped"]
-    retried_job_names = [r.name for r in job_results if r.retried]
-
-    stage_summary: dict[str, StageRollup] = {}
-    for result in job_results:
-        bucket = stage_summary.setdefault(str(result.stage), StageRollup())
-        bucket.n_jobs += 1
-        bucket.duration_s = round(
-            float(bucket.duration_s) + float(result.duration_s), 3
-        )
-        if result.status == "ok":
-            bucket.n_ok += 1
-        elif result.status == "failed":
-            bucket.n_failed += 1
-        elif result.status == "skipped":
-            bucket.n_skipped += 1
-        elif result.status == "dry_run":
-            bucket.n_dry_run += 1
-        peak_mb = float(result.orchestrator_peak_memory_mb or 0.0)
-        bucket.orchestrator_peak_memory_mb = max(
-            float(bucket.orchestrator_peak_memory_mb), peak_mb
-        )
-
-    overall_peak_mb = (
-        max(float(s.orchestrator_peak_memory_mb) for s in stage_summary.values())
-        if stage_summary
-        else 0.0
+    n_ok = sum(1 for r in job_results if r.status in ("ok", "skipped"))
+    n_fail = sum(1 for r in job_results if r.status == "failed")
+    elapsed = time.perf_counter() - run_start
+    print(
+        f"\n[third_dataset_eval] done — {n_ok} ok / {n_fail} failed "
+        f"in {elapsed:.1f}s"
     )
-
-    if bool(args.dry_run):
-        overall_status = "dry_run"
-    elif failed_job_names:
-        overall_status = "partial_success" if not fail_fast else "failed"
-    elif skipped_job_names:
-        overall_status = "resumed_success"
-    else:
-        overall_status = "success"
-
-    manifest = {
-        "schema_version": _MANIFEST_SCHEMA_VERSION,
-        "artifact_layout_version": _ARTIFACT_LAYOUT_VERSION,
-        "dataset": "second_test_dataset",
-        "run_id": (
-            str(args.run_id)
-            if args.run_id
-            else datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        ),
-        "started_at_utc": started_at_utc,
-        "finished_at_utc": finished_at_utc,
-        "duration_s": duration_s,
-        "overall_status": overall_status,
-        "dry_run": bool(args.dry_run),
-        "continue_on_error": bool(args.continue_on_error),
-        "fail_fast": bool(fail_fast),
-        "resume_from_manifest": (
-            str(resume_manifest_path) if resume_manifest_path is not None else None
-        ),
-        "resume_skip_ok": bool(resume_skip_ok),
-        "max_retries": int(args.max_retries),
-        "retry_backoff_s": float(args.retry_backoff_s),
-        "config_dir": str(config_dir),
-        "artifacts_root": str(artifacts_root),
-        "data_root": str(data_root),
-        "latent_root": str(latent_root),
-        "latent_root_fault": str(latent_root_fault),
-        "report_output": str(report_output),
-        "manifest_path": str(manifest_path),
-        "job_signature": job_sig,
-        "config_snapshot": config_snapshot,
-        "data_snapshot_signature": data_snapshot,
-        "metrics_summary": {
-            "n_jobs_total": int(len(job_results)),
-            "n_jobs_ok": int(sum(1 for r in job_results if r.status == "ok")),
-            "n_jobs_failed": int(len(failed_job_names)),
-            "n_jobs_skipped": int(len(skipped_job_names)),
-            "n_jobs_dry_run": int(sum(1 for r in job_results if r.status == "dry_run")),
-            "n_jobs_retried": int(len(retried_job_names)),
-            "total_job_duration_s": float(
-                round(sum(r.duration_s for r in job_results), 3)
-            ),
-        },
-        "runtime": {
-            "python_version": str(platform.python_version()),
-            "platform": str(platform.platform()),
-            "orchestrator_peak_memory_mb": float(round(overall_peak_mb, 3)),
-        },
-        "stage_summary": {
-            name: asdict(rollup) for name, rollup in stage_summary.items()
-        },
-        "n_jobs": int(len(job_results)),
-        "n_failed_jobs": int(len(failed_job_names)),
-        "n_skipped_jobs": int(len(skipped_job_names)),
-        "failed_jobs": failed_job_names,
-        "skipped_jobs": skipped_job_names,
-        "retried_jobs": retried_job_names,
-        "jobs": [asdict(r) for r in job_results],
-    }
-
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-
-    return 1 if any_failed else 0
+    return 1 if n_fail > 0 else 0

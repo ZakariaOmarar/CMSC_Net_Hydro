@@ -16,6 +16,7 @@ htmlcov/
 # Type checker / editor
 .pyright/
 .vscode/
+.claude/
 
 # Build artifacts
 dist/

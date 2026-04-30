@@ -11,6 +11,9 @@ let currentSegmentId = null;
 let overviewRefreshInterval = null;
 let lastTimelineData = null;
 let currentTab = "overview";
+// Illwerke tab state
+let illwerkeLoaded = false;
+let illwerkeSelectedDay = null;
 
 // --- Constants ---
 // Bench-top prototype — no rotating machine, no blade-passing peaks
@@ -23,6 +26,9 @@ const STATE_COLORS = {
   PU: "#198754",
   PH: "#fd7e14",
   RF: "#dc2626",
+  SP1: "#0891b2",
+  SP2: "#7c3aed",
+  SP3: "#059669",
   unknown: "#adb5bd",
 };
 
@@ -32,7 +38,52 @@ const STATE_LABELS = {
   PU: "Pump",
   PH: "Phase Shifter",
   RF: "Random Fault",
+  SP1: "Speed 1",
+  SP2: "Speed 2",
+  SP3: "Speed 3",
   unknown: "Unknown",
+};
+
+// Illwerke operating mode display
+const IW_MODE_COLORS = {
+  Standstill: "#6c757d",
+  Turbine: "#4fb8ff",
+  Phasenschieber: "#fd7e14",
+  Pump: "#2fd492",
+  Transitioning: "#9b59b6",
+};
+const IW_MODE_LABELS = {
+  Standstill: "Standstill",
+  Turbine: "Turbine",
+  Phasenschieber: "Phasenschieber",
+  Pump: "Pump",
+  Transitioning: "Transitioning",
+};
+const IW_MODEL_DISPLAY = {
+  cnf: "CNF — Normalizing Flow",
+  ocsvm_anomaly: "OC-SVM (default \u03bd)",
+  ocsvm_anomaly_nu_001: "OC-SVM (\u03bd\u202f=\u202f0.01)",
+  ocsvm_anomaly_nu_003: "OC-SVM (\u03bd\u202f=\u202f0.03)",
+  ocsvm_anomaly_nu_01: "OC-SVM (\u03bd\u202f=\u202f0.10)",
+  lstm_ae: "LSTM Autoencoder",
+  cnn_ae: "CNN Autoencoder",
+};
+// Mode-classifier backbone display names
+const IW_MODE_SOURCE_DISPLAY = {
+  pipeline: "Physics Pipeline (L4)",
+  kmeans: "K-Means (reference)",
+  cnf: "CNF",
+  ocsvm: "OC-SVM",
+  lstm_ae: "LSTM-AE",
+  cnn_ae: "CNN-AE",
+  sota: "ResML\u202f+\u202fViterbi (SOTA)",
+  dtss: "DTSS (Unsupervised)",
+};
+
+// Severity colour map for pipeline anomaly events
+const IW_SEVERITY_COLORS = {
+  alert: "#ff6673",
+  watch: "#f6bf3a",
 };
 
 const PLOTLY_LAYOUT_BASE = {
@@ -97,6 +148,35 @@ const dom = {
   reportsErrorChart: document.getElementById("reports-error-chart"),
   reportsTableContent: document.getElementById("reports-table-content"),
   btnRefreshReports: document.getElementById("btn-refresh-reports"),
+  // Illwerke tab
+  btnDtssTrain: document.getElementById("btn-dtss-train"),
+  dtssTrainStatus: document.getElementById("dtss-train-status"),
+  dtssStatusContent: document.getElementById("dtss-status-content"),
+  iwKpiDays: document.getElementById("iw-kpi-days"),
+  iwKpiDaysRange: document.getElementById("iw-kpi-days-range"),
+  iwKpiWindows: document.getElementById("iw-kpi-windows"),
+  iwKpiWindowsSub: document.getElementById("iw-kpi-windows-sub"),
+  iwKpiTurbine: document.getElementById("iw-kpi-turbine"),
+  iwKpiPH: document.getElementById("iw-kpi-ph"),
+  iwKpiWatch: document.getElementById("iw-kpi-watch"),
+  iwKpiAlert: document.getElementById("iw-kpi-alert"),
+  iwKpiAnom: document.getElementById("iw-kpi-anom"),
+  iwDaySelect: document.getElementById("iw-day-select"),
+  iwGanttModelSelect: document.getElementById("iw-gantt-model"),
+  iwGanttModeSource: document.getElementById("iw-gantt-mode-source"),
+  iwGanttSubtitle: document.getElementById("iw-gantt-subtitle"),
+  iwGantt: document.getElementById("iw-gantt"),
+  iwProcessChart: document.getElementById("iw-process-chart"),
+  iwProcVarsChart: document.getElementById("iw-proc-vars-chart"),
+  iwModeDonut: document.getElementById("iw-mode-donut"),
+  iwScoreTimeline: document.getElementById("iw-score-timeline"),
+  iwModelsTable: document.getElementById("iw-models-table"),
+  iwEventsChart: document.getElementById("iw-events-chart"),
+  iwEventsTable: document.getElementById("iw-events-table"),
+  iwEventsSeverity: document.getElementById("iw-events-severity"),
+  iwTransitionsTable: document.getElementById("iw-transitions-table"),
+  iwTransitionsSummary: document.getElementById("iw-transitions-summary"),
+  iwOraclePanel: document.getElementById("iw-oracle-panel"),
 };
 
 // ============================================================
@@ -657,9 +737,19 @@ async function fetchSegments() {
       return;
     }
 
-    // Separate into healthy (nominal) and fault-position groups
-    const healthy = segments.filter((s) => s.is_healthy);
-    const faults = segments.filter((s) => !s.is_healthy);
+    // Group into 4 optgroups: S2-Healthy, S2-Fault, S3-Healthy, S3-Fault
+    const s2Healthy = segments.filter(
+      (s) => s.is_healthy && s.dataset !== "third",
+    );
+    const s2Faults = segments.filter(
+      (s) => !s.is_healthy && s.dataset !== "third",
+    );
+    const s3Healthy = segments.filter(
+      (s) => s.is_healthy && s.dataset === "third",
+    );
+    const s3Faults = segments.filter(
+      (s) => !s.is_healthy && s.dataset === "third",
+    );
 
     function makeOpt(seg, i) {
       const opt = document.createElement("option");
@@ -671,21 +761,26 @@ async function fetchSegments() {
       return opt;
     }
 
-    if (healthy.length > 0) {
+    function addGroup(label, items, offset) {
+      if (items.length === 0) return;
       const group = document.createElement("optgroup");
-      group.label = "Healthy (Nominal)";
-      healthy.forEach((seg, i) => group.appendChild(makeOpt(seg, i)));
+      group.label = label;
+      items.forEach((seg, i) => group.appendChild(makeOpt(seg, offset + i)));
       dom.segmentSelector.appendChild(group);
     }
 
-    if (faults.length > 0) {
-      const group = document.createElement("optgroup");
-      group.label = "Fault Positions";
-      faults.forEach((seg, i) =>
-        group.appendChild(makeOpt(seg, healthy.length + i)),
-      );
-      dom.segmentSelector.appendChild(group);
-    }
+    addGroup("S2 — Healthy (Nominal)", s2Healthy, 0);
+    addGroup("S2 — Fault Positions", s2Faults, s2Healthy.length);
+    addGroup(
+      "S3 — Healthy (Nominal)",
+      s3Healthy,
+      s2Healthy.length + s2Faults.length,
+    );
+    addGroup(
+      "S3 — Fault Positions",
+      s3Faults,
+      s2Healthy.length + s2Faults.length + s3Healthy.length,
+    );
 
     // Auto-select first segment
     dom.segmentSelector.selectedIndex = 0;
@@ -823,6 +918,8 @@ const LOC_METHOD_COLORS = {
   srp_phat: "#7c3aed",
   tdoa_triangulation: "#ea580c",
   fused: "#0891b2",
+  neural_cnn_s3: "#15803d",
+  neural_cnn_s2_zeroshot: "#65a30d",
 };
 
 const LOC_METHOD_LABELS = {
@@ -830,6 +927,8 @@ const LOC_METHOD_LABELS = {
   srp_phat: "SRP-PHAT",
   tdoa_triangulation: "TDOA triangulation",
   fused: "Fused",
+  neural_cnn_s3: "Neural S3 (LocalizationCNNS3)",
+  neural_cnn_s2_zeroshot: "S2 Zero-shot (5-mic)",
 };
 
 function renderLocalization(det) {
@@ -965,6 +1064,26 @@ function renderBenchTop3D(container, loc) {
     });
   }
 
+  // Compute scene bounds dynamically from all known positions + margin
+  const allPts = [
+    ...micPos,
+    ...vibPos,
+    ...(gt ? [gt] : []),
+    ...Object.values(allFaults),
+    ...Object.values(methods)
+      .map((m) => m.estimated_cm)
+      .filter(Boolean),
+  ];
+  const margin = 3;
+  function axisRange(idx) {
+    if (allPts.length === 0) return [-5, 50];
+    const vals = allPts.map((p) => p[idx]);
+    return [Math.min(...vals) - margin, Math.max(...vals) + margin];
+  }
+  const xRange = axisRange(0);
+  const yRange = axisRange(1);
+  const zRange = axisRange(2);
+
   const layout = {
     paper_bgcolor: "rgba(0,0,0,0)",
     font: {
@@ -976,21 +1095,21 @@ function renderBenchTop3D(container, loc) {
     scene: {
       xaxis: {
         title: "X (cm)",
-        range: [-5, 46],
+        range: xRange,
         gridcolor: "#2a3e51",
         zerolinecolor: "#2a3e51",
         color: "#7f94aa",
       },
       yaxis: {
         title: "Y (cm)",
-        range: [-5, 46],
+        range: yRange,
         gridcolor: "#2a3e51",
         zerolinecolor: "#2a3e51",
         color: "#7f94aa",
       },
       zaxis: {
         title: "Z (cm)",
-        range: [-2, 45],
+        range: zRange,
         gridcolor: "#2a3e51",
         zerolinecolor: "#2a3e51",
         color: "#7f94aa",
@@ -1017,7 +1136,14 @@ function renderBenchTop3D(container, loc) {
 
   // Summary table
   if (summaryEl) {
-    const order = ["neural_cnn", "srp_phat", "tdoa_triangulation", "fused"];
+    const order = [
+      "neural_cnn",
+      "neural_cnn_s3",
+      "neural_cnn_s2_zeroshot",
+      "srp_phat",
+      "tdoa_triangulation",
+      "fused",
+    ];
     let rows = "";
     for (const key of order) {
       const m = methods[key];
@@ -1227,6 +1353,9 @@ function switchTab(tabName) {
   if (tabName === "detection" || tabName === "reports") {
     checkModelsStatus();
   }
+  if (tabName === "illwerke") {
+    loadIllwerkeTab();
+  }
 }
 
 // --- Models status ---------------------------------------------------------
@@ -1322,7 +1451,14 @@ async function renderAnomalyScoresChart() {
 function renderLocalizationTable(container, loc) {
   if (!container) return;
   const methods = loc.methods || {};
-  const keys = ["neural_cnn", "srp_phat", "tdoa_triangulation", "fused"];
+  const keys = [
+    "neural_cnn",
+    "neural_cnn_s3",
+    "neural_cnn_s2_zeroshot",
+    "srp_phat",
+    "tdoa_triangulation",
+    "fused",
+  ];
   const bestMethod = loc.best_method || "";
 
   const hasAny = keys.some((k) => methods[k]);
@@ -1381,9 +1517,18 @@ async function renderReports() {
 
     // Build grouped bar chart — one bar group per fault position,
     // one bar per method.
-    const methods = ["neural_cnn", "srp_phat", "tdoa_triangulation", "fused"];
+    const methods = [
+      "neural_cnn",
+      "neural_cnn_s3",
+      "neural_cnn_s2_zeroshot",
+      "srp_phat",
+      "tdoa_triangulation",
+      "fused",
+    ];
     const methodColors = {
       neural_cnn: "#2fd492",
+      neural_cnn_s3: "#15803d",
+      neural_cnn_s2_zeroshot: "#65a30d",
       srp_phat: "#a78bfa",
       tdoa_triangulation: "#fb923c",
       fused: "#38bdf8",
@@ -1444,6 +1589,1695 @@ async function renderReports() {
   }
 }
 
+// ============================================================
+// Illwerke Real-Plant Campaign Dashboard
+// ============================================================
+
+// ============================================================
+// DTSS — Unsupervised Mode Detection
+// ============================================================
+
+function renderDtssStatus(data) {
+  const status = data.training_status || "idle";
+  const exists = data.artifacts_exist;
+
+  // Update badge
+  if (dom.dtssTrainStatus) {
+    const map = {
+      idle: ["badge-not-trained", "Not Run"],
+      training: ["badge-training", "Training…"],
+      done: ["badge-trained", "Trained"],
+      failed: ["badge-failed", "Failed"],
+    };
+    const [cls, txt] = map[status] || ["badge-not-trained", status];
+    dom.dtssTrainStatus.className = `train-badge ${cls}`;
+    dom.dtssTrainStatus.textContent = txt;
+  }
+
+  if (dom.btnDtssTrain) {
+    dom.btnDtssTrain.disabled = status === "training";
+  }
+
+  if (!dom.dtssStatusContent) return;
+
+  if (status === "training") {
+    dom.dtssStatusContent.innerHTML =
+      '<div class="placeholder-text"><span class="spinner" style="display:inline-block;width:12px;height:12px;border:2px solid #4fb8ff;border-top-color:transparent;border-radius:50%;animation:spin .8s linear infinite;vertical-align:middle;margin-right:6px"></span>Training in progress — this takes ~45 min on CPU. You can refresh the page; training continues in the server background.</div>';
+    return;
+  }
+
+  if (data.error) {
+    dom.dtssStatusContent.innerHTML = `<div class="placeholder-text" style="color:#ff6673">Training failed: ${escapeHtml(data.error)}</div>`;
+    return;
+  }
+
+  if (!exists) {
+    dom.dtssStatusContent.innerHTML =
+      '<div class="placeholder-text">No artifacts found. Click "&#9654; Run Training" to start the DTSS pipeline (~45 min on CPU). Outputs will appear in the Mode Timeline dropdown as "DTSS (Unsupervised)".</div>';
+    return;
+  }
+
+  // Artifacts exist — render summary
+  const v = data.validation || {};
+  const hi = v.head_independence || {};
+  const hiPass = hi.independent !== false;
+  const clMap = data.cluster_to_label || {};
+  const nSeg = data.n_segments || 0;
+
+  let clRows = "";
+  for (const [k, lbl] of Object.entries(clMap)) {
+    const isTransient = String(lbl).startsWith("Transitioning");
+    clRows += `<tr>
+      <td>C${escapeHtml(k)}</td>
+      <td><span class="state-badge" style="background:${isTransient ? "#9b59b6" : "#2a3e51"};font-size:0.75rem">${escapeHtml(lbl)}</span></td>
+    </tr>`;
+  }
+
+  dom.dtssStatusContent.innerHTML = `
+    <div class="dtss-summary-grid">
+      <div class="dtss-metric">
+        <div class="dtss-metric-label">Segments</div>
+        <div class="dtss-metric-value">${nSeg.toLocaleString()}</div>
+      </div>
+      <div class="dtss-metric">
+        <div class="dtss-metric-label">Micro-events</div>
+        <div class="dtss-metric-value">${(v.n_micro_events ?? "--").toLocaleString()}</div>
+      </div>
+      <div class="dtss-metric">
+        <div class="dtss-metric-label">Changepoints</div>
+        <div class="dtss-metric-value">${(v.n_changepoints ?? "--").toLocaleString()}</div>
+      </div>
+      <div class="dtss-metric">
+        <div class="dtss-metric-label">Head χ² test</div>
+        <div class="dtss-metric-value" style="color:${hiPass ? "#2fd492" : "#ff6673"}">${hiPass ? "PASS" : "FAIL"} (p=${hi.p_value != null ? hi.p_value.toFixed(3) : "—"})</div>
+      </div>
+      <div class="dtss-metric">
+        <div class="dtss-metric-label">Cavitation flagged</div>
+        <div class="dtss-metric-value">${v.cavitation_flagged_pct != null ? v.cavitation_flagged_pct.toFixed(1) + "%" : "—"}</div>
+      </div>
+      <div class="dtss-metric">
+        <div class="dtss-metric-label">PCA components</div>
+        <div class="dtss-metric-value">${v.pca_n_components ?? "—"}</div>
+      </div>
+    </div>
+    ${clRows ? `<table class="iw-models-table" style="margin-top:10px"><thead><tr><th>Cluster</th><th>Semantic Label</th></tr></thead><tbody>${clRows}</tbody></table>` : ""}
+    <div style="margin-top:8px;font-size:0.78rem;color:var(--text-muted)">Select "DTSS (Unsupervised)" in the Mode Timeline source dropdown to visualise results.</div>`;
+}
+
+async function checkDtssStatus() {
+  try {
+    const data = await apiFetch("/api/illwerke/dtss/status");
+    renderDtssStatus(data);
+    // If training is running, poll every 30 s
+    if (data.training_status === "training") {
+      setTimeout(checkDtssStatus, 30000);
+    }
+  } catch {
+    // Non-fatal — DTSS section just stays empty
+  }
+}
+
+async function startDtssTraining() {
+  if (!dom.btnDtssTrain) return;
+  dom.btnDtssTrain.disabled = true;
+  if (dom.dtssTrainStatus) {
+    dom.dtssTrainStatus.className = "train-badge badge-training";
+    dom.dtssTrainStatus.textContent = "Starting…";
+  }
+  try {
+    await apiFetch("/api/illwerke/dtss/train", { method: "POST" });
+    showToast(
+      "DTSS training started — check back in ~45 min.",
+      "success",
+      8000,
+    );
+    // Begin polling
+    checkDtssStatus();
+  } catch (err) {
+    showToast(`Failed to start DTSS training: ${err.message}`);
+    if (dom.btnDtssTrain) dom.btnDtssTrain.disabled = false;
+    if (dom.dtssTrainStatus) {
+      dom.dtssTrainStatus.className = "train-badge badge-failed";
+      dom.dtssTrainStatus.textContent = "Failed";
+    }
+  }
+}
+
+async function loadIllwerkeTab() {
+  if (illwerkeLoaded) return;
+  illwerkeLoaded = true; // Prevent double-load; reset on error below
+
+  try {
+    setStatus("Loading Illwerke pipeline data…", true);
+
+    // Primary data fetches — all in parallel
+    const [
+      overview,
+      pipelineGantt,
+      pipelineScores,
+      pipelineEvents,
+      pipelineTransitions,
+      pipelineValidation,
+      models,
+    ] = await Promise.all([
+      apiFetch("/api/illwerke/overview"),
+      apiFetch("/api/illwerke/pipeline/gantt"),
+      apiFetch("/api/illwerke/pipeline/scores?max_points=4000"),
+      apiFetch("/api/illwerke/pipeline/events"),
+      apiFetch("/api/illwerke/pipeline/transitions"),
+      apiFetch("/api/illwerke/pipeline/validation"),
+      apiFetch("/api/illwerke/models"),
+    ]);
+
+    // Also try to load legacy gantt for mode-source dropdown population
+    let legacyGantt = null;
+    try {
+      legacyGantt = await apiFetch("/api/illwerke/gantt");
+    } catch {
+      /* non-fatal */
+    }
+
+    // ---- Populate anomaly-model overlay selector ----
+    if (dom.iwGanttModelSelect) {
+      dom.iwGanttModelSelect.innerHTML =
+        '<option value="">\u2014 None \u2014</option>';
+      for (const m of models.models || []) {
+        if (m.status === "ok") {
+          const opt = document.createElement("option");
+          opt.value = m.key;
+          opt.textContent = IW_MODEL_DISPLAY[m.key] || m.display;
+          dom.iwGanttModelSelect.appendChild(opt);
+        }
+      }
+    }
+
+    // ---- Populate mode-source selector ----
+    if (dom.iwGanttModeSource) {
+      // Start from pipeline sources (always pipeline first)
+      const pipelineSources = pipelineGantt.available_mode_sources || [
+        "pipeline",
+      ];
+      const legacySources = legacyGantt?.available_mode_sources || [];
+      const merged = [...new Set([...pipelineSources, ...legacySources])];
+
+      dom.iwGanttModeSource.innerHTML = "";
+      for (const src of merged) {
+        const opt = document.createElement("option");
+        opt.value = src;
+        opt.textContent = IW_MODE_SOURCE_DISPLAY[src] || src;
+        if (src === "pipeline") opt.selected = true;
+        dom.iwGanttModeSource.appendChild(opt);
+      }
+    }
+
+    // ---- Render all sections ----
+    renderIllwerkeKPIs(overview, pipelineValidation);
+    renderIllwerkeGantt(pipelineGantt);
+    renderIllwerkeModeDonut(overview, pipelineValidation);
+    renderIllwerkeAnomalyEvents(pipelineEvents);
+    renderIllwerkeScoreTimeline(pipelineScores);
+    renderIllwerkeTransitions(pipelineTransitions);
+    renderIllwerkePhysicsOracle(pipelineValidation, overview);
+    renderIllwerkeModels(models);
+    populateIllwerkeDaySelect(pipelineGantt.days || []);
+
+    if (pipelineGantt.days && pipelineGantt.days.length > 0) {
+      illwerkeSelectedDay = pipelineGantt.days[0];
+      if (dom.iwDaySelect) dom.iwDaySelect.value = illwerkeSelectedDay;
+      loadIllwerkeDailyChart(illwerkeSelectedDay);
+    }
+
+    // Non-blocking: load DTSS status panel
+    checkDtssStatus();
+    setStatus("Ready");
+  } catch (err) {
+    illwerkeLoaded = false; // Allow retry
+    setStatus("Ready");
+    showToast(
+      "Failed to load Illwerke data: " + escapeHtml(err.message),
+      "error",
+    );
+  }
+}
+
+function populateIllwerkeDaySelect(days) {
+  if (!dom.iwDaySelect) return;
+  dom.iwDaySelect.innerHTML = "";
+  for (const day of days) {
+    const opt = document.createElement("option");
+    opt.value = day;
+    // Format: "Wed 15 Apr"
+    const dt = new Date(day + "T12:00:00Z");
+    opt.textContent = dt.toLocaleDateString("en-GB", {
+      weekday: "short",
+      day: "numeric",
+      month: "short",
+    });
+    dom.iwDaySelect.appendChild(opt);
+  }
+}
+
+// Shared helper: build Plotly layout.shapes for mode background bands.
+// alphaOverride (optional float) replaces the per-mode alpha.
+function _buildModeShapes(hours, modes, alphaOverride) {
+  const alphas = {
+    Standstill: alphaOverride ?? 0.12,
+    Turbine: alphaOverride ?? 0.12,
+    Phasenschieber: alphaOverride ?? 0.12,
+    Pump: alphaOverride ?? 0.12,
+    Transitioning: alphaOverride ?? 0.12,
+    Unknown: alphaOverride ?? 0.08,
+  };
+  const baseColors = {
+    Standstill: "108,117,125",
+    Turbine: "79,184,255",
+    Phasenschieber: "253,126,20",
+    Pump: "47,212,146",
+    Transitioning: "155,89,182",
+    Unknown: "108,117,125",
+  };
+  const shapes = [];
+  if (!hours.length || !modes.length) return shapes;
+  const delta = hours.length > 1 ? hours[1] - hours[0] : 1;
+  let segMode = modes[0];
+  let segStart = hours[0];
+  for (let i = 1; i <= modes.length; i++) {
+    if (i === modes.length || modes[i] !== segMode) {
+      const x1 = i < hours.length ? hours[i] : hours[hours.length - 1] + delta;
+      const rgb = baseColors[segMode] || "0,0,0";
+      const a = alphas[segMode] ?? 0.06;
+      shapes.push({
+        type: "rect", xref: "x", yref: "paper",
+        x0: segStart, x1, y0: 0, y1: 1,
+        fillcolor: `rgba(${rgb},${a})`,
+        line: { width: 0 }, layer: "below",
+      });
+      segMode = modes[i];
+      segStart = hours[i];
+    }
+  }
+  return shapes;
+}
+
+// Shared helper: render one mode-dwell KPI card value into `el`.
+function _renderModeDwellKpi(el, modeKey, modeName, ov, validation, totalWindows) {
+  if (!el) return;
+  const modeDur = ov.mode_duration_s || {};
+  const dwellRatios = (validation || {}).dwell_ratios || ov.dwell_ratios || {};
+  const pct = dwellRatios[modeKey] != null ? (dwellRatios[modeKey] * 100).toFixed(1) : null;
+  const h = modeDur[modeName] ? (modeDur[modeName] / 3600).toFixed(1) + " h" : null;
+  if (pct) {
+    el.innerHTML = `${pct}<span class="kpi-unit">%</span>${h ? ` <span class="kpi-delta">${h}</span>` : ""}`;
+  } else if (ov.mode_counts?.[modeName]) {
+    const c = ov.mode_counts[modeName];
+    const p = totalWindows ? ((c / totalWindows) * 100).toFixed(1) : "0";
+    el.innerHTML = `${c.toLocaleString()}<span class="kpi-unit"> (${p}%)</span>`;
+  } else {
+    el.textContent = "—";
+  }
+}
+
+function renderIllwerkeKPIs(ov, validation) {
+  // --- Campaign days ---
+  // n_days may be 0 if NPZ cache is empty — derive from date_range
+  let displayDays = ov.n_days;
+  if ((!displayDays || displayDays === 0) && ov.date_range?.length === 2) {
+    const msPerDay = 86400000;
+    const d0 = new Date(ov.date_range[0] + "T12:00:00Z");
+    const d1 = new Date(ov.date_range[1] + "T12:00:00Z");
+    displayDays = Math.round((d1 - d0) / msPerDay) + 1;
+  }
+  if (dom.iwKpiDays) dom.iwKpiDays.textContent = displayDays || "--";
+  if (dom.iwKpiDaysRange && ov.date_range?.length === 2) {
+    const [d0, d1] = ov.date_range.map((d) => {
+      const dt = new Date(d + "T12:00:00Z");
+      return dt.toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+    });
+    dom.iwKpiDaysRange.textContent = `${d0} – ${d1}`;
+  }
+
+  // --- Steady windows / total ---
+  // NPZ-based window count may be 0; fall back to displaying dwell coverage
+  const totalWindows = ov.total_windows || 0;
+  const dwellFromOv = ov.dwell_ratios || {};
+  const hasWindows = totalWindows > 0;
+  if (dom.iwKpiWindows) {
+    if (hasWindows) {
+      dom.iwKpiWindows.textContent = totalWindows.toLocaleString();
+    } else {
+      // Compute total campaign seconds from mode_duration_s
+      const totalS = Object.values(ov.mode_duration_s || {}).reduce(
+        (s, v) => s + v,
+        0,
+      );
+      const totalH = (totalS / 3600).toFixed(0);
+      dom.iwKpiWindows.innerHTML = `${totalH}<span class="kpi-unit"> h</span>`;
+    }
+  }
+  if (dom.iwKpiWindowsSub && validation) {
+    const cov = validation.steady_coverage_pct;
+    if (cov != null)
+      dom.iwKpiWindowsSub.textContent = `${cov.toFixed(1)}% steady`;
+  }
+
+  // --- Turbine / Phasenschieber dwell ---
+  _renderModeDwellKpi(dom.iwKpiTurbine, "TU", "Turbine", ov, validation, totalWindows);
+  _renderModeDwellKpi(dom.iwKpiPH, "PH", "Phasenschieber", ov, validation, totalWindows);
+
+  // --- Watch events (pipeline L5) ---
+  const pe = ov.pipeline_events || {};
+  if (dom.iwKpiWatch) {
+    const n = pe.watch_events ?? "—";
+    dom.iwKpiWatch.textContent = n;
+    if (pe.watch_events != null)
+      dom.iwKpiWatch.style.color = pe.watch_events > 50 ? "#f6bf3a" : "#eaf4ff";
+  }
+
+  // --- Alert events (pipeline L5) ---
+  if (dom.iwKpiAlert) {
+    const n = pe.alert_events ?? "—";
+    dom.iwKpiAlert.textContent = n;
+    if (pe.alert_events != null)
+      dom.iwKpiAlert.style.color = pe.alert_events > 20 ? "#ff6673" : "#eaf4ff";
+  }
+
+  // --- Legacy CNF anom (if the element still exists) ---
+  if (dom.iwKpiAnom && ov.cnf_anomaly_rate != null) {
+    const rate = (ov.cnf_anomaly_rate * 100).toFixed(1);
+    dom.iwKpiAnom.innerHTML = `${rate}<span class="kpi-unit">%</span>`;
+    dom.iwKpiAnom.style.color =
+      ov.cnf_anomaly_rate < 0.05
+        ? "#2fd492"
+        : ov.cnf_anomaly_rate < 0.15
+          ? "#f6bf3a"
+          : "#ff6673";
+  }
+}
+
+function renderIllwerkeGantt(data) {
+  if (!dom.iwGantt) return;
+  const rows = data.rows || [];
+  const days = data.days || [];
+
+  // Update subtitle to reflect active mode source
+  if (dom.iwGanttSubtitle) {
+    const srcKey = data.mode_source || "kmeans";
+    const srcLabel = IW_MODE_SOURCE_DISPLAY[srcKey] || srcKey;
+    const prefix =
+      srcKey === "kmeans"
+        ? "K-Means labels"
+        : `Mode predictions \u2014 ${srcLabel}`;
+    dom.iwGanttSubtitle.textContent = `${prefix} \u00b7 each row\u202f=\u202fone day \u00b7 colour\u202f=\u202fmode \u00b7 hover for times & process vars \u00b7 click to load day detail`;
+  }
+
+  if (!rows.length) {
+    dom.iwGantt.innerHTML =
+      '<div class="placeholder-text">No Illwerke timeline data</div>';
+    return;
+  }
+
+  // Group rows by mode — one Plotly trace per mode (for legend + colour)
+  const byMode = {};
+  for (const r of rows) {
+    if (!byMode[r.mode]) byMode[r.mode] = [];
+    byMode[r.mode].push(r);
+  }
+
+  const traces = [];
+  // Render Standstill first (background), then PH, Turbine, Pump, Transitioning last
+  const modeOrder = [
+    "Standstill",
+    "Phasenschieber",
+    "Turbine",
+    "Pump",
+    "Transitioning",
+  ];
+  for (const mode of modeOrder) {
+    const modeRows = byMode[mode];
+    if (!modeRows || !modeRows.length) continue;
+    traces.push({
+      type: "bar",
+      orientation: "h",
+      name: IW_MODE_LABELS[mode] || mode,
+      y: modeRows.map((r) => r.day),
+      x: modeRows.map((r) => r.duration_h),
+      base: modeRows.map((r) => r.start_h),
+      marker: {
+        color: IW_MODE_COLORS[mode] || "#6c757d",
+        opacity: mode === "Standstill" ? 0.55 : 0.9,
+        line: { width: 0 },
+      },
+      customdata: modeRows.map((r) => [
+        r.start_hm,
+        r.end_hm,
+        r.rpm_mean,
+        r.power_mean,
+        r.flow_mean,
+        r.day,
+      ]),
+      hovertemplate:
+        `<b>${IW_MODE_LABELS[mode] || mode}</b><br>` +
+        `%{customdata[0]} – %{customdata[1]}  (%{customdata[5]})<br>` +
+        `RPM: %{customdata[2]} rpm &nbsp;·&nbsp; Power: %{customdata[3]} MW &nbsp;·&nbsp; Flow: %{customdata[4]} m³/s` +
+        `<extra></extra>`,
+    });
+  }
+
+  // Anomaly overlay — scatter trace of flagged windows for the selected model
+  const apts = data.anomaly_pts || [];
+  if (apts.length > 0) {
+    const modelLabel =
+      IW_MODEL_DISPLAY[data.anomaly_model] || data.anomaly_model || "Anomaly";
+    traces.push({
+      type: "scatter",
+      mode: "markers",
+      name: `Anomaly \u00b7 ${modelLabel}`,
+      x: apts.map((p) => p.hour),
+      y: apts.map((p) => p.day),
+      marker: {
+        symbol: "circle",
+        size: 5,
+        color: "#ff4557",
+        opacity: 0.72,
+        line: { width: 0 },
+      },
+      hovertemplate: `<b>Anomaly</b> (${modelLabel})<br>%{y} &nbsp; %{x:.2f}h<extra></extra>`,
+    });
+  }
+
+  const layout = {
+    ...PLOTLY_LAYOUT_BASE,
+    barmode: "overlay",
+    height: 340,
+    margin: { t: 26, r: 24, b: 54, l: 102 },
+    xaxis: {
+      ...PLOTLY_LAYOUT_BASE.xaxis,
+      title: { text: "Hour of Day (UTC)", font: { size: 11 } },
+      range: [0, 24],
+      tickvals: [0, 3, 6, 9, 12, 15, 18, 21, 24],
+      ticktext: [
+        "00:00",
+        "03:00",
+        "06:00",
+        "09:00",
+        "12:00",
+        "15:00",
+        "18:00",
+        "21:00",
+        "24:00",
+      ],
+      fixedrange: true,
+    },
+    yaxis: {
+      ...PLOTLY_LAYOUT_BASE.yaxis,
+      autorange: "reversed", // Latest day at top
+      categoryorder: "array",
+      categoryarray: [...days].reverse(),
+      fixedrange: true,
+    },
+    legend: {
+      orientation: "h",
+      y: 1.12,
+      x: 0,
+      font: { size: 10.5 },
+      bgcolor: "rgba(0,0,0,0)",
+    },
+    bargap: 0.28,
+  };
+
+  Plotly.react(dom.iwGantt, traces, layout, PLOTLY_CONFIG);
+
+  // Click → select day and load process chart
+  dom.iwGantt.removeAllListeners &&
+    dom.iwGantt.removeAllListeners("plotly_click");
+  dom.iwGantt.on("plotly_click", (evData) => {
+    const pt = evData.points?.[0];
+    if (!pt) return;
+    const day = pt.y;
+    if (!day) return;
+    illwerkeSelectedDay = day;
+    if (dom.iwDaySelect) dom.iwDaySelect.value = day;
+    loadIllwerkeDailyChart(day);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Process Variables daily timeseries chart (RPM · Power · Flow · Head)
+// ---------------------------------------------------------------------------
+async function loadIllwerkeProcVarsChart(date) {
+  if (!dom.iwProcVarsChart || !date) return;
+  try {
+    Plotly.purge(dom.iwProcVarsChart);
+  } catch {
+    /* no plot yet */
+  }
+  dom.iwProcVarsChart.innerHTML =
+    '<div class="placeholder-text">Loading process variables…</div>';
+  try {
+    const data = await apiFetch(
+      `/api/illwerke/pipeline/process_vars?date=${date}`,
+    );
+    if (!data.ready) {
+      dom.iwProcVarsChart.innerHTML =
+        '<div class="placeholder-text">Process variable cache not ready — try again shortly</div>';
+      return;
+    }
+    renderIllwerkeProcVarsChart(data, date);
+  } catch (err) {
+    dom.iwProcVarsChart.innerHTML = `<div class="placeholder-text">Process vars unavailable: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+function renderIllwerkeProcVarsChart(data, date) {
+  if (!dom.iwProcVarsChart) return;
+  const tsHm = data.ts_iso || []; // "HH:MM" strings
+  const rpm = data.rpm || [];
+  const power = data.power || [];
+  const flowTU = data.flow_tu || [];
+  const flowPU = data.flow_pu || [];
+  const head = data.head || [];
+
+  if (!tsHm.length) {
+    dom.iwProcVarsChart.innerHTML =
+      '<div class="placeholder-text">No process variable data for this day</div>';
+    return;
+  }
+
+  // Convert "HH:MM" to fractional hour for x-axis
+  const hrs = tsHm.map((s) => {
+    const [h, m] = s.split(":").map(Number);
+    return h + m / 60;
+  });
+
+  // Effective flow = max(flowTU, flowPU) at each point
+  const flow = flowTU.map((tu, i) => Math.max(tu, flowPU[i] ?? 0));
+
+  const dtLabel = (() => {
+    if (!date) return "";
+    const dt = new Date(date + "T12:00:00Z");
+    return dt.toLocaleDateString("en-GB", {
+      weekday: "long",
+      day: "numeric",
+      month: "long",
+      year: "numeric",
+    });
+  })();
+
+  const traces = [
+    {
+      type: "scatter",
+      mode: "lines",
+      name: "RPM",
+      x: hrs,
+      y: rpm,
+      line: { color: "#4fb8ff", width: 1.8 },
+      yaxis: "y3",
+      hovertemplate: "%{x:.2f}h → %{y:.0f} rpm<extra>RPM</extra>",
+    },
+    {
+      type: "scatter",
+      mode: "lines",
+      name: "Power (MW)",
+      x: hrs,
+      y: power,
+      line: { color: "#ff8f5c", width: 1.8 },
+      yaxis: "y",
+      hovertemplate: "%{x:.2f}h → %{y:.1f} MW<extra>Power</extra>",
+    },
+    {
+      type: "scatter",
+      mode: "lines",
+      name: "Flow (m³/s)",
+      x: hrs,
+      y: flow,
+      line: { color: "#2fd494", width: 1.6, dash: "dot" },
+      yaxis: "y2",
+      hovertemplate: "%{x:.2f}h → %{y:.1f} m³/s<extra>Flow</extra>",
+    },
+  ];
+
+  if (head.some((v) => v !== 0)) {
+    traces.push({
+      type: "scatter",
+      mode: "lines",
+      name: "Head (m)",
+      x: hrs,
+      y: head,
+      line: { color: "#a78bfa", width: 1.4, dash: "longdash" },
+      yaxis: "y4",
+      hovertemplate: "%{x:.2f}h → %{y:.1f} m<extra>Head</extra>",
+      visible: "legendonly",
+    });
+  }
+
+  Plotly.react(
+    dom.iwProcVarsChart,
+    traces,
+    {
+      ...PLOTLY_LAYOUT_BASE,
+      height: 260,
+      margin: { t: 16, r: 110, b: 54, l: 64 },
+      xaxis: {
+        ...PLOTLY_LAYOUT_BASE.xaxis,
+        title: {
+          text: dtLabel + " — measured at 1 Hz, averaged per minute",
+          font: { size: 9.5 },
+        },
+        range: [0, 24],
+        tickvals: [0, 4, 8, 12, 16, 20, 24],
+        ticktext: [
+          "00:00",
+          "04:00",
+          "08:00",
+          "12:00",
+          "16:00",
+          "20:00",
+          "24:00",
+        ],
+        fixedrange: true,
+      },
+      yaxis: {
+        ...PLOTLY_LAYOUT_BASE.yaxis,
+        title: { text: "Power (MW)", font: { size: 10, color: "#ff8f5c" } },
+        fixedrange: true,
+      },
+      yaxis2: {
+        title: { text: "Flow (m³/s)", font: { size: 10, color: "#2fd494" } },
+        overlaying: "y",
+        side: "right",
+        showgrid: false,
+        tickfont: { color: "#2fd494", size: 9 },
+        fixedrange: true,
+        zeroline: false,
+      },
+      yaxis3: {
+        title: { text: "RPM", font: { size: 10, color: "#4fb8ff" } },
+        overlaying: "y",
+        side: "right",
+        anchor: "free",
+        position: 1.0,
+        showgrid: false,
+        tickfont: { color: "#4fb8ff", size: 9 },
+        fixedrange: true,
+        zeroline: false,
+      },
+      yaxis4: {
+        overlaying: "y",
+        side: "right",
+        anchor: "free",
+        position: 1.08,
+        showgrid: false,
+        visible: false,
+        fixedrange: true,
+      },
+      legend: {
+        orientation: "h",
+        y: 1.12,
+        x: 0,
+        font: { size: 10 },
+        bgcolor: "rgba(0,0,0,0)",
+      },
+    },
+    PLOTLY_CONFIG,
+  );
+}
+
+function renderIllwerkeDayModeTimeline(timelineData, procData, date) {
+  if (!dom.iwProcVarsChart) return;
+  if (!timelineData || !timelineData.hours || !timelineData.hours.length) {
+    dom.iwProcVarsChart.innerHTML =
+      '<div class="placeholder-text">No detailed timeline available for this day</div>';
+    return;
+  }
+
+  const hours = timelineData.hours || [];
+  const modes = timelineData.modes || [];
+  const rpm = procData.rpm || [];
+  const power = procData.power || [];
+  const flowTU = procData.flow_tu || [];
+  const flowPU = procData.flow_pu || [];
+  const flow = flowTU.map((tu, idx) => Math.max(tu || 0, flowPU[idx] || 0));
+
+  const dtLabel = (() => {
+    if (!date) return "";
+    const dt = new Date(date + "T12:00:00Z");
+    return dt.toLocaleDateString("en-GB", {
+      weekday: "long",
+      day: "numeric",
+      month: "long",
+      year: "numeric",
+    });
+  })();
+
+  const shapes = _buildModeShapes(hours, modes);
+
+  const traces = [
+    {
+      type: "scatter",
+      mode: "lines",
+      name: "Power (MW)",
+      x: hours,
+      y: power,
+      line: { color: "#ff8f5c", width: 2 },
+      yaxis: "y",
+      hovertemplate: "%{x:.2f}h → %{y:.1f} MW<extra>Power</extra>",
+    },
+    {
+      type: "scatter",
+      mode: "lines",
+      name: "RPM",
+      x: hours,
+      y: rpm,
+      line: { color: "#4fb8ff", width: 1.8, dash: "dot" },
+      yaxis: "y3",
+      hovertemplate: "%{x:.2f}h → %{y:.0f} rpm<extra>RPM</extra>",
+    },
+    {
+      type: "scatter",
+      mode: "lines",
+      name: "Flow (m³/s)",
+      x: hours,
+      y: flow,
+      line: { color: "#2fd494", width: 1.6 },
+      yaxis: "y2",
+      hovertemplate: "%{x:.2f}h → %{y:.1f} m³/s<extra>Flow</extra>",
+    },
+  ];
+
+  Plotly.react(
+    dom.iwProcVarsChart,
+    traces,
+    {
+      ...PLOTLY_LAYOUT_BASE,
+      height: 280,
+      margin: { t: 18, r: 94, b: 54, l: 64 },
+      shapes,
+      xaxis: {
+        ...PLOTLY_LAYOUT_BASE.xaxis,
+        title: { text: dtLabel, font: { size: 10 } },
+        range: [0, 24],
+        tickvals: [0, 4, 8, 12, 16, 20, 24],
+        ticktext: ["00:00", "04:00", "08:00", "12:00", "16:00", "20:00", "24:00"],
+        fixedrange: true,
+      },
+      yaxis: {
+        ...PLOTLY_LAYOUT_BASE.yaxis,
+        title: { text: "Power (MW)", font: { size: 10, color: "#ff8f5c" } },
+        fixedrange: true,
+      },
+      yaxis2: {
+        title: { text: "Flow (m³/s)", font: { size: 10, color: "#2fd494" } },
+        overlaying: "y",
+        side: "right",
+        showgrid: false,
+        tickfont: { color: "#2fd494", size: 9 },
+        fixedrange: true,
+      },
+      yaxis3: {
+        title: { text: "RPM", font: { size: 10, color: "#4fb8ff" } },
+        overlaying: "y",
+        side: "right",
+        anchor: "free",
+        position: 0.98,
+        showgrid: false,
+        tickfont: { color: "#4fb8ff", size: 9 },
+        fixedrange: true,
+      },
+      legend: {
+        orientation: "h",
+        y: 1.12,
+        x: 0,
+        font: { size: 10 },
+        bgcolor: "rgba(0,0,0,0)",
+      },
+    },
+    PLOTLY_CONFIG,
+  );
+}
+
+function renderIllwerkeModeDonut(ov, validation) {
+  if (!dom.iwModeDonut) return;
+
+  // Prefer physics pipeline dwell ratios → more accurate than latent-window counts
+  const dwellRatios = (validation || {}).dwell_ratios || ov.dwell_ratios || {};
+  const modeDuration = ov.mode_duration_s || {};
+
+  // Build display dataset: use dwell_ratios (fractional) if available
+  let modes, values, totalLabel;
+  const _DWELL_MODE_MAP = {
+    ST: "Standstill",
+    TU: "Turbine",
+    PU: "Pump",
+    PH: "Phasenschieber",
+    TRANSITION: "Transitioning",
+    UNKNOWN: "Unknown",
+  };
+
+  if (Object.keys(dwellRatios).length) {
+    modes = Object.keys(dwellRatios).filter((k) => dwellRatios[k] > 0.0001);
+    values = modes.map((k) => dwellRatios[k]);
+    // Convert label keys (ST/TU/PU/PH) → display names
+    modes = modes.map((k) => _DWELL_MODE_MAP[k] || k);
+    const totalH =
+      Object.values(modeDuration).reduce((s, v) => s + v, 0) / 3600;
+    totalLabel = totalH > 0 ? `${totalH.toFixed(0)} h` : "campaign";
+  } else {
+    // Fallback: latent-window counts
+    const counts = ov.mode_counts || {};
+    modes = Object.keys(counts).filter((m) => counts[m] > 0);
+    values = modes.map((m) => counts[m]);
+    totalLabel = (ov.total_windows || 0).toLocaleString() + " win";
+  }
+
+  if (!modes.length) {
+    dom.iwModeDonut.innerHTML =
+      '<div class="placeholder-text">No mode data</div>';
+    return;
+  }
+
+  Plotly.react(
+    dom.iwModeDonut,
+    [
+      {
+        type: "pie",
+        hole: 0.52,
+        labels: modes.map((m) => IW_MODE_LABELS[m] || m),
+        values,
+        marker: {
+          colors: modes.map((m) => IW_MODE_COLORS[m] || "#6c757d"),
+          line: { color: "#0b1218", width: 2 },
+        },
+        textinfo: "percent+label",
+        textfont: { size: 11, color: "#eaf4ff" },
+        hovertemplate: "<b>%{label}</b><br>%{percent}<extra></extra>",
+      },
+    ],
+    {
+      ...PLOTLY_LAYOUT_BASE,
+      height: 300,
+      margin: { t: 16, r: 16, b: 16, l: 16 },
+      showlegend: false,
+      annotations: [
+        {
+          text: `<b>${totalLabel}</b>`,
+          x: 0.5,
+          y: 0.5,
+          xanchor: "center",
+          yanchor: "middle",
+          showarrow: false,
+          font: { size: 14, color: "#eaf4ff" },
+        },
+      ],
+    },
+    PLOTLY_CONFIG,
+  );
+}
+
+async function loadIllwerkeDailyChart(date) {
+  if (!dom.iwProcessChart || !date) return;
+
+  try {
+    Plotly.purge(dom.iwProcessChart);
+  } catch {
+    /* no plot yet */
+  }
+  try {
+    Plotly.purge(dom.iwProcVarsChart);
+  } catch {
+    /* no plot yet */
+  }
+
+  dom.iwProcessChart.innerHTML = '<div class="placeholder-text">Loading daily timeline…</div>';
+  if (dom.iwProcVarsChart) {
+    dom.iwProcVarsChart.innerHTML =
+      '<div class="placeholder-text">Loading process variables…</div>';
+  }
+
+  const scoreFetch = apiFetch(
+    `/api/illwerke/pipeline/scores?max_points=2000&date=${date}`,
+  );
+  const timelineFetch = apiFetch(
+    `/api/illwerke/pipeline/scores?max_points=1440&date=${date}`,
+  );
+  const procFetch = apiFetch(`/api/illwerke/pipeline/process_vars?date=${date}`);
+
+  let scoreData = null;
+  let timelineData = null;
+  let procData = null;
+
+  try {
+    scoreData = await scoreFetch;
+    renderIllwerkeDailyZChart(scoreData, date);
+  } catch (err) {
+    const errorMessage = escapeHtml(err.message || "Unknown error");
+    dom.iwProcessChart.innerHTML = `<div class="placeholder-text">Error loading daily timeline: ${errorMessage}</div>`;
+  }
+
+  if (dom.iwProcVarsChart) {
+    try {
+      [timelineData, procData] = await Promise.all([timelineFetch, procFetch]);
+      renderIllwerkeDayModeTimeline(timelineData, procData, date);
+    } catch (err) {
+      const errorMessage = escapeHtml(err.message || "Unknown error");
+      dom.iwProcVarsChart.innerHTML =
+        `<div class="placeholder-text">Error loading day timeline: ${errorMessage}</div>`;
+    }
+  }
+}
+
+function renderIllwerkeDailyZChart(data, date) {
+  if (!dom.iwProcessChart) return;
+  const tsIso = data.ts_iso || [];
+  const zScores = data.z_scores || [];
+  const alertLevel = data.alert_level || [];
+  const modes = data.modes || [];
+  const watchThr = data.watch_threshold ?? 4.0;
+  const alertThr = data.alert_threshold ?? 6.0;
+
+  if (!tsIso.length) {
+    dom.iwProcessChart.innerHTML =
+      '<div class="placeholder-text">No data for this day</div>';
+    return;
+  }
+
+  // Convert ISO strings to "HH:MM" labels for x-axis
+  const hours = tsIso.map((s) => {
+    const dt = new Date(s + ":00Z");
+    return dt.getUTCHours() + dt.getUTCMinutes() / 60;
+  });
+
+  // One trace per mode
+  const modeIndices = {};
+  for (let i = 0; i < modes.length; i++) {
+    const m = modes[i];
+    if (!modeIndices[m]) modeIndices[m] = [];
+    modeIndices[m].push(i);
+  }
+
+  const traces = Object.entries(modeIndices).map(([mode, idxArr]) => ({
+    type: "scatter",
+    mode: "markers",
+    name: IW_MODE_LABELS[mode] || mode,
+    x: idxArr.map((i) => hours[i]),
+    y: idxArr.map((i) => zScores[i]),
+    marker: {
+      size: idxArr.map((i) =>
+        alertLevel[i] >= 2 ? 7 : alertLevel[i] === 1 ? 5 : 3,
+      ),
+      color: IW_MODE_COLORS[mode] || "#6c757d",
+      opacity: idxArr.map((i) => (alertLevel[i] > 0 ? 1.0 : 0.5)),
+      line: {
+        width: idxArr.map((i) => (alertLevel[i] >= 2 ? 1.5 : 0)),
+        color: "#ff6673",
+      },
+    },
+    hovertemplate: `<b>${IW_MODE_LABELS[mode] || mode}</b><br>%{x:.2f}h → z=%{y:.1f}<extra></extra>`,
+  }));
+
+  // Threshold lines
+  if (hours.length >= 2) {
+    const x0 = hours[0],
+      x1 = hours[hours.length - 1];
+    traces.push({
+      type: "scatter",
+      mode: "lines",
+      name: `Watch (${watchThr}σ)`,
+      x: [x0, x1],
+      y: [watchThr, watchThr],
+      line: { color: "#f6bf3a", dash: "dot", width: 1.5 },
+      hoverinfo: "skip",
+    });
+    traces.push({
+      type: "scatter",
+      mode: "lines",
+      name: `Alert (${alertThr}σ)`,
+      x: [x0, x1],
+      y: [alertThr, alertThr],
+      line: { color: "#ff6673", dash: "dash", width: 1.5 },
+      hoverinfo: "skip",
+    });
+  }
+
+  const dtLabel = (() => {
+    if (!date) return "";
+    const dt = new Date(date + "T12:00:00Z");
+    return dt.toLocaleDateString("en-GB", {
+      weekday: "long",
+      day: "numeric",
+      month: "long",
+      year: "numeric",
+    });
+  })();
+
+  Plotly.react(
+    dom.iwProcessChart,
+    traces,
+    {
+      ...PLOTLY_LAYOUT_BASE,
+      height: 300,
+      margin: { t: 20, r: 24, b: 54, l: 64 },
+      xaxis: {
+        ...PLOTLY_LAYOUT_BASE.xaxis,
+        title: { text: dtLabel, font: { size: 10.5 } },
+        range: [0, 24],
+        tickvals: [0, 4, 8, 12, 16, 20, 24],
+        ticktext: [
+          "00:00",
+          "04:00",
+          "08:00",
+          "12:00",
+          "16:00",
+          "20:00",
+          "24:00",
+        ],
+      },
+      yaxis: {
+        ...PLOTLY_LAYOUT_BASE.yaxis,
+        title: { text: "Anomaly Z-Score (σ)", font: { size: 11 } },
+        rangemode: "tozero",
+      },
+      legend: {
+        orientation: "h",
+        y: -0.3,
+        font: { size: 10 },
+        bgcolor: "rgba(0,0,0,0)",
+      },
+    },
+    PLOTLY_CONFIG,
+  );
+}
+
+function renderIllwerkeProcessChart(data) {
+  if (!dom.iwProcessChart) return;
+  const hours = data.hours || [];
+  const power = data.power_mw || [];
+  const rpm = data.rpm || [];
+  const modes = data.modes || [];
+  const isAnom = data.is_anomaly || [];
+
+  const shapes = _buildModeShapes(hours, modes, 0.14);
+
+  // Anomaly marker positions
+  const anomH = hours.filter((_, i) => isAnom[i]);
+  const anomP = power.filter((_, i) => isAnom[i]);
+
+  const traces = [
+    {
+      type: "scatter",
+      mode: "lines",
+      name: "Power (MW)",
+      x: hours,
+      y: power,
+      line: { color: "#ff8f5c", width: 2 },
+      yaxis: "y",
+      hovertemplate: "%{x:.2f}h → %{y:.1f} MW<extra>Power</extra>",
+    },
+    {
+      type: "scatter",
+      mode: "lines",
+      name: "RPM",
+      x: hours,
+      y: rpm,
+      line: { color: "#4fb8ff", width: 1.5, dash: "dot" },
+      yaxis: "y2",
+      hovertemplate: "%{x:.2f}h → %{y:.0f} rpm<extra>RPM</extra>",
+    },
+  ];
+
+  if (anomH.length) {
+    traces.push({
+      type: "scatter",
+      mode: "markers",
+      name: "CNF Anomaly",
+      x: anomH,
+      y: anomP,
+      marker: {
+        symbol: "x",
+        size: 9,
+        color: "#ff6673",
+        line: { color: "#fff", width: 1.5 },
+      },
+      yaxis: "y",
+      hovertemplate: "Anomaly at %{x:.2f}h<extra></extra>",
+    });
+  }
+
+  const dtLabel = (() => {
+    if (!data.date) return "";
+    const dt = new Date(data.date + "T12:00:00Z");
+    return dt.toLocaleDateString("en-GB", {
+      weekday: "long",
+      day: "numeric",
+      month: "long",
+      year: "numeric",
+    });
+  })();
+
+  Plotly.react(
+    dom.iwProcessChart,
+    traces,
+    {
+      ...PLOTLY_LAYOUT_BASE,
+      height: 300,
+      margin: { t: 20, r: 68, b: 54, l: 64 },
+      shapes,
+      xaxis: {
+        ...PLOTLY_LAYOUT_BASE.xaxis,
+        title: { text: dtLabel, font: { size: 10.5 } },
+        range: [0, 24],
+        tickvals: [0, 4, 8, 12, 16, 20, 24],
+        ticktext: [
+          "00:00",
+          "04:00",
+          "08:00",
+          "12:00",
+          "16:00",
+          "20:00",
+          "24:00",
+        ],
+      },
+      yaxis: {
+        ...PLOTLY_LAYOUT_BASE.yaxis,
+        title: { text: "Power (MW)", font: { size: 11 } },
+        range: [-320, 320],
+        zeroline: true,
+        zerolinecolor: "#2a3e51",
+      },
+      yaxis2: {
+        title: { text: "RPM", font: { size: 11, color: "#4fb8ff" } },
+        overlaying: "y",
+        side: "right",
+        range: [0, 450],
+        gridcolor: "rgba(0,0,0,0)",
+        color: "#4fb8ff",
+        zeroline: false,
+      },
+      legend: {
+        orientation: "h",
+        y: -0.28,
+        font: { size: 10 },
+        bgcolor: "rgba(0,0,0,0)",
+      },
+    },
+    PLOTLY_CONFIG,
+  );
+}
+
+function renderIllwerkeScoreTimeline(data) {
+  if (!dom.iwScoreTimeline) return;
+  const tsIso = data.ts_iso || [];
+  if (!tsIso.length) {
+    dom.iwScoreTimeline.innerHTML =
+      '<div class="placeholder-text">No score data available</div>';
+    return;
+  }
+
+  // Support both pipeline z-scores and legacy CNF log-likelihood scores
+  const scores = data.z_scores || data.scores || [];
+  const alertLevel =
+    data.alert_level || data.is_anomaly?.map((v) => (v ? 1 : 0)) || [];
+  const modes = data.modes || [];
+  const watchThr = data.watch_threshold ?? data.threshold ?? null;
+  const alertThr = data.alert_threshold ?? null;
+  const isPipeline = !!data.z_scores;
+  const yLabel = isPipeline ? "Anomaly Z-Score (σ)" : "Log-likelihood Score";
+
+  // One trace per mode
+  const modeIndices = {};
+  for (let i = 0; i < modes.length; i++) {
+    const m = modes[i];
+    if (!modeIndices[m]) modeIndices[m] = [];
+    modeIndices[m].push(i);
+  }
+
+  const traces = Object.entries(modeIndices).map(([mode, idxArr]) => ({
+    type: "scatter",
+    mode: "markers",
+    name: IW_MODE_LABELS[mode] || mode,
+    x: idxArr.map((i) => tsIso[i]),
+    y: idxArr.map((i) => scores[i]),
+    marker: {
+      size: idxArr.map((i) => {
+        const al = alertLevel[i];
+        return al >= 2 ? 6 : al === 1 ? 4 : 3;
+      }),
+      color: IW_MODE_COLORS[mode] || "#6c757d",
+      opacity: idxArr.map((i) => (alertLevel[i] > 0 ? 1.0 : 0.4)),
+      line: {
+        width: idxArr.map((i) => (alertLevel[i] >= 2 ? 1.2 : 0)),
+        color: "#ff6673",
+      },
+    },
+    hovertemplate: `<b>${IW_MODE_LABELS[mode] || mode}</b><br>%{x}<br>${isPipeline ? "Z" : "Score"}: %{y:.2f}<extra></extra>`,
+  }));
+
+  // Threshold lines
+  if (tsIso.length >= 2) {
+    if (watchThr != null) {
+      traces.push({
+        type: "scatter",
+        mode: "lines",
+        name: isPipeline
+          ? `Watch (${watchThr}σ)`
+          : `Threshold (${watchThr.toFixed(2)})`,
+        x: [tsIso[0], tsIso[tsIso.length - 1]],
+        y: [watchThr, watchThr],
+        line: { color: "#f6bf3a", dash: "dot", width: 1.5 },
+        hoverinfo: "skip",
+      });
+    }
+    if (alertThr != null && alertThr !== watchThr) {
+      traces.push({
+        type: "scatter",
+        mode: "lines",
+        name: `Alert (${alertThr}σ)`,
+        x: [tsIso[0], tsIso[tsIso.length - 1]],
+        y: [alertThr, alertThr],
+        line: { color: "#ff6673", dash: "dash", width: 1.5 },
+        hoverinfo: "skip",
+      });
+    }
+  }
+
+  Plotly.react(
+    dom.iwScoreTimeline,
+    traces,
+    {
+      ...PLOTLY_LAYOUT_BASE,
+      height: 280,
+      margin: { t: 20, r: 24, b: 64, l: 68 },
+      xaxis: {
+        ...PLOTLY_LAYOUT_BASE.xaxis,
+        title: { text: "Date (UTC)", font: { size: 11 } },
+        tickangle: -30,
+      },
+      yaxis: {
+        ...PLOTLY_LAYOUT_BASE.yaxis,
+        title: { text: yLabel, font: { size: 11 } },
+        rangemode: isPipeline ? "tozero" : "normal",
+      },
+      legend: {
+        orientation: "h",
+        y: -0.35,
+        font: { size: 10 },
+        bgcolor: "rgba(0,0,0,0)",
+      },
+    },
+    PLOTLY_CONFIG,
+  );
+}
+
+// ── Anomaly Events (pipeline L5) ──────────────────────────────────────────────
+function renderIllwerkeAnomalyEvents(data) {
+  if (!data) return;
+  const events = data.events || data.anomaly_events || [];
+
+  // ---- Scatter chart ----
+  if (dom.iwEventsChart) {
+    if (!events.length) {
+      dom.iwEventsChart.innerHTML =
+        '<div class="placeholder-text">No anomaly events</div>';
+    } else {
+      const byLevel = { alert: [], watch: [] };
+      for (const ev of events) {
+        const sev = (ev.severity || "watch").toLowerCase();
+        if (byLevel[sev] === undefined) byLevel["watch"].push(ev);
+        else byLevel[sev].push(ev);
+      }
+      const traces = Object.entries(byLevel)
+        .filter(([, arr]) => arr.length)
+        .map(([sev, arr]) => ({
+          type: "scatter",
+          mode: "markers",
+          name: sev === "alert" ? "Alert" : "Watch",
+          x: arr.map((e) => e.start_utc || e.t_start_iso || e.ts_start),
+          y: arr.map((e) => e.peak_z ?? e.peak_z_score ?? e.peak_score ?? 0),
+          marker: {
+            size: arr.map((e) => {
+              const z = e.peak_z ?? e.peak_z_score ?? 4;
+              return Math.min(16, Math.max(5, z * 1.2));
+            }),
+            color: IW_SEVERITY_COLORS[sev] || "#6c757d",
+            opacity: 0.85,
+            symbol: sev === "alert" ? "circle" : "circle-open",
+          },
+          customdata: arr.map((e) => [
+            e.mode || "—",
+            e.sub_mode || "—",
+            e.duration_s != null ? `${e.duration_s.toFixed(0)} s` : "—",
+            (e.peak_z ?? e.peak_z_score ?? e.peak_score ?? 0).toFixed(2),
+          ]),
+          hovertemplate:
+            "<b>%{customdata[0]} / %{customdata[1]}</b><br>" +
+            "%{x}<br>Peak: %{customdata[3]}σ  ·  %{customdata[2]}<extra>" +
+            (sev === "alert" ? "Alert" : "Watch") +
+            "</extra>",
+        }));
+
+      Plotly.react(
+        dom.iwEventsChart,
+        traces,
+        {
+          ...PLOTLY_LAYOUT_BASE,
+          height: 220,
+          margin: { t: 12, r: 20, b: 56, l: 56 },
+          xaxis: {
+            ...PLOTLY_LAYOUT_BASE.xaxis,
+            title: { text: "Date (UTC)", font: { size: 10.5 } },
+            tickangle: -25,
+          },
+          yaxis: {
+            ...PLOTLY_LAYOUT_BASE.yaxis,
+            title: { text: "Peak Z-Score (σ)", font: { size: 11 } },
+            rangemode: "tozero",
+          },
+          legend: {
+            orientation: "h",
+            y: -0.35,
+            font: { size: 10.5 },
+            bgcolor: "rgba(0,0,0,0)",
+          },
+        },
+        PLOTLY_CONFIG,
+      );
+    }
+  }
+
+  // ---- Table ----
+  if (dom.iwEventsTable) {
+    if (!events.length) {
+      dom.iwEventsTable.innerHTML =
+        '<div class="placeholder-text">No anomaly events</div>';
+    } else {
+      const rows = events
+        .slice(0, 200)
+        .map((ev) => {
+          const sev = (ev.severity || "watch").toLowerCase();
+          const badgeCls =
+            sev === "alert" ? "iw-severity-alert" : "iw-severity-watch";
+          const t = ev.start_utc || ev.t_start_iso || ev.ts_start || "—";
+          const tShort =
+            t.length > 16 ? t.substring(0, 16).replace("T", " ") : t;
+          const mode = ev.mode || "—";
+          const sub = ev.sub_mode || "—";
+          const dur =
+            ev.duration_s != null ? `${ev.duration_s.toFixed(0)} s` : "—";
+          const peak =
+            (ev.peak_z ?? ev.peak_z_score) != null
+              ? `${(ev.peak_z ?? ev.peak_z_score).toFixed(2)}σ`
+              : ev.peak_score != null
+                ? ev.peak_score.toFixed(2)
+                : "—";
+          return `<tr>
+            <td class="mono">${escapeHtml(tShort)}</td>
+            <td>${escapeHtml(mode)}</td>
+            <td>${escapeHtml(sub)}</td>
+            <td>${escapeHtml(dur)}</td>
+            <td>${escapeHtml(peak)}</td>
+            <td><span class="${badgeCls}">${escapeHtml(ev.severity || "watch")}</span></td>
+          </tr>`;
+        })
+        .join("");
+
+      dom.iwEventsTable.innerHTML = `
+        <table class="iw-events-table iw-models-table">
+          <thead><tr>
+            <th>Time (UTC)</th><th>Mode</th><th>Sub-mode</th>
+            <th>Duration</th><th>Peak σ</th><th>Severity</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>`;
+
+      if (events.length > 200) {
+        dom.iwEventsTable.innerHTML +=
+          `<div class="placeholder-text" style="margin-top:6px;font-size:11px">` +
+          `Showing 200 of ${events.length} events. Use severity filter to narrow.</div>`;
+      }
+    }
+  }
+
+  // ---- Severity summary counts above the table ----
+  const summary = data.summary || {};
+  const total = summary.total_events ?? events.length;
+  const watch =
+    summary.watch_events ??
+    events.filter((e) => (e.severity || "").toLowerCase() === "watch").length;
+  const alert =
+    summary.alert_events ??
+    events.filter((e) => (e.severity || "").toLowerCase() === "alert").length;
+
+  // Inject counts into KPI cards if they haven't been set yet
+  if (dom.iwKpiWatch && dom.iwKpiWatch.textContent === "--")
+    dom.iwKpiWatch.textContent = watch;
+  if (dom.iwKpiAlert && dom.iwKpiAlert.textContent === "--")
+    dom.iwKpiAlert.textContent = alert;
+}
+
+// ── Machine State Transitions (pipeline L2) ──────────────────────────────────
+function renderIllwerkeTransitions(data) {
+  const transitions = data.transitions || data.segments || [];
+
+  if (dom.iwTransitionsSummary) {
+    const total = transitions.length;
+    const verified = transitions.filter(
+      (t) => t.signature_match === true,
+    ).length;
+    const failed = transitions.filter(
+      (t) => t.signature_match === false,
+    ).length;
+    dom.iwTransitionsSummary.innerHTML =
+      `<span style="color:#eaf4ff"><b>${total}</b> transitions</span> · ` +
+      `<span style="color:#2fd492"><b>${verified}</b> signature-verified</span> · ` +
+      `<span style="color:#ff6673"><b>${failed}</b> unverified</span>`;
+  }
+
+  if (!dom.iwTransitionsTable) return;
+  if (!transitions.length) {
+    dom.iwTransitionsTable.innerHTML =
+      '<div class="placeholder-text">No transition data</div>';
+    return;
+  }
+
+  const rows = transitions
+    .slice(0, 150)
+    .map((tr) => {
+      const tStr = (tr.start_utc || tr.t_start_iso || tr.ts_start || "—")
+        .substring(0, 16)
+        .replace("T", " ");
+      const tType = tr.transition_type || tr.type || "—";
+      const dur = tr.duration_s != null ? `${tr.duration_s.toFixed(0)} s` : "—";
+      const sm = tr.signature_match;
+      let sig;
+      if (sm === true)
+        sig = '<span class="iw-sig-ok" title="Signature verified">✓ OK</span>';
+      else if (sm === false)
+        sig =
+          '<span class="iw-sig-fail" title="Signature mismatch">✗ Fail</span>';
+      else sig = '<span class="iw-sig-null">—</span>';
+      const day = tStr.substring(0, 10);
+      return `<tr>
+        <td class="mono">${escapeHtml(tStr)}</td>
+        <td>${escapeHtml(tType)}</td>
+        <td>${sig}</td>
+        <td>${escapeHtml(dur)}</td>
+        <td>${escapeHtml(day)}</td>
+      </tr>`;
+    })
+    .join("");
+
+  dom.iwTransitionsTable.innerHTML = `
+    <table class="iw-transitions-table iw-models-table">
+      <thead><tr>
+        <th>Time (UTC)</th><th>Transition</th><th>Signature</th>
+        <th>Duration</th><th>Day</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+
+  if (transitions.length > 150) {
+    dom.iwTransitionsTable.innerHTML +=
+      `<div class="placeholder-text" style="margin-top:6px;font-size:11px">` +
+      `Showing 150 of ${transitions.length} transitions.</div>`;
+  }
+}
+
+// ── Physics Oracle & Signal Health (pipeline L1) ──────────────────────────────
+function renderIllwerkePhysicsOracle(validationData, overviewData) {
+  if (!dom.iwOraclePanel) return;
+  const v = validationData || {};
+  const ov = overviewData || {};
+
+  // Dwell ratios bar chart (inline Plotly) ─────────────────
+  const dwellRatios = v.dwell_ratios || ov.dwell_ratios || {};
+  const _DWELL_MODE_LABELS = {
+    ST: "Standstill",
+    TU: "Turbine",
+    PU: "Pump",
+    PH: "Phasenschieber",
+    TRANSITION: "Transitioning",
+    UNKNOWN: "Unknown",
+  };
+  const modeKeys = Object.keys(dwellRatios).filter(
+    (k) => dwellRatios[k] > 0.0001,
+  );
+  const modeColors = {
+    ST: "#6c757d",
+    TU: "#4fb8ff",
+    PU: "#2fd492",
+    PH: "#fd7e14",
+    TRANSITION: "#9b59b6",
+    UNKNOWN: "#e74c3c",
+  };
+
+  let dwellHtml = "";
+  if (modeKeys.length) {
+    const dwellDiv = document.createElement("div");
+    dwellDiv.style.cssText = "height:180px;margin-bottom:8px";
+    dom.iwOraclePanel.innerHTML = "";
+    dom.iwOraclePanel.appendChild(dwellDiv);
+
+    Plotly.react(
+      dwellDiv,
+      [
+        {
+          type: "bar",
+          orientation: "h",
+          x: modeKeys.map((k) => (dwellRatios[k] * 100).toFixed(1)),
+          y: modeKeys.map((k) => _DWELL_MODE_LABELS[k] || k),
+          text: modeKeys.map((k) => `${(dwellRatios[k] * 100).toFixed(1)}%`),
+          textposition: "outside",
+          textfont: { size: 11.5, color: "#eaf4ff" },
+          marker: { color: modeKeys.map((k) => modeColors[k] || "#6c757d") },
+          hovertemplate: "%{y}: %{x}%<extra></extra>",
+        },
+      ],
+      {
+        ...PLOTLY_LAYOUT_BASE,
+        height: 180,
+        margin: { t: 8, r: 60, b: 36, l: 120 },
+        xaxis: {
+          ...PLOTLY_LAYOUT_BASE.xaxis,
+          range: [
+            0,
+            Math.max(...modeKeys.map((k) => dwellRatios[k] * 100)) * 1.25,
+          ],
+          title: { text: "Campaign Dwell (%)", font: { size: 10.5 } },
+        },
+        yaxis: { ...PLOTLY_LAYOUT_BASE.yaxis, tickfont: { size: 11.5 } },
+        showlegend: false,
+      },
+      PLOTLY_CONFIG,
+    );
+  } else {
+    dom.iwOraclePanel.innerHTML = "";
+  }
+
+  // ── Metrics grid ─────────────────────────────────────────
+  const cov = v.steady_coverage_pct;
+  const covHtml =
+    cov != null
+      ? `<span style="color:${cov >= 90 ? "#2fd492" : cov >= 75 ? "#f6bf3a" : "#ff6673"}">${cov.toFixed(1)}%</span>`
+      : "—";
+
+  const freeze =
+    v.sensor_freeze_channels ??
+    Object.keys(v.sensor_freeze?.faulted_channels || {}).length;
+  const freezeHtml =
+    freeze != null
+      ? `<span style="color:${freeze === 0 ? "#2fd492" : "#f6bf3a"}">${freeze} ch</span>`
+      : "—";
+
+  const chiPass = v.head_chi2_pass;
+  const chiHtml =
+    chiPass === true
+      ? '<span style="color:#2fd492">✓ Pass</span>'
+      : chiPass === false
+        ? '<span style="color:#ff6673">✗ Fail</span>'
+        : "—";
+
+  const unknownFrac = v.unknown_fraction ?? v.UNKNOWN_fraction;
+  const unknownHtml =
+    unknownFrac != null
+      ? `<span style="color:${unknownFrac < 0.05 ? "#2fd492" : unknownFrac < 0.1 ? "#f6bf3a" : "#ff6673"}">${(unknownFrac * 100).toFixed(1)}%</span>`
+      : "—";
+
+  const nTrans = v.n_transitions ?? "—";
+  const oracleAcc = v.oracle_accuracy;
+  const accHtml =
+    oracleAcc != null
+      ? `<span style="color:${oracleAcc >= 0.95 ? "#2fd492" : "#f6bf3a"}">${(oracleAcc * 100).toFixed(1)}%</span>`
+      : "—";
+
+  const gridDiv = document.createElement("div");
+  gridDiv.className = "iw-oracle-grid";
+  gridDiv.innerHTML = `
+    <div class="iw-oracle-metric"><span class="iw-oracle-label">Steady Coverage</span><span class="iw-oracle-value">${covHtml}</span></div>
+    <div class="iw-oracle-metric"><span class="iw-oracle-label">Frozen Sensors</span><span class="iw-oracle-value">${freezeHtml}</span></div>
+    <div class="iw-oracle-metric"><span class="iw-oracle-label">Head χ² Test</span><span class="iw-oracle-value">${chiHtml}</span></div>
+    <div class="iw-oracle-metric"><span class="iw-oracle-label">Unknown Fraction</span><span class="iw-oracle-value">${unknownHtml}</span></div>
+    <div class="iw-oracle-metric"><span class="iw-oracle-label">Transitions Typed</span><span class="iw-oracle-value"><span style="color:#eaf4ff">${nTrans}</span></span></div>
+    <div class="iw-oracle-metric"><span class="iw-oracle-label">Oracle Accuracy</span><span class="iw-oracle-value">${accHtml}</span></div>
+  `;
+  dom.iwOraclePanel.appendChild(gridDiv);
+}
+
+function renderIllwerkeModels(data) {
+  if (!dom.iwModelsTable) return;
+  const models = data.models || [];
+  if (!models.length) {
+    dom.iwModelsTable.innerHTML =
+      '<div class="placeholder-text">No model data available</div>';
+    return;
+  }
+
+  let rows = "";
+  for (const m of models) {
+    const badge =
+      m.status === "ok"
+        ? `<span class="iw-badge-ok">OK</span>`
+        : `<span class="iw-badge-missing">${escapeHtml(m.status || "missing")}</span>`;
+
+    const rateRaw = m.anomaly_rate;
+    let rateTxt = "—";
+    let rateClass = "";
+    if (rateRaw != null) {
+      const pct = (rateRaw * 100).toFixed(2);
+      rateTxt = `${pct}%`;
+      rateClass =
+        rateRaw < 0.02
+          ? "iw-anom-rate-good"
+          : rateRaw < 0.15
+            ? "iw-anom-rate-warn"
+            : "iw-anom-rate-high";
+    }
+
+    const windowTxt =
+      m.n_anomalous != null
+        ? `${m.n_anomalous.toLocaleString()} / ${(m.n_windows || 0).toLocaleString()}`
+        : "—";
+
+    rows += `<tr>
+      <td class="iw-model-name">${escapeHtml(m.display)}</td>
+      <td>${badge}</td>
+      <td class="iw-metric ${rateClass}">${escapeHtml(rateTxt)}</td>
+      <td class="iw-metric">${escapeHtml(windowTxt)}</td>
+    </tr>`;
+  }
+
+  dom.iwModelsTable.innerHTML = `
+    <table class="iw-models-table">
+      <thead>
+        <tr>
+          <th>Model</th>
+          <th>Status</th>
+          <th>Anomaly Rate</th>
+          <th>Anomalous / Total Windows</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
 async function init() {
   // Tab switching
   document.querySelectorAll(".tab-btn").forEach((btn) => {
@@ -1463,6 +3297,74 @@ async function init() {
   dom.btnRefreshAlerts.addEventListener("click", fetchAlerts);
   if (dom.btnRefreshReports)
     dom.btnRefreshReports.addEventListener("click", renderReports);
+
+  // DTSS training button
+  if (dom.btnDtssTrain) {
+    dom.btnDtssTrain.addEventListener("click", startDtssTraining);
+  }
+
+  // Illwerke day selector
+  if (dom.iwDaySelect) {
+    dom.iwDaySelect.addEventListener("change", (e) => {
+      const day = e.target.value;
+      if (day) {
+        illwerkeSelectedDay = day;
+        loadIllwerkeDailyChart(day);
+      }
+    });
+  }
+
+  // Shared helper: re-fetch Gantt with current mode-source + anomaly model
+  async function reloadIllwerkeGantt() {
+    const modelKey = dom.iwGanttModelSelect ? dom.iwGanttModelSelect.value : "";
+    const modeSource = dom.iwGanttModeSource
+      ? dom.iwGanttModeSource.value
+      : "pipeline";
+    let url;
+    if (modeSource === "pipeline") {
+      // Always use pipeline endpoint — no model overlay needed
+      url = "/api/illwerke/pipeline/gantt";
+    } else {
+      const params = new URLSearchParams();
+      if (modelKey) params.set("model", modelKey);
+      if (modeSource !== "kmeans") params.set("mode_source", modeSource);
+      url =
+        "/api/illwerke/gantt" +
+        (params.toString() ? "?" + params.toString() : "");
+    }
+    try {
+      const gantt = await apiFetch(url);
+      renderIllwerkeGantt(gantt);
+    } catch (err) {
+      showToast("Gantt update failed: " + escapeHtml(err.message), "error");
+    }
+  }
+
+  // Illwerke gantt model selector — re-fetch gantt with anomaly overlay
+  if (dom.iwGanttModelSelect) {
+    dom.iwGanttModelSelect.addEventListener("change", reloadIllwerkeGantt);
+  }
+
+  // Illwerke gantt mode-source selector — re-fetch gantt with selected mode source
+  if (dom.iwGanttModeSource) {
+    dom.iwGanttModeSource.addEventListener("change", reloadIllwerkeGantt);
+  }
+
+  // Severity filter for anomaly events table
+  if (dom.iwEventsSeverity) {
+    dom.iwEventsSeverity.addEventListener("change", async () => {
+      const sev = dom.iwEventsSeverity.value || "";
+      try {
+        const url = sev
+          ? `/api/illwerke/pipeline/events?severity=${encodeURIComponent(sev)}`
+          : "/api/illwerke/pipeline/events";
+        const data = await apiFetch(url);
+        renderIllwerkeAnomalyEvents(data);
+      } catch (err) {
+        showToast("Events filter failed: " + escapeHtml(err.message), "error");
+      }
+    });
+  }
 
   // Operator dashboard: fetch overview + timeline on load
   await fetchOverview();

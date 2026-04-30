@@ -1,0 +1,14 @@
+id: d1
+root: data/first_test_dataset
+n_mics: 4
+n_vibrations: 4
+# CSV cadence ≈ 3 Hz on D1; we keep it at the native 4 Hz target so the
+# WavVibrationAdapter does light upsampling rather than throwing away samples.
+accel_target_sr: 4
+position_source: default  # D1 has no native positions — synthesized geometry
+label_scheme: d1_mode
+extra:
+  description: |
+    First test dataset. 4 mics (B,C,D,E) + 4 vibrations (B,C,D,E).
+    Folder labels: Pump / Standstill / Turbine / RandomFault. No spatial labels.
+    Use for RQ1 (mode + global anomaly).

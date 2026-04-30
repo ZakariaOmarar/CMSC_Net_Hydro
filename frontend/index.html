@@ -41,6 +41,7 @@
             <button class="tab-btn" data-tab="detection">Detection</button>
             <button class="tab-btn" data-tab="localization">Localization</button>
             <button class="tab-btn" data-tab="reports">Reports</button>
+            <button class="tab-btn" data-tab="illwerke">Illwerke</button>
         </div>
         <div class="nav-status">
             <span id="health-indicator" class="health-dot health-unknown"></span>
@@ -231,6 +232,160 @@
                 </div>
             </div>
         </div><!-- /tab-reports -->
+
+        <!-- TAB 5 – ILLWERKE REAL-PLANT CAMPAIGN -->
+        <div class="tab-page" id="tab-illwerke">
+
+            <!-- KPI row: 6 cards -->
+            <div class="kpi-row kpi-row-6">
+                <div class="kpi-card">
+                    <div class="kpi-label">Campaign Days</div>
+                    <div class="kpi-value" id="iw-kpi-days">--</div>
+                    <div class="kpi-delta" id="iw-kpi-days-range"></div>
+                </div>
+                <div class="kpi-card">
+                    <div class="kpi-label">Steady Windows</div>
+                    <div class="kpi-value" id="iw-kpi-windows">--</div>
+                    <div class="kpi-delta" id="iw-kpi-windows-sub"></div>
+                </div>
+                <div class="kpi-card kpi-turb">
+                    <div class="kpi-label">Turbine Time</div>
+                    <div class="kpi-value" id="iw-kpi-turbine">--</div>
+                </div>
+                <div class="kpi-card kpi-ph">
+                    <div class="kpi-label">Phasenschieber</div>
+                    <div class="kpi-value" id="iw-kpi-ph">--</div>
+                </div>
+                <div class="kpi-card kpi-watch">
+                    <div class="kpi-label">Watch Events</div>
+                    <div class="kpi-value" id="iw-kpi-watch">--</div>
+                </div>
+                <div class="kpi-card kpi-alert">
+                    <div class="kpi-label">Alert Events</div>
+                    <div class="kpi-value" id="iw-kpi-alert">--</div>
+                </div>
+            </div>
+
+            <!-- Full campaign Gantt — Physics Pipeline -->
+            <div class="card">
+                <div class="card-header">
+                    <div>
+                        <h2>Operating Mode Timeline &mdash; Physics Pipeline &middot; Rodund II &middot; Apr 15&ndash;22, 2026</h2>
+                        <span class="card-hint" id="iw-gantt-subtitle">Physics oracle labels &middot; each row&thinsp;=&thinsp;one day &middot; colour&thinsp;=&thinsp;mode &middot; hover for exact times &middot; click to load day detail</span>
+                    </div>
+                    <div class="card-header-actions">
+                        <label for="iw-gantt-mode-source" style="font-size:0.8rem;color:var(--text-muted);white-space:nowrap">Mode source:</label>
+                        <select id="iw-gantt-mode-source" class="seg-select" style="min-width:170px">
+                            <option value="pipeline" selected>Physics Pipeline (L4)</option>
+                            <option value="kmeans">K-Means (reference)</option>
+                        </select>
+                        <label for="iw-gantt-model" style="font-size:0.8rem;color:var(--text-muted);white-space:nowrap;margin-left:8px">Anomaly overlay:</label>
+                        <select id="iw-gantt-model" class="seg-select" style="min-width:170px">
+                            <option value="">— None —</option>
+                        </select>
+                    </div>
+                </div>
+                <div id="iw-gantt" class="iw-gantt-container"></div>
+            </div>
+
+            <!-- Anomaly Events — Physics Pipeline L5 -->
+            <div class="card">
+                <div class="card-header">
+                    <div>
+                        <h2>Anomaly Events &mdash; Full Campaign</h2>
+                        <span class="card-hint">Per-mode AE reconstruction z-score &middot; watch (&ge;4&sigma;) and alert (&ge;6&sigma;) severity levels from L5 pipeline</span>
+                    </div>
+                    <div class="card-header-actions">
+                        <select id="iw-events-severity" class="seg-select" style="min-width:130px">
+                            <option value="">All severities</option>
+                            <option value="alert">Alert only</option>
+                            <option value="watch">Watch only</option>
+                        </select>
+                    </div>
+                </div>
+                <div id="iw-events-chart" style="min-height:220px;"></div>
+                <div id="iw-events-table" class="iw-models-wrapper"></div>
+            </div>
+
+            <!-- Process variables + Mode distribution -->
+                <div class="two-col-grid">
+                <div class="card">
+                    <div class="card-header">
+                        <h2>Minute-by-minute Mode Timeline &amp; Process Variables</h2>
+                        <select id="iw-day-select" class="seg-select" style="min-width:160px">
+                            <option value="">-- Select day --</option>
+                        </select>
+                    </div>
+                    <div id="iw-process-chart" style="min-height:300px;"></div>
+                    <div id="iw-proc-vars-chart" style="min-height:260px;"></div>
+                </div>
+                <div class="card">
+                    <div class="card-header">
+                        <h2>Mode Distribution &mdash; Full Campaign</h2>
+                    </div>
+                    <div id="iw-mode-donut" style="min-height:300px;"></div>
+                </div>
+            </div>
+
+            <!-- Anomaly Z-score timeline -->
+            <div class="card">
+                <div class="card-header">
+                    <h2>Anomaly Z-Score &mdash; Full Campaign</h2>
+                    <span class="card-hint">Per-mode AE reconstruction error normalised by rolling baseline &middot; watch line = 4&sigma; &middot; alert line = 6&sigma; &middot; coloured by operating mode</span>
+                </div>
+                <div id="iw-score-timeline" style="min-height:260px;"></div>
+            </div>
+
+            <!-- Machine State Transitions -->
+            <div class="card">
+                <div class="card-header">
+                    <div>
+                        <h2>Machine State Transitions &mdash; L2 Physics Typing</h2>
+                        <span class="card-hint">Transitions detected by the physics oracle &middot; signature verification against known ROWII operating sequences</span>
+                    </div>
+                    <span id="iw-transitions-summary" class="card-hint" style="margin-left:auto"></span>
+                </div>
+                <div id="iw-transitions-table" class="iw-models-wrapper"></div>
+            </div>
+
+            <!-- Physics Oracle & Signal Health -->
+            <div class="card">
+                <div class="card-header">
+                    <div>
+                        <h2>Physics Oracle &amp; Signal Health &mdash; L1 Validation</h2>
+                        <span class="card-hint">GMM-derived thresholds &middot; dwell ratios &middot; sensor freeze detection &middot; net-head independence test</span>
+                    </div>
+                </div>
+                <div id="iw-oracle-panel" style="padding:12px 16px;"></div>
+            </div>
+
+            <!-- DTSS Unsupervised Mode Detection -->
+            <div class="card">
+                <div class="card-header">
+                    <div>
+                        <h2>DTSS &mdash; Unsupervised Mode Detection</h2>
+                        <span class="card-hint">VICReg TCN &rarr; GMVAE (K=7) &rarr; 7-state ED-HSMM &rarr; PELT &middot; fully unsupervised &middot; gate-primary labeling</span>
+                    </div>
+                    <div class="card-header-actions">
+                        <button id="btn-dtss-train" class="btn btn-accent btn-sm">&#9654; Run Training</button>
+                        <span id="dtss-train-status" class="train-badge badge-not-trained">Not Run</span>
+                    </div>
+                </div>
+                <div id="dtss-status-content" class="dtss-status-content">
+                    <div class="placeholder-text">Click "Run Training" to start the DTSS pipeline (~45 min on CPU). Results will appear in the Mode Timeline above as source "DTSS".</div>
+                </div>
+            </div>
+
+            <!-- Model status table -->
+            <div class="card">
+                <div class="card-header">
+                    <h2>Anomaly Detection Models &mdash; Illwerke Campaign</h2>
+                    <span class="card-hint">All models trained unsupervised on 19,848 windows across 7 days</span>
+                </div>
+                <div id="iw-models-table" class="iw-models-wrapper"></div>
+            </div>
+
+        </div><!-- /tab-illwerke -->
 
     </div><!-- /app-main -->
 

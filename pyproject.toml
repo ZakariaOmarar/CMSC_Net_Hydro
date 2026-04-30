@@ -25,6 +25,8 @@ dl = [
     "torch>=2.2",
     "scikit-learn>=1.4",
     "umap-learn>=0.5",
+    "hmmlearn>=0.3",
+    "ruptures>=1.1",
 ]
 
 [tool.hatch.build.targets.wheel]
