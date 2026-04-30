@@ -29,16 +29,26 @@ from .mode_lgbm import (
     predict_modes,
     train_v0_mode_lgbm,
 )
+from .srp_phat_baseline import (
+    SRPConfig,
+    evaluate_srp_phat,
+    predict_srp_phat,
+    summarise,
+)
 
 __all__ = [
     "LSTMAutoencoderV0",
     "ModeTrainResult",
+    "SRPConfig",
     "V0Config",
     "V0ModeConfig",
+    "evaluate_srp_phat",
     "extract_log_mel_windows",
     "extract_mode_features",
     "predict_modes",
+    "predict_srp_phat",
     "score_recordings",
+    "summarise",
     "train_v0_lstm_ae",
     "train_v0_mode_lgbm",
 ]
