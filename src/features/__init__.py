@@ -1,4 +1,9 @@
-"""Feature contracts and multimodal extractors."""
+"""Feature extractors for the V0–V5 pipeline.
+
+  - `acoustic_representations`: STFT / CWT / MFCC primitives (CWT used by `audio_spectral`).
+  - `audio_spectral`:            log-mel + CWT stack for the V1 acoustic encoder.
+  - `vibration_temporal`:        amplitude + envelope + rolling kurtosis for the V1 vibration encoder.
+"""
 
 from .acoustic_representations import (
     build_cwt_mfcc_encoder_input,
@@ -9,25 +14,21 @@ from .acoustic_representations import (
     compute_mfcc_with_deltas,
     compute_stft_stack,
 )
-from .cross_channel import CrossChannelExtractor
-from .feature_frame import FeatureFrame
-from .frequency_domain import FrequencyDomainExtractor
-from .time_domain import TimeDomainExtractor
-from .vibration_frequency import VibrationFrequencyExtractor
-from .vibration_envelope import VibrationEnvelopeExtractor
+from .audio_spectral import (
+    compute_encoder_input_stack,
+    compute_log_mel_spectrogram,
+)
+from .vibration_temporal import compute_vibration_input_stack
 
 __all__ = [
-    "FeatureFrame",
+    "build_cwt_mfcc_encoder_input",
     "compute_cwt_scalogram",
     "compute_cwt_scalogram_stack",
-    "compute_mfcc_with_deltas",
-    "compute_mfcc_stack",
-    "build_cwt_mfcc_encoder_input",
+    "compute_encoder_input_stack",
+    "compute_log_mel_spectrogram",
     "compute_log_stft_spectrogram",
+    "compute_mfcc_stack",
+    "compute_mfcc_with_deltas",
     "compute_stft_stack",
-    "TimeDomainExtractor",
-    "FrequencyDomainExtractor",
-    "VibrationFrequencyExtractor",
-    "VibrationEnvelopeExtractor",
-    "CrossChannelExtractor",
+    "compute_vibration_input_stack",
 ]

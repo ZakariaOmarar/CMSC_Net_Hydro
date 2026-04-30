@@ -1,165 +1,110 @@
-﻿# CMSC_Net_Hydro
+# CMSC_Net_Hydro
 
-The pipeline processes synchronized acoustic and vibration recordings from a reversible Francis pump-turbine, extracts multimodal features, builds latent representations, and trains anomaly detection models conditioned on the operational context (Turbine / Pump / Standstill).
+Multimodal acoustic + vibration anomaly detection and source localization for
+multi-mode reversible Francis pump-turbines.  Master's thesis codebase
+implementing the V0 → V5 pipeline described in
+[`.claude/plans/because-i-have-not-replicated-acorn.md`](.claude/plans/because-i-have-not-replicated-acorn.md).
 
----
+## Thesis claim
 
-## Thesis Context
+> A single label-free model in which an unsupervised operational-context
+> vector, learned by self-supervised pretraining on fused acoustic-vibration
+> streams, simultaneously conditions an anomaly detection head and an
+> anomaly-gated source-localization head.
 
-**Facility:** Rodundwerk II (ROW II), Vorarlberg, Austria — single reversible Francis unit, 295 MW turbine / 286 MW pump, 375 rpm nominal.
+The chained system (mode → anomaly → gated-localization) is the contribution.
+Chapter 6 reports four severing ablations against the chained system, not a
+bake-off of published architectures.
 
-**Sensor array (13 sensors, NTP-synchronized):**
+## Datasets in scope
 
-- Level 1 (generator): 4 microphones at 0°, 90°, 180°, 270°
-- Level 2 (turbine): 5 microphones at 72° spacing + 4 accelerometers at 90° spacing
-- Audio: mono WAV, 16 kHz, 16-bit — Vibration: CSV with FFT peak amplitude and dominant frequency
+| Dataset | Sensors | Folder labels | Spatial labels | Role |
+|---|---|---|---|---|
+| `data/first_test_dataset` | 4 mics + 4 vibration | Pump / Standstill / Turbine / RandomFault | none (synthetic geometry) | RQ1 + RQ2 |
+| `data/second_test_dataset` | 5 mics + 5 vibration (`node_position.txt`) | …same + `pos_(x,y,z)_*` subfolders | YES, 5 positions | RQ1 + RQ2 + RQ3 |
+| `data/third_test_dataset` | 9 mics (stereo pairs) + 4 accel (`position.json`) | speed1 / speed2 / speed3 + `hit_between_Fl_Gr_speed1` | YES, 1 hit | RQ2 (speed shift) + RQ3 + RQ4a |
+| `data/illwerke_raw_stub` | future: 9 mics + 4 accel | TBD | TBD | drop-in via config when delivered |
 
-**Operating modes:** Standstill, Turbine, Pump — each with distinct acoustic/vibration signatures that the anomaly model must condition on.
+Adding a new dataset is a YAML edit at `configs/datasets/<id>.yaml` — see
+[`docs/ideal_prototype_dataset.md`](docs/ideal_prototype_dataset.md) for the
+full collection spec.
 
----
-
-## Pipeline Overview
+## Architecture (target end-state)
 
 ```
-WAV / CSV recordings
-  → ingestion          (scan and load recordings by layout)
-  → preprocessing      (calibrate → DC remove → bandpass → z-score)
-  → feature extraction (time-domain, frequency-domain, envelope, cross-channel, acoustic)
-  → latent cache build (z feature vector, c context vector → .npz)
-  → model training     (CNF anomaly + mode classifier + baselines)
-  → inference & report (anomaly events, mode labels, consolidated report)
+   WAV / vibration  →  per-modality CNN encoders + Set-Transformer pool
+                           (sensor-pos + modality + dataset embeddings)
+                                       │
+                                       ▼
+                       Bidirectional cross-attention (1 block)
+                                       │
+                                       ▼
+                  fused tokens z_t  →  c_t = PMA(z_t)        ── continuous mode label (cluster/Hungarian)
+                                       │             │
+                                       │      FiLM(c) ┐
+                                       ▼              │
+                       Conditional Normalizing Flow ◀─┘   ── continuous anomaly score s_t
+                                       │
+                                       ▼  (gate: s_t > per-cluster 99 % threshold)
+                                       │
+                       Cross3D 3-D CNN on SRP-PHAT + accel-TDOA, FiLM(c [+ s])
+                                       ▼
+                                    (x, y, z)            ── only on alert windows
 ```
 
----
+## Iteration ladder (current state)
 
-## Repository Layout
+| Iter | What it delivers | Status |
+|---|---|---|
+| **V0**  | Reference baselines: LSTM-AE on log-mel (RQ2), LightGBM on hand-engineered features (RQ1 upper-bound), classical SRP-PHAT (RQ3) | LSTM-AE done · LightGBM done (smoke pending) · SRP-PHAT entry point pending |
+| **V1**  | Per-modality SSL warmup (contrastive only) + cluster-purity sanity gate. Label-free. | pending |
+| **V2**  | Bidirectional cross-attention fusion + multimodal SSL (contrastive + Latent Masked Modeling), inherits V1 weights | pending |
+| **V3**  | Conditional Normalizing Flow anomaly head + per-cluster percentile thresholds + synthetic transition stress-test + A2 ablation | pending |
+| **V4**  | Anomaly-gated Cross3D localization head + accel-TDOA + FiLM conditioning + A3 ablation | pending |
+| **V5**  | RQ4a D3 speed conditioning + RQ4b Illwerke Allg_M1 MI ranking | pending |
+| **streaming** | Gated runtime pipeline emitting `(mode, anomaly_score, alert_flag, (x,y,z) | None)` per window | pending |
 
-```text
-configs/                          # YAML training/inference configs
-data/                             # Input recordings (gitignored)
-  All/                            # All modes combined (used for latent build)
-  Pump/ Turbine/ Standstill/ ...  # Per-mode splits
-artifacts/latents/                # Built latent .npz caches (gitignored)
-results/                          # Model artifacts, inference outputs, reports (gitignored)
+## Layout
+
+```
 src/
-  config/                         # Global constants (sensor geometry, machine params)
-  data/                           # DataSegment contract
-  features/                       # Multimodal feature extractors
-  ingestion/                      # Recording scanning and loading
-  preprocessing/                  # Signal preprocessing blocks
-  modeling/
-    core/                         # Shared contracts, runtime utils, run manifest
-    latent/                       # Latent cache builder and preprocessing helpers
-    models/                       # Model architecture definitions (CNF, AEs, MLP, OC-SVM)
-    flow/                         # Conditional normalizing flow train/infer pipeline
-    mode/                         # Operating-mode classifier pipeline
-    baselines/                    # OC-SVM, LSTM-AE, CNN-AE baseline pipelines
-    orchestration/                # End-to-end train-all orchestrator
-    reporting/                    # Consolidated model report generation
-    cli/                          # YAML config loader
-tests/unit/                       # Unit test suite
+├── config/               physical constants (sensor geometry, speeds)
+├── data/                 DataSegment universal data contract
+├── ingestion/
+│   ├── loader.py / adapters.py / scanner.py   generic WAV+CSV reader
+│   ├── positions.py                           per-dataset 3-D position registry
+│   ├── test_dataset_loader.py                 unified loader (D1/D2/D3/illwerke)
+│   ├── illwerke_loader.py / udbf_reader.py    Allg_M1 SCADA mining (V5.2)
+├── features/
+│   ├── audio_spectral.py                      log-mel + CWT V1 encoder input
+│   ├── vibration_temporal.py                  amplitude + envelope + kurtosis
+│   └── acoustic_representations.py            CWT / MFCC / STFT primitives
+└── modeling/
+    ├── localization/localization_head.py      GCC-PHAT, SRP-PHAT, Cross3D primitives (V4)
+    └── anomaly_baselines/
+        ├── lstm_ae.py                         V0 LSTM-AE on log-mel
+        └── mode_lgbm.py                       V0 LightGBM mode classifier
+
+configs/
+├── datasets/{d1, d2, d3, illwerke_raw_stub}.yaml   per-dataset registration
+└── test_datasets/v0_lstm_ae.yaml                   V0 LSTM-AE config
+
+results/illwerke/    frozen Illwerke 5-layer pipeline outputs (V5.2 inputs)
+docs/                Thesis.md + ideal_prototype_dataset.md
+tests/               smoke tests
 ```
 
----
+## Run the V0 smoke tests
 
-## Models
-
-| Model                   | Type                         | Description                                                                                                                       |
-| ----------------------- | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| **CNF**                 | Conditional normalizing flow | Primary anomaly model. Learns `p(z \| c)`; score = −log p. Context `c` adapts the density per operating mode via FiLM modulation. |
-| **OC-SVM**              | One-class SVM                | Baseline. Trained on healthy latent vectors `z`.                                                                                  |
-| **LSTM-AE**             | LSTM autoencoder             | Baseline. Reconstruction error as anomaly score.                                                                                  |
-| **CNN-AE**              | CNN autoencoder              | Baseline. Reconstruction error as anomaly score.                                                                                  |
-| **ModeMLP / ModeCNN2D** | Mode classifier              | Labels each window Pump / Turbine / Standstill; gates anomaly flags at transitions.                                               |
-
----
-
-## Setup
-
-**Requirements:** Python ≥ 3.11
-
-```powershell
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install -e ".[dev,dl]"
+```bash
+python -m pytest tests/test_test_dataset_loader.py tests/test_v0_lstm_ae.py -v
 ```
 
-Core dependencies: `numpy`, `scipy`, `librosa`, `pywavelets`, `pyyaml`, `pydantic`.
-Deep learning extras (`dl`): `torch`, `scikit-learn`, `umap-learn`.
+## Notes on the previous repo state
 
----
-
-## Usage
-
-### Build Latent Caches
-
-Build `.npz` latent files from raw recordings before any model training.
-
-```python
-from pathlib import Path
-from src.modeling.latent.builder import build_latent_cache
-
-summaries = build_latent_cache(
-    data_root=Path("data/first_test_dataset/All"),
-    output_dir=Path("artifacts/latents"),
-    mode="mic_vibration",
-)
-```
-
-### Train All Models
-
-Runs the full sequence: anomaly training → mode training → RandomFault inference → report.
-
-```powershell
-python -m train_all_models
-```
-
-Or with explicit config overrides:
-
-```powershell
-python -m train_all_models --config-dir configs --artifacts-root results
-```
-
-### Individual Pipelines
-
-| Task                  | Entry point                                            |
-| --------------------- | ------------------------------------------------------ |
-| CNF train/calibrate   | `src.modeling.flow.train.train_and_calibrate_flow`     |
-| CNF inference         | `src.modeling.flow.infer.score_with_context_smoothing` |
-| Mode classifier train | `src.modeling.mode.train.train_mode_classifier`        |
-| Baseline train        | `src.modeling.baselines.train.train_baseline_model`    |
-| Baseline inference    | `src.modeling.baselines.train.infer_baseline_model`    |
-
----
-
-## Configuration
-
-YAML configs live in `configs/`. Keys are normalized to snake_case on load.
-
-| File                                      | Purpose                                 |
-| ----------------------------------------- | --------------------------------------- |
-| `anomaly_train.yaml`                      | CNF anomaly model training              |
-| `anomaly_infer_randomfault.yaml`          | CNF inference on RandomFault recordings |
-| `anomaly_baseline_train.yaml`             | Baseline model training                 |
-| `anomaly_baseline_infer_randomfault.yaml` | Baseline inference                      |
-| `mode_train.yaml`                         | Mode classifier training                |
-
----
-
-## Outputs
-
-| Path                                      | Contents                                                       |
-| ----------------------------------------- | -------------------------------------------------------------- |
-| `artifacts/latents/*.npz`                 | Latent arrays `z`, `c`, `recording_id`, `is_transition_window` |
-| `results/<model>/anomaly/`                | Trained model artifacts and inference JSON                     |
-| `results/<model>/mode/`                   | Mode classifier artifacts                                      |
-| `results/reports/model_report.json`       | Consolidated comparison across all models                      |
-| `results/reports/train_all_manifest.json` | Per-job run manifest with signatures and status                |
-
----
-
-## Tests
-
-```powershell
-python -m pytest tests/unit/ -q
-```
+A prior iteration of this repo implemented an Illwerke-specific 5-layer
+physics pipeline + Plotly.js dashboard.  That code is preserved in commit
+`51b77db` (`git checkout 51b77db -- <path>` to recover any file) and was
+removed when the thesis architecture pivoted to the V0–V5 chained label-free
+system above.  The Illwerke chapter results in `results/illwerke/` are kept
+intact as frozen evidence and feed the V5.2 SCADA-mining analysis.
