@@ -57,7 +57,7 @@ full collection spec.
 | Iter | What it delivers | Status |
 |---|---|---|
 | **V0**  | Reference baselines: LSTM-AE on log-mel (RQ2), LightGBM on hand-engineered features (RQ1 upper-bound), classical SRP-PHAT (RQ3) | LSTM-AE done · LightGBM done (smoke pending) · SRP-PHAT entry point pending |
-| **V1**  | Per-modality SSL warmup (contrastive only) + cluster-purity sanity gate. Label-free. | pending |
+| **V1**  | Per-modality SSL warmup (contrastive only) + cluster-purity sanity gate. Label-free. V2 inherits weights. | done (smoke); full-run pending |
 | **V2**  | Bidirectional cross-attention fusion + multimodal SSL (contrastive + Latent Masked Modeling), inherits V1 weights | pending |
 | **V3**  | Conditional Normalizing Flow anomaly head + per-cluster percentile thresholds + synthetic transition stress-test + A2 ablation | pending |
 | **V4**  | Anomaly-gated Cross3D localization head + accel-TDOA + FiLM conditioning + A3 ablation | pending |
