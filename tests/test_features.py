@@ -84,11 +84,25 @@ def test_encoder_input_stack_shape(name: str) -> None:
 @pytest.mark.parametrize("name", ["d1", "d2", "d3"])
 def test_vibration_input_stack_shape(name: str) -> None:
     seg, _, vib = _short_segment(name)
+    # Default (standardize=True): per-channel z-score on amplitude + envelope.
     stack = compute_vibration_input_stack(vib, kurtosis_window=5)
     assert stack.ndim == 3
     assert stack.shape[0] == seg.segment.n_accel_channels
     assert stack.shape[1] == 3  # (amplitude, envelope, rolling kurtosis)
     assert stack.shape[2] == vib.shape[1]
     assert np.all(np.isfinite(stack))
-    # Envelope is non-negative.
-    assert np.all(stack[:, 1, :] >= 0.0)
+    # Standardised channels (0=amplitude, 1=envelope) are zero-mean per channel.
+    if vib.shape[1] >= 5:
+        amp_means = stack[:, 0, :].mean(axis=-1)
+        env_means = stack[:, 1, :].mean(axis=-1)
+        assert np.allclose(amp_means, 0.0, atol=1e-3)
+        assert np.allclose(env_means, 0.0, atol=1e-3)
+
+
+@pytest.mark.parametrize("name", ["d1", "d2", "d3"])
+def test_vibration_input_stack_legacy_unstandardized(name: str) -> None:
+    """Setting `standardize=False` reproduces the pre-2026-05 envelope
+    invariants — useful for comparison against legacy checkpoints."""
+    seg, _, vib = _short_segment(name)
+    stack = compute_vibration_input_stack(vib, kurtosis_window=5, standardize=False)
+    assert np.all(stack[:, 1, :] >= 0.0)  # envelope = |hilbert(x)| ≥ 0

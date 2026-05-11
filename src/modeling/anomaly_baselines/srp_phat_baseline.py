@@ -37,12 +37,23 @@ _HIT_RE = re.compile(r"^hit_between_(?P<a>[A-Za-z0-9]+)_(?P<b>[A-Za-z0-9]+)_spee
 
 @dataclass(frozen=True)
 class SRPConfig:
-    """Hyperparameters for the V0 classical SRP-PHAT baseline."""
+    """Hyperparameters for the V0 classical SRP-PHAT baseline.
+
+    Defaults are tuned for the ~ 10 cm bench-top prototype scale used in
+    D2/D3/D4 (mic positions span 0–11 cm; spatial labels span ~ 50 cm).
+    `grid_step_m = 1 cm` is the smallest resolution that still finishes
+    in seconds per recording on CPU; a smaller step would over-resolve
+    the SRP peak which is itself bounded above by the array's spatial
+    aliasing limit.
+    """
 
     c_air: float = 343.0  # speed of sound, m/s
     window_seconds: float = 1.0
-    grid_step_m: float = 0.05  # 5 cm grid resolution
-    grid_margin_m: float = 0.10  # 10 cm padding around the mic-array bbox
+    grid_step_m: float = 0.01  # 1 cm grid resolution (was 5 cm)
+    grid_margin_m: float = 0.20  # 20 cm padding so the off-array spatial
+                                 # labels (D2/D4 reach 40 cm) are inside the
+                                 # search volume even though the mic bbox
+                                 # itself is only ~ 11 cm wide.
 
 
 # ---------------------------------------------------------------------------

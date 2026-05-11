@@ -106,7 +106,7 @@ class ChannelTokenEnricher(nn.Module):
         feature_dim: int,
         embed_dim: int = 128,
         n_modalities: int = 2,
-        n_datasets: int = 4,
+        n_datasets: int = 5,
         modality_emb_dim: int = 16,
         dataset_emb_dim: int = 16,
     ) -> None:

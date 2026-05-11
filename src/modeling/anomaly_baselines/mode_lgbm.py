@@ -23,6 +23,7 @@ Training:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Iterable
 
 import numpy as np
@@ -44,7 +45,18 @@ from ...ingestion.test_dataset_loader import (
 
 @dataclass(frozen=True)
 class V0ModeConfig:
-    """Hyperparameters for the V0 LightGBM mode classifier."""
+    """Hyperparameters for the V0 LightGBM mode classifier.
+
+    target_classes restricted to the three healthy operating modes —
+    `RandomFault` is anomaly status, not a mode (separate output of the
+    chained system, handled by V3).  Including it here at training time
+    would force the LightGBM model to learn the mode-vs-anomaly axis
+    simultaneously and conflate the two RQ1 / RQ2 outputs.
+
+    The V0 trainer adapts `num_class` to whichever subset of these three
+    modes is actually present in the campaign at hand (D1: Pump + Turbine,
+    D2: all three).  Single-mode campaigns are skipped with a clear log.
+    """
 
     n_mels: int = 64
     n_fft: int = 1024
@@ -55,9 +67,8 @@ class V0ModeConfig:
         "Pump",
         "Standstill",
         "Turbine",
-        "RandomFault",
     )
-    val_ratio: float = 0.5  # held-out recordings (D1/D2 each have 1 rec per class)
+    val_ratio: float = 0.5
     seed: int = 42
     n_estimators: int = 500
     learning_rate: float = 0.05
@@ -184,7 +195,13 @@ class ModeTrainResult:
 def _gather_labelled_windows(
     segments: Iterable[TestDatasetSegment], cfg: V0ModeConfig
 ) -> tuple[np.ndarray, np.ndarray, list[str], list[str]]:
-    """Stack windows from labelled recordings; return X, y, recording_id_per_window."""
+    """Stack windows from labelled recordings; return X, y, fully-qualified
+    recording_id_per_window.
+
+    The recording-key is `<source_dir_basename>/<recording_id>` so that
+    D1's same-`recording_id`-in-different-folders case (e.g. `All/Pump` vs
+    `Pump/Pump`) is disambiguated for the held-out split.
+    """
     feature_names: list[str] | None = None
     Xs: list[np.ndarray] = []
     ys: list[int] = []
@@ -198,9 +215,10 @@ def _gather_labelled_windows(
             continue
         if feature_names is None:
             feature_names = names
+        rec_key = f"{Path(s.source_dir).name}/{s.recording_id}"
         Xs.append(feats)
         ys.extend([label_to_idx[s.mode_label]] * feats.shape[0])
-        recs.extend([s.recording_id] * feats.shape[0])
+        recs.extend([rec_key] * feats.shape[0])
     if not Xs:
         return (
             np.zeros((0, 0), dtype=np.float32),
@@ -230,6 +248,38 @@ def _split_by_recording(
     return train_ids, val_ids
 
 
+def _stratified_split_by_recording(
+    rec_ids: list[str],
+    rec_to_label: dict[str, int],
+    val_ratio: float,
+    seed: int,
+) -> tuple[list[str], list[str]]:
+    """Stratified-by-class held-out split at the recording level.
+
+    Each class contributes ⌊val_ratio · count⌋ recordings (≥ 1 when
+    count ≥ 2) to val.  Single-recording classes stay in train so the
+    held-out doesn't degenerate to 1-class purity.
+    """
+    rng = np.random.default_rng(seed)
+    unique_recs = sorted(set(rec_ids))
+    by_label: dict[int, list[str]] = {}
+    for r in unique_recs:
+        by_label.setdefault(rec_to_label[r], []).append(r)
+    train_ids: set[str] = set()
+    val_ids: set[str] = set()
+    for lbl, recs in by_label.items():
+        recs_shuffled = list(recs)
+        rng.shuffle(recs_shuffled)
+        if len(recs_shuffled) <= 1:
+            train_ids.update(recs_shuffled)
+            continue
+        n_val = max(1, int(round(len(recs_shuffled) * val_ratio)))
+        n_val = min(n_val, len(recs_shuffled) - 1)  # keep ≥ 1 in train
+        val_ids.update(recs_shuffled[:n_val])
+        train_ids.update(recs_shuffled[n_val:])
+    return sorted(train_ids), sorted(val_ids)
+
+
 def _macro_f1(y_true: np.ndarray, y_pred: np.ndarray, n_classes: int) -> tuple[float, list[float], np.ndarray]:
     cm = np.zeros((n_classes, n_classes), dtype=np.int64)
     for t, p in zip(y_true, y_pred):
@@ -248,7 +298,15 @@ def _macro_f1(y_true: np.ndarray, y_pred: np.ndarray, n_classes: int) -> tuple[f
 def train_v0_mode_lgbm(
     loader: TestDatasetLoader, cfg: V0ModeConfig | None = None
 ) -> ModeTrainResult:
-    """Train the V0 LightGBM mode classifier on labelled recordings."""
+    """Train the V0 LightGBM mode classifier on labelled recordings.
+
+    Adapts `num_class` to the modes actually present in the campaign at
+    hand (D1: Pump + Turbine = 2-class; D2: all three modes = 3-class).
+    Recording-level held-out split is **stratified by class** to ensure
+    every held-out fold contains at least one recording of each present
+    class — without this, val sets routinely degenerated to a single
+    class and macro-F1 collapsed to 0.
+    """
     try:
         import lightgbm as lgb
     except ImportError as exc:
@@ -264,7 +322,22 @@ def train_v0_mode_lgbm(
     if X.shape[0] == 0:
         raise RuntimeError("no labelled windows found for V0 mode classifier")
 
-    train_ids, val_ids = _split_by_recording(rec_ids, cfg.val_ratio, cfg.seed)
+    # Adapt to present classes only.  `y` carries indices into
+    # `cfg.target_classes`; we remap to a contiguous index space over the
+    # subset that actually appears in this campaign.
+    present_label_indices = sorted(set(int(v) for v in y))
+    present_classes = tuple(cfg.target_classes[i] for i in present_label_indices)
+    if len(present_classes) < 2:
+        raise RuntimeError(
+            f"V0 LGBM needs ≥ 2 present classes, got {present_classes}"
+        )
+    old_to_new = {old: new for new, old in enumerate(present_label_indices)}
+    y = np.asarray([old_to_new[int(v)] for v in y], dtype=np.int32)
+
+    rec_to_label = {r: int(yi) for r, yi in zip(rec_ids, y)}
+    train_ids, val_ids = _stratified_split_by_recording(
+        rec_ids, rec_to_label, cfg.val_ratio, cfg.seed
+    )
     train_mask = np.array([r in train_ids for r in rec_ids], dtype=bool)
     val_mask = np.array([r in val_ids for r in rec_ids], dtype=bool)
 
@@ -279,17 +352,32 @@ def train_v0_mode_lgbm(
     train_data = lgb.Dataset(X_train, label=y_train, feature_name=feature_names)
     val_data = lgb.Dataset(X_val, label=y_val, feature_name=feature_names, reference=train_data)
 
-    params = {
-        "objective": "multiclass",
-        "num_class": len(cfg.target_classes),
-        "metric": "multi_logloss",
-        "learning_rate": cfg.learning_rate,
-        "num_leaves": cfg.num_leaves,
-        "min_child_samples": cfg.min_child_samples,
-        "verbose": -1,
-        "seed": cfg.seed,
-        "class_weight": "balanced",
-    }
+    # Binary objective when only 2 classes are present (D1).
+    if len(present_classes) == 2:
+        objective = "binary"
+        params = {
+            "objective": "binary",
+            "metric": "binary_logloss",
+            "learning_rate": cfg.learning_rate,
+            "num_leaves": cfg.num_leaves,
+            "min_child_samples": cfg.min_child_samples,
+            "verbose": -1,
+            "seed": cfg.seed,
+            "is_unbalance": True,
+        }
+    else:
+        objective = "multiclass"
+        params = {
+            "objective": "multiclass",
+            "num_class": len(present_classes),
+            "metric": "multi_logloss",
+            "learning_rate": cfg.learning_rate,
+            "num_leaves": cfg.num_leaves,
+            "min_child_samples": cfg.min_child_samples,
+            "verbose": -1,
+            "seed": cfg.seed,
+            "class_weight": "balanced",
+        }
     booster = lgb.train(
         params,
         train_data,
@@ -300,17 +388,21 @@ def train_v0_mode_lgbm(
 
     if X_val.shape[0] > 0:
         probs = booster.predict(X_val, num_iteration=booster.best_iteration)
+        # Binary classifier returns 1-D probabilities (P(class=1)); cast to
+        # the multiclass-style argmax for downstream code uniformity.
+        if objective == "binary":
+            probs = np.stack([1.0 - probs, probs], axis=1)
         y_pred = np.argmax(probs, axis=1)
-        macro_f1, per_class, cm = _macro_f1(y_val, y_pred, len(cfg.target_classes))
-        per_class_dict = {c: f for c, f in zip(cfg.target_classes, per_class)}
+        macro_f1, per_class, cm = _macro_f1(y_val, y_pred, len(present_classes))
+        per_class_dict = {c: f for c, f in zip(present_classes, per_class)}
     else:
-        macro_f1, per_class_dict, cm = 0.0, {c: 0.0 for c in cfg.target_classes}, np.zeros(
-            (len(cfg.target_classes), len(cfg.target_classes)), dtype=np.int64
-        )
+        macro_f1 = 0.0
+        per_class_dict = {c: 0.0 for c in present_classes}
+        cm = np.zeros((len(present_classes), len(present_classes)), dtype=np.int64)
 
     return ModeTrainResult(
         booster=booster,
-        classes=tuple(cfg.target_classes),
+        classes=tuple(present_classes),
         feature_names=feature_names,
         standardiser_mean=mean.astype(np.float32),
         standardiser_std=std.astype(np.float32),
@@ -327,7 +419,12 @@ def predict_modes(
     segments: Iterable[TestDatasetSegment],
     cfg: V0ModeConfig,
 ) -> list[dict]:
-    """Predict per-window mode probabilities + argmax for each segment."""
+    """Predict per-window mode probabilities + argmax for each segment.
+
+    Handles both the multiclass case (probs shape ``(N, K)``) and the
+    LightGBM binary case (probs shape ``(N,)`` representing P(class=1)),
+    casting binary outputs to a 2-column matrix for downstream uniformity.
+    """
     out: list[dict] = []
     for s in segments:
         feats, _ = extract_mode_features(s, cfg)
@@ -335,6 +432,8 @@ def predict_modes(
             continue
         norm = (feats - result.standardiser_mean) / result.standardiser_std
         probs = result.booster.predict(norm, num_iteration=result.booster.best_iteration)
+        if probs.ndim == 1:  # binary classifier
+            probs = np.stack([1.0 - probs, probs], axis=1)
         preds = np.argmax(probs, axis=1)
         out.append(
             {

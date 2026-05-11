@@ -1,0 +1,44 @@
+# V3 conditional anomaly head — full-run config.
+# Frozen V2 fusion encoder produces (mean-pool x, PMA c) per healthy window;
+# a RealNVP CNF with FiLM(c) coupling learns p(x | c).  Anomaly score per
+# window is -log p(x | c).  Per-cluster percentile thresholds are fitted on
+# held-out healthy scores using K-means(k=4) on c_t (label-free at fit time).
+#
+# Two ablation knobs:
+#   - `unconditional: true` zeros c at train+infer for the A2 ablation.
+#   - The synthetic transition stress-test is run separately via the
+#     `transition_fpr` helper on adjacent-mode pairs.
+
+dataset_configs: [configs/datasets/d1.yaml, configs/datasets/d2.yaml, configs/datasets/d3.yaml]
+v2_checkpoint: results/v2/fusion_ssl/encoder.pt
+output_dir: results/v3/anomaly_cnf
+
+# CNF dims
+n_layers: 6
+hidden_dim: 64
+n_hidden_per_net: 2
+
+# Training
+epochs: 30
+batch_size: 32
+lr: 1.0e-3
+weight_decay: 1.0e-5
+val_ratio: 0.3
+
+# A2 ablation knob
+unconditional: false
+
+# Threshold fit
+n_threshold_clusters: 4
+threshold_percentile: 99
+
+# Transition stress-test pairs (D1+D2 adjacent modes).  Used by the
+# transition_fpr helper, not by the trainer.
+transition_pairs:
+  - [Pump, Standstill]
+  - [Standstill, Turbine]
+  - [Turbine, Pump]
+crossfade_seconds: 1.0
+
+seed: 42
+device: cpu

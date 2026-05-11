@@ -38,7 +38,12 @@ class WavVibrationAdapter:
         vibration_glob: str = "vibration_*.csv",
         accel_target_sr: int = ACCEL_SAMPLE_RATE_TARGET,
         allowed_mic_counts: tuple[int, ...] = (4, 9),
+        vibration_format: str = "peak",
     ) -> None:
+        if vibration_format not in ("peak", "raw"):
+            raise IngestionError(
+                f"vibration_format must be 'peak' or 'raw', got {vibration_format!r}"
+            )
         self._expected_mic_count = expected_mic_count
         self._expected_accel_count = expected_accel_count
         self._mic_glob = mic_glob
@@ -47,6 +52,7 @@ class WavVibrationAdapter:
         self._allowed_mic_counts = tuple(
             sorted(set(int(c) for c in allowed_mic_counts))
         )
+        self._vibration_format = vibration_format
 
         if self._expected_mic_count is None and not self._allowed_mic_counts:
             raise IngestionError(
@@ -193,10 +199,24 @@ class WavVibrationAdapter:
         recording_dir: Path,
     ) -> tuple[np.ndarray, np.ndarray, float, list[Path]]:
         csv_paths = sorted(Path(p) for p in csv_paths)
+        # Filter raw vs peak files based on configured vibration_format.  The
+        # `vibration_*.csv` glob in the scanner matches both `vibration_D.csv`
+        # (peak) and `vibration_raw_D.csv` (raw), so we partition here.
+        raw_paths = [p for p in csv_paths if p.stem.startswith("vibration_raw_")]
+        peak_paths = [p for p in csv_paths if not p.stem.startswith("vibration_raw_")]
+        if self._vibration_format == "raw":
+            csv_paths = raw_paths
+        else:
+            csv_paths = peak_paths
+
         if len(csv_paths) != self._expected_accel_count:
             raise IngestionError(
-                f"Expected {self._expected_accel_count} vibration CSV files, found {len(csv_paths)} in {recording_dir}"
+                f"Expected {self._expected_accel_count} vibration {self._vibration_format} CSV files, "
+                f"found {len(csv_paths)} in {recording_dir}"
             )
+
+        if self._vibration_format == "raw":
+            return self._read_raw_vibration_channels(csv_paths)
 
         amp_channels: list[np.ndarray] = []
         freq_channels: list[np.ndarray] = []
@@ -226,12 +246,91 @@ class WavVibrationAdapter:
 
         return amp_data, freq_data, vib_sr_raw, csv_paths
 
+    def _read_raw_vibration_channels(
+        self,
+        csv_paths: list[Path],
+    ) -> tuple[np.ndarray, np.ndarray, float, list[Path]]:
+        """Raw-waveform path: read every channel's `vibration_raw_*.csv` and
+        return aligned waveforms at the inferred ADC rate.
+
+        The returned `freq_data` is a zero array of matching shape so the
+        downstream metadata schema (which carries the per-window dominant
+        frequency from the peak stream) stays uniform.  The "raw" channel
+        unit is the embedded ADC count value; downstream features apply
+        per-channel zero-mean centring (`compute_vibration_input_stack`)
+        which absorbs any channel-specific bias.
+        """
+        waveforms: list[np.ndarray] = []
+        rates: list[float] = []
+        for csv_path in csv_paths:
+            wav, sr = _read_vibration_raw_csv(csv_path)
+            waveforms.append(wav)
+            rates.append(sr)
+        # Channels must agree on rate within ~5 % (different files can have
+        # marginally different median dt_us due to clock jitter).
+        median_rate = float(np.median(rates))
+        for sr in rates:
+            if abs(sr - median_rate) / median_rate > 0.10:
+                raise IngestionError(
+                    f"Raw vibration sample-rate mismatch: {rates} (>10% spread)"
+                )
+        min_len = min(len(w) for w in waveforms)
+        amp_data = np.stack([w[:min_len] for w in waveforms])
+        freq_data = np.zeros_like(amp_data)
+        return amp_data, freq_data, median_rate, csv_paths
+
 
 def _pick_column(fieldnames: list[str], candidates: tuple[str, ...]) -> str | None:
     for name in candidates:
         if name in fieldnames:
             return name
     return None
+
+
+def _read_vibration_raw_csv(path: Path) -> tuple[np.ndarray, float]:
+    """Parse a raw-waveform vibration CSV (D4-format).
+
+    Each row is one DMA batch with header
+        ``pc_time, esp_time_us, s0, s1, …, s127``
+    where the trailing entries are zero-padded; the actual sample count is
+    inferred per file as the maximum index whose column is non-zero across
+    all rows.  The effective ADC rate is ``samples_per_batch / batch_period``
+    inferred from the median of `diff(esp_time_us)`.
+
+    Returns ``(waveform_1d, sample_rate_hz)``.  The waveform is the
+    concatenation of all batches' real samples, in row order.
+    """
+    import pandas as pd
+
+    df = pd.read_csv(path)
+    if "esp_time_us" not in df.columns:
+        raise IngestionError(f"Raw vibration CSV {path.name} missing esp_time_us column")
+    sample_cols = [c for c in df.columns if c.startswith("s") and c[1:].isdigit()]
+    if not sample_cols:
+        raise IngestionError(f"Raw vibration CSV {path.name} has no s* sample columns")
+    sample_cols.sort(key=lambda c: int(c[1:]))
+    samples = df[sample_cols].to_numpy(dtype=np.float64)  # (n_batches, 128)
+
+    # Per-row trailing-zero count varies; treat the max non-zero column index
+    # across all rows as the effective batch size.  Stricter: per-row trim.
+    nonzero_mask = samples != 0.0
+    last_real_per_row = nonzero_mask.cumsum(axis=1).argmax(axis=1)  # idx of last non-zero
+    real_per_row = (last_real_per_row + 1) * nonzero_mask.any(axis=1)
+    batch_size = int(np.median(real_per_row[real_per_row > 0]))
+    if batch_size <= 0:
+        raise IngestionError(f"Raw vibration CSV {path.name} has no usable samples")
+
+    # Estimate ADC rate from median batch period.
+    ts = df["esp_time_us"].to_numpy(dtype=np.int64)
+    if ts.size >= 2:
+        dt_us = float(np.median(np.diff(ts)))
+        sample_rate = batch_size / (dt_us / 1_000_000.0) if dt_us > 0 else float(batch_size)
+    else:
+        sample_rate = float(batch_size)
+
+    # Concatenate the first `batch_size` samples of every row.
+    waveform = samples[:, :batch_size].reshape(-1)
+    return waveform.astype(np.float64), float(sample_rate)
 
 
 def _read_vibration_csv(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:

@@ -29,6 +29,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.data as tud
+from tqdm.auto import tqdm
 
 from ...features.audio_spectral import compute_encoder_input_stack
 from ...features.vibration_temporal import compute_vibration_input_stack
@@ -83,13 +84,15 @@ class V1SSLConfig:
     spec_augment_freq_mask: int = 6
     spec_augment_time_mask: int = 8
 
-    # Labels
+    # Labels — healthy operating modes only.  RandomFault is anomaly data and
+    # must not enter SSL training or the cluster-purity eval (which uses K=3
+    # against {Pump, Standstill, Turbine}).  D3's `Healthy` token covers its
+    # speed-bucket recordings.
     healthy_modes: tuple[str, ...] = (
         "Pump",
         "Standstill",
         "Turbine",
         "Healthy",
-        "RandomFault",  # included in label set for cluster-purity (k=4) target
     )
 
     # System
@@ -99,7 +102,7 @@ class V1SSLConfig:
     extra: dict = field(default_factory=dict)
 
 
-_DATASET_INDEX = {"d1": 0, "d2": 1, "d3": 2, "illwerke_raw": 3, "illwerke": 3}
+_DATASET_INDEX = {"d1": 0, "d2": 1, "d3": 2, "d4": 3, "illwerke_raw": 4, "illwerke": 4}
 
 
 def _dataset_idx(dataset_id: str) -> int:
@@ -189,10 +192,11 @@ def _precompute_segment(
 class _WindowedFeatureDataset(tud.Dataset):
     """Yields (feature_window, xyz, dataset_idx, mode_label) per index.
 
-    Window size in frames is computed per segment from its `feature_fs`; the
-    smallest segment defines the global window size so every window has the
-    same number of frames (required for batching).  This handles the D1/D2 4 Hz
-    vs D3 16 Hz vibration cadences without padding.
+    Window size in frames is computed *per segment* from its `feature_fs`,
+    so a 2-second window over D4 raw vibration (~376 Hz) keeps all 752
+    samples and a 2-second window over D1 peak vibration (4 Hz) keeps all 8.
+    A grouped batch sampler then ensures windows of identical frame count
+    end up in the same batch, so `torch.stack` never trips.
     """
 
     def __init__(
@@ -204,33 +208,27 @@ class _WindowedFeatureDataset(tud.Dataset):
         self._segments = segments
 
         if not segments:
-            self._refs: list[tuple[int, int]] = []
-            self.frames_per_window = 0
-            self.stride = 1
+            self._refs: list[tuple[int, int, int]] = []
             return
-
-        min_fs = min(s.feature_fs for s in segments)
-        self.frames_per_window = max(2, int(round(cfg.window_seconds * min_fs)))
-        self.stride = max(1, int(round(cfg.window_stride_seconds * min_fs)))
 
         self._refs = []
         for si, seg in enumerate(segments):
+            n_frames = max(2, int(round(cfg.window_seconds * seg.feature_fs)))
+            stride = max(1, int(round(cfg.window_stride_seconds * seg.feature_fs)))
             T = int(seg.features.shape[-1])
-            # Allow a longer window in higher-rate segments without changing
-            # the per-batch frame count: we still slide by the global stride
-            # and crop a fixed `frames_per_window`.
-            if T < self.frames_per_window:
+            if T < n_frames:
                 continue
-            for start in range(0, T - self.frames_per_window + 1, self.stride):
-                self._refs.append((si, start))
+            for start in range(0, T - n_frames + 1, stride):
+                # Stash n_frames in the ref so __getitem__ doesn't recompute.
+                self._refs.append((si, start, n_frames))
 
     def __len__(self) -> int:
         return len(self._refs)
 
     def __getitem__(self, idx: int):
-        si, start = self._refs[idx]
+        si, start, n_frames = self._refs[idx]
         seg = self._segments[si]
-        feat = seg.features[..., start : start + self.frames_per_window]  # (N, ..., T_w)
+        feat = seg.features[..., start : start + n_frames]
         return {
             "feat": torch.from_numpy(np.ascontiguousarray(feat)),
             "xyz": torch.from_numpy(seg.xyz),
@@ -253,6 +251,59 @@ def _collate(batch: list[dict]) -> dict:
         "mode_label": mode_labels,
         "recording_id": rec_ids,
     }
+
+
+class _GroupedBatchSampler(tud.Sampler[list[int]]):
+    """Yields batches whose samples share the same per-segment channel count.
+
+    Without this, a `D1` (4-mic) sample and a `D2` (5-mic) sample collide in
+    `torch.stack`.  The Set-Transformer pool itself is channel-agnostic at
+    forward time; the constraint is only at the batch-tensor boundary.
+    """
+
+    def __init__(
+        self,
+        dataset: "_WindowedFeatureDataset",
+        batch_size: int,
+        shuffle: bool,
+        seed: int = 0,
+        drop_last: bool = False,
+    ) -> None:
+        self.dataset = dataset
+        self.batch_size = max(1, int(batch_size))
+        self.shuffle = bool(shuffle)
+        self.seed = int(seed)
+        self.drop_last = bool(drop_last)
+        # Bucket by (channels, frame count) — D1/D2 (4 Hz vib) and D4 (376 Hz)
+        # have different per-window frame counts even when channel counts match.
+        groups: dict[tuple[int, int], list[int]] = {}
+        for i, (si, _start, n_frames) in enumerate(dataset._refs):
+            n_ch = int(dataset._segments[si].features.shape[0])
+            groups.setdefault((n_ch, n_frames), []).append(i)
+        self._groups = groups
+
+    def __iter__(self):
+        rng = np.random.default_rng(self.seed if not self.shuffle else None)
+        all_batches: list[list[int]] = []
+        for _key, idxs in self._groups.items():
+            ids = list(idxs)
+            if self.shuffle:
+                rng.shuffle(ids)
+            for i in range(0, len(ids), self.batch_size):
+                chunk = ids[i : i + self.batch_size]
+                if self.drop_last and len(chunk) < self.batch_size:
+                    continue
+                all_batches.append(chunk)
+        if self.shuffle:
+            rng.shuffle(all_batches)
+        yield from all_batches
+
+    def __len__(self) -> int:
+        if self.drop_last:
+            return sum(len(v) // self.batch_size for v in self._groups.values())
+        return sum(
+            (len(v) + self.batch_size - 1) // self.batch_size for v in self._groups.values()
+        )
 
 
 class _Augmenter:
@@ -369,14 +420,46 @@ class V1Result:
 def _split_segments_by_recording(
     segments: list[_PrecomputedSegment], val_ratio: float, seed: int
 ) -> tuple[list[_PrecomputedSegment], list[_PrecomputedSegment]]:
+    """Stratified-by-mode-label held-out split at the *recording* level.
+
+    The cluster-purity sanity gate is uninterpretable when the held-out
+    val contains a single mode label (Hungarian then collapses to that
+    one class and the K-means assignment carries no information).  We
+    therefore stratify the split by `mode_label`: each labeled mode
+    contributes ⌊val_ratio · count⌋ recordings (≥ 1 when count ≥ 2) to
+    val.  Recordings with `mode_label = None` (D3 / D4 healthy speed
+    buckets — mode unrecorded by protocol) are split round-robin without
+    stratification.
+    """
     rng = np.random.default_rng(seed)
-    unique_recs = sorted({(s.dataset_idx, s.recording_id, s.source_dir) for s in segments})
-    rng.shuffle(unique_recs)
-    n_val = max(1, int(round(len(unique_recs) * val_ratio)))
-    val_keys = set(unique_recs[:n_val])
-    train_keys = set(unique_recs[n_val:])
-    if not train_keys:
-        train_keys = {val_keys.pop()}
+    # Group recordings by (dataset_idx, recording_id, source_dir) → mode_label.
+    rec_to_label: dict[tuple, str | None] = {}
+    for s in segments:
+        key = (s.dataset_idx, s.recording_id, s.source_dir)
+        if key not in rec_to_label:
+            rec_to_label[key] = s.mode_label
+
+    by_label: dict[str | None, list] = {}
+    for key, lbl in rec_to_label.items():
+        by_label.setdefault(lbl, []).append(key)
+
+    train_keys: set = set()
+    val_keys: set = set()
+    for lbl, recs in by_label.items():
+        recs_shuffled = list(recs)
+        rng.shuffle(recs_shuffled)
+        if len(recs_shuffled) <= 1:
+            # Cannot stratify a single-recording mode — keep it in train so
+            # SSL still benefits from it, and accept that the sanity gate
+            # will not see this mode in val.
+            train_keys.update(recs_shuffled)
+            continue
+        n_val_for_label = max(1, int(round(len(recs_shuffled) * val_ratio)))
+        # Keep at least one in train per label too.
+        n_val_for_label = min(n_val_for_label, len(recs_shuffled) - 1)
+        val_keys.update(recs_shuffled[:n_val_for_label])
+        train_keys.update(recs_shuffled[n_val_for_label:])
+
     train = [s for s in segments if (s.dataset_idx, s.recording_id, s.source_dir) in train_keys]
     val = [s for s in segments if (s.dataset_idx, s.recording_id, s.source_dir) in val_keys]
     return train, val
@@ -387,11 +470,47 @@ def _gather_healthy_segments(
     modality: Literal["acoustic", "vibration"],
     cfg: V1SSLConfig,
 ) -> list[_PrecomputedSegment]:
+    """Collect every healthy (non-anomaly) recording across all loaders.
+
+    Healthy = `s.is_anomaly is False`.  This includes:
+      - D1 / D2 with explicit mode labels (Pump / Standstill / Turbine)
+      - D3 / D4 speed-bucket recordings whose mode label is unknown
+        (the campaign protocol did not record which of the three modes
+        the unit was in; the encoder discovers it via K-means at inference).
+    The label-leakage invariant is preserved: SSL training never reads
+    `mode_label`; only the cluster-purity sanity gate does, and only for
+    segments where `mode_label is not None`.
+    """
+    out: list[_PrecomputedSegment] = []
+    for loader in loaders:
+        for s in loader.list_segments():
+            if s.is_anomaly:
+                continue
+            pre = _precompute_segment(s, modality, cfg)
+            if pre is not None:
+                out.append(pre)
+    return out
+
+
+def _gather_labeled_segments(
+    loaders: Iterable[TestDatasetLoader],
+    modality: Literal["acoustic", "vibration"],
+    cfg: V1SSLConfig,
+) -> list[_PrecomputedSegment]:
+    """Collect only segments that have an explicit `mode_label` *and* are
+    not anomaly recordings.  Used by the K=3 cluster-purity sanity gate.
+
+    On the current four-campaign setup this yields D1 + D2 mode folders,
+    i.e. recordings whose Pump / Standstill / Turbine label is ground truth.
+    D3 / D4 speed buckets and all RandomFault recordings are excluded.
+    """
     out: list[_PrecomputedSegment] = []
     healthy = set(cfg.healthy_modes)
     for loader in loaders:
         for s in loader.list_segments():
-            if (s.mode_label or "") not in healthy:
+            if s.is_anomaly:
+                continue
+            if s.mode_label is None or s.mode_label not in healthy:
                 continue
             pre = _precompute_segment(s, modality, cfg)
             if pre is not None:
@@ -437,15 +556,12 @@ def train_v1_per_modality(
 
     train_loader = tud.DataLoader(
         train_ds,
-        batch_size=cfg.batch_size,
-        shuffle=True,
+        batch_sampler=_GroupedBatchSampler(train_ds, cfg.batch_size, shuffle=True, seed=cfg.seed),
         collate_fn=_collate,
-        drop_last=False,
     )
     val_loader = tud.DataLoader(
         val_ds,
-        batch_size=cfg.batch_size,
-        shuffle=False,
+        batch_sampler=_GroupedBatchSampler(val_ds, cfg.batch_size, shuffle=False, seed=cfg.seed),
         collate_fn=_collate,
     )
 
@@ -469,7 +585,13 @@ def train_v1_per_modality(
     train_history: list[float] = []
     val_history: list[float] = []
 
-    for epoch in range(cfg.epochs):
+    epoch_iter = tqdm(
+        range(cfg.epochs),
+        desc=f"V1 {modality}",
+        unit="epoch",
+        leave=False,
+    )
+    for epoch in epoch_iter:
         encoder.train()
         projection.train()
         epoch_loss = 0.0
@@ -514,8 +636,20 @@ def train_v1_per_modality(
                 epoch_val += float(loss.item()) * z1.shape[0]
                 n_val += z1.shape[0]
         val_history.append(epoch_val / max(1, n_val))
+        epoch_iter.set_postfix(
+            train=f"{train_history[-1]:.3f}", val=f"{val_history[-1]:.3f}"
+        )
 
-    sanity = evaluate_sanity_gate(encoder, val_segs, modality, cfg)
+    # Sanity gate evaluates on the held-out *labeled* subset only.  D3/D4
+    # healthy windows participate in training (they're inside `val_segs`
+    # by recording split) but their mode_label is None — including them in
+    # the K=3 K-means against the three known modes would give a noisy
+    # quality number.  Filter to segments with an explicit mode_label.
+    labeled_modes = set(cfg.healthy_modes)
+    val_labeled = [
+        s for s in val_segs if s.mode_label in labeled_modes
+    ]
+    sanity = evaluate_sanity_gate(encoder, val_labeled, modality, cfg)
 
     # Expose recording IDs as fully-qualified `<source_dir_basename>/<recording_id>`
     # so D1's same-`recording_id`-in-different-folders case (e.g., `All/Pump` vs
@@ -552,7 +686,11 @@ def evaluate_sanity_gate(
     if len(ds) < 2:
         return {"purity": 0.0, "nmi": 0.0, "n_windows": int(len(ds)), "label_set": tuple()}
 
-    loader = tud.DataLoader(ds, batch_size=cfg.batch_size, shuffle=False, collate_fn=_collate)
+    loader = tud.DataLoader(
+        ds,
+        batch_sampler=_GroupedBatchSampler(ds, cfg.batch_size, shuffle=False, seed=cfg.seed),
+        collate_fn=_collate,
+    )
 
     device = next(encoder.parameters()).device
     encoder.eval()
@@ -564,7 +702,10 @@ def evaluate_sanity_gate(
             summaries.append(summary.cpu().numpy())
             labels.extend(batch["mode_label"])
     embeddings = np.concatenate(summaries, axis=0)
-    metric = cluster_purity_and_nmi(embeddings, labels, n_clusters=4, seed=cfg.seed)
+    # K=3 against the three healthy operating modes (Pump, Standstill, Turbine).
+    # RandomFault is anomaly data, not a fourth mode — it is filtered out by
+    # `healthy_modes` upstream of this evaluation.
+    metric = cluster_purity_and_nmi(embeddings, labels, n_clusters=3, seed=cfg.seed)
     metric["n_windows"] = int(embeddings.shape[0])
     return metric
 

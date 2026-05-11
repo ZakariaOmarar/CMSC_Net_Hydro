@@ -185,11 +185,18 @@ class TrainResult:
 def _gather_healthy_windows(
     segments: Iterable[TestDatasetSegment], cfg: V0Config
 ) -> tuple[np.ndarray, list[str]]:
-    """Collect (n_windows, T, F) plus the recording id of each window."""
+    """Collect (n_windows, T, F) plus the recording id of each window.
+
+    Healthy = `is_anomaly=False` (covers D1/D2 mode folders **and** D3/D4
+    speed-bucket recordings whose mode is unrecorded — both contribute
+    valid healthy training material for the V0 reference model).
+    The legacy `cfg.healthy_modes` filter is no longer used since it
+    excluded D3/D4 (which now carry `mode_label = None`).
+    """
     all_windows: list[np.ndarray] = []
     rec_ids_per_window: list[str] = []
     for s in segments:
-        if (s.mode_label or "") not in cfg.healthy_modes:
+        if s.is_anomaly:
             continue
         w = extract_log_mel_windows(s, cfg)
         if w.shape[0] == 0:

@@ -96,7 +96,9 @@ def _normalised_mutual_information(
     denom = 0.5 * (h_x + h_y)
     if denom <= 0:
         return 0.0
-    return mi / denom
+    # Clamp to [0, 1] — float-precision drift can push NMI marginally
+    # negative when the joint distribution is near-independent.
+    return max(0.0, min(1.0, mi / denom))
 
 
 def cluster_purity_and_nmi(

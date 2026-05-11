@@ -123,13 +123,17 @@ def test_train_and_predict_end_to_end() -> None:
     # because tiny synthetic-clip training is not meant to give realistic
     # numbers. We only check the loop ran end-to-end.
     assert 0.0 <= result.val_macro_f1 <= 1.0
-    assert set(result.val_per_class_f1) == set(cfg.target_classes)
-    assert result.val_confusion.shape == (4, 4)
+    # `result.classes` is the **present** subset of cfg.target_classes —
+    # D1 has Pump + Turbine only (no Standstill), so the V0 trainer
+    # adapts num_class accordingly.
+    assert set(result.val_per_class_f1) == set(result.classes)
+    n_present = len(result.classes)
+    assert result.val_confusion.shape == (n_present, n_present)
 
     preds = predict_modes(result, segments, cfg)
     assert len(preds) == len(segments)
     for r in preds:
         assert r["n_windows"] >= 1
-        assert r["probs"].shape == (r["n_windows"], 4)
+        assert r["probs"].shape == (r["n_windows"], n_present)
         assert r["predicted_class"].shape == (r["n_windows"],)
         assert np.allclose(r["probs"].sum(axis=1), 1.0, atol=1e-3)

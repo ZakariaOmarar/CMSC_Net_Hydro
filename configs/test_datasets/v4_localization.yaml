@@ -1,0 +1,47 @@
+# V4 anomaly-gated localization head — full-run config.
+# Cross3D 3-D CNN on SRP-PHAT volume + Set-Transformer on structure-borne
+# accel-TDOA tokens, FiLM-conditioned on V2's c_t, MLP-regressing (x, y, z).
+#
+# Trained supervised on labeled anomaly windows:
+#   - D2 RandomFault `pos_(x,y,z)_<context>` subfolders (spatial label
+#     parsed by `test_dataset_loader._parse_labels`).
+#   - D3 `hit_between_<a>_<b>_speed1` (spatial label = midpoint of named
+#     mic positions; supplied via `spatial_label_overrides`).
+#
+# A3 ablation: rerun with `unconditional: true`.
+# V5.1 reuses this config with `scada_dim: 3` (one-hot D3 speed).
+# V5.2 reuses with `scada_dim: K` (top-K Allg_M1 ranking from MI mining).
+
+dataset_configs: [configs/datasets/d2.yaml, configs/datasets/d3.yaml]
+v2_checkpoint: results/v2/fusion_ssl/encoder.pt
+output_dir: results/v4/localization
+
+# SRP-PHAT candidate grid (metres).  Default uses ROW II reference geometry
+# bounding box from `localization_head.py` (`MIC_UPPER_XY`-style extents).
+srp_grid:
+  lo: [-0.5, -0.5, 0.0]
+  hi: [0.5, 0.5, 0.6]
+  n: [32, 32, 16]
+
+# Head dims
+cnn_feature_dim: 128
+tdoa_feature_dim: 64
+hidden_dim: 128
+n_heads_tdoa: 2
+
+# Conditioning
+scada_dim: 0
+unconditional: false  # A3 ablation knob
+
+# Training
+epochs: 50
+batch_size: 16
+lr: 1.0e-3
+weight_decay: 1.0e-5
+val_ratio: 0.3
+seed: 42
+device: cpu
+
+# Window cadence (defaults to V2 config when omitted)
+window_seconds: 2.0
+window_stride_seconds: 1.0

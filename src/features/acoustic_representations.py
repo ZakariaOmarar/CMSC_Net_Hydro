@@ -19,10 +19,30 @@ def compute_cwt_scalogram(
     wavelet: str = "cmor1.5-1.0",
     n_scales: int = 64,
     min_freq_hz: float = 20.0,
+    max_freq_hz: float | None = 250.0,
+    decimate_to_hz: int | None = 1000,
 ) -> np.ndarray:
     """Compute a log-compressed CWT scalogram for a single acoustic channel.
 
-    Returns a 2D array with shape ``(n_scales, n_samples)``.
+    Returns a 2D array with shape ``(n_scales, n_decimated_samples)``.
+
+    Two cost-control parameters that materially affect CPU / memory on
+    long recordings (e.g. D4 ~ 11-min waveforms at 16 kHz):
+
+    - ``decimate_to_hz``: if not None and ``fs > decimate_to_hz``, the
+      signal is anti-alias-filtered and downsampled to approximately
+      ``decimate_to_hz`` (via ``scipy.signal.resample_poly``) before
+      ``pywt.cwt`` is called.  CWT memory is O(n_scales · n_samples)
+      complex coefficients, so decimating 16 kHz → 1 kHz cuts memory by
+      ~ 16× and runtime by a similar factor.  All five characteristic
+      ROW II frequencies (≤ 125 Hz; see Chapter 3 §3.1) lie comfortably
+      below the 500 Hz Nyquist of the decimated stream.
+
+    - ``max_freq_hz``: caps the upper end of the scale geometric progression.
+      Default 250 Hz — sufficient to cover the 125 Hz guide-vane-passing
+      tone with one octave of margin.  CWT energy above this is not used
+      by the V1 / V2 encoders and need not be computed; ``None`` reverts
+      to the prior behaviour (geometric grid up to Nyquist).
     """
     import pywt
 
@@ -39,17 +59,37 @@ def compute_cwt_scalogram(
     if x.size == 0:
         raise ValueError("signal cannot be empty")
 
-    nyquist = fs / 2.0
-    if min_freq_hz >= nyquist:
-        raise ValueError("min_freq_hz must be below Nyquist")
+    # Anti-alias decimation before CWT.  scipy.signal.resample_poly applies
+    # an FIR low-pass filter at the new Nyquist before downsampling, so
+    # energy above `decimate_to_hz / 2` is removed cleanly — consistent
+    # with ``min_freq_hz`` and the 250 Hz upper edge of our scale grid.
+    if decimate_to_hz is not None and fs > decimate_to_hz:
+        from scipy.signal import resample_poly
+        # Greatest-common-divisor-based ratio to keep up/down small.
+        from math import gcd
+        target = int(decimate_to_hz)
+        g = gcd(int(fs), target)
+        up = target // g
+        down = int(fs) // g
+        x = resample_poly(x, up=up, down=down).astype(np.float64)
+        eff_fs = float(fs) * up / down
+    else:
+        eff_fs = float(fs)
 
-    freqs = np.geomspace(min_freq_hz, nyquist, n_scales)
-    scales = pywt.frequency2scale(wavelet, freqs / fs)
+    nyquist = eff_fs / 2.0
+    if min_freq_hz >= nyquist:
+        raise ValueError("min_freq_hz must be below the (post-decimation) Nyquist")
+    upper = nyquist if max_freq_hz is None else min(float(max_freq_hz), nyquist)
+    if upper <= min_freq_hz:
+        raise ValueError("max_freq_hz must be > min_freq_hz")
+
+    freqs = np.geomspace(min_freq_hz, upper, n_scales)
+    scales = pywt.frequency2scale(wavelet, freqs / eff_fs)
     coefficients, _ = pywt.cwt(
         x,
         scales,
         wavelet,
-        sampling_period=1.0 / fs,
+        sampling_period=1.0 / eff_fs,
     )
 
     scalogram = np.log1p(np.abs(coefficients))
@@ -63,10 +103,13 @@ def compute_cwt_scalogram_stack(
     wavelet: str = "cmor1.5-1.0",
     n_scales: int = 64,
     min_freq_hz: float = 20.0,
+    max_freq_hz: float | None = 250.0,
+    decimate_to_hz: int | None = 1000,
 ) -> np.ndarray:
     """Compute CWT scalograms for all mic channels.
 
-    Returns a 3D array with shape ``(n_mics, n_scales, n_samples)``.
+    Returns a 3D array with shape ``(n_mics, n_scales, n_decimated_samples)``.
+    See ``compute_cwt_scalogram`` for the cost-control parameters.
     """
     data = _as_2d_channels(mic_data, name="mic_data")
     out = [
@@ -76,6 +119,8 @@ def compute_cwt_scalogram_stack(
             wavelet=wavelet,
             n_scales=n_scales,
             min_freq_hz=min_freq_hz,
+            max_freq_hz=max_freq_hz,
+            decimate_to_hz=decimate_to_hz,
         )
         for i in range(data.shape[0])
     ]

@@ -18,13 +18,38 @@ def _build_test_mics(
     return np.stack([np.roll(base, i * 11) for i in range(n_mics)], axis=0)
 
 
-def test_cwt_scalogram_stack_shape() -> None:
+def test_cwt_scalogram_stack_shape_no_decimation() -> None:
+    """Opt-out path: ``decimate_to_hz=None`` keeps the original time axis."""
     fs = 16_000
     mic = _build_test_mics(fs=fs, duration_s=0.5)
 
-    cwt = compute_cwt_scalogram_stack(mic, fs, n_scales=32)
+    cwt = compute_cwt_scalogram_stack(
+        mic, fs, n_scales=32, decimate_to_hz=None, max_freq_hz=None
+    )
 
     assert cwt.shape == (mic.shape[0], 32, mic.shape[1])
+    assert np.all(np.isfinite(cwt))
+    assert np.all(cwt >= 0.0)
+
+
+def test_cwt_scalogram_stack_decimates_by_default() -> None:
+    """Publication default: ``decimate_to_hz=1000`` shortens the time axis
+    by ~16× on a 16 kHz input.  This is the cost-control path that makes
+    CWT tractable on D4's ~ 11-min healthy recordings (see Chapter 3
+    §3.4.2 and REVIEW.md fix W).  Spectral content below 250 Hz —
+    covering all five ROW II characteristic frequencies — is preserved
+    by the anti-alias filter."""
+    fs = 16_000
+    duration_s = 0.5
+    mic = _build_test_mics(fs=fs, duration_s=duration_s)
+
+    cwt = compute_cwt_scalogram_stack(mic, fs, n_scales=32)
+    # decimate_to_hz default = 1000 → resample_poly with up=1, down=16 →
+    # ~ 500 samples for a 0.5 s clip.
+    assert cwt.shape[0] == mic.shape[0]
+    assert cwt.shape[1] == 32
+    expected_len = int(round(duration_s * 1000))
+    assert abs(cwt.shape[2] - expected_len) <= 2
     assert np.all(np.isfinite(cwt))
     assert np.all(cwt >= 0.0)
 
@@ -51,7 +76,13 @@ def test_build_cwt_mfcc_encoder_input_aligns_and_concatenates() -> None:
     fs = 16_000
     mic = _build_test_mics(fs=fs, duration_s=1.0)
 
-    cwt = compute_cwt_scalogram_stack(mic, fs, n_scales=32)
+    # Use the no-decimation path here so the time axes of CWT and MFCC are
+    # both anchored on the original 16 kHz time grid; the function under
+    # test (`build_cwt_mfcc_encoder_input`) itself does the cross-rate
+    # alignment via `min(cwt.shape[2], mfcc.shape[2])`.
+    cwt = compute_cwt_scalogram_stack(
+        mic, fs, n_scales=32, decimate_to_hz=None, max_freq_hz=None
+    )
     mfcc = compute_mfcc_stack(
         mic,
         fs,

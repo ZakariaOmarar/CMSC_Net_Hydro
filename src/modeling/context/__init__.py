@@ -11,12 +11,19 @@ V1 / V2 share two pieces of machinery:
 
 from .cluster_metric import cluster_purity_and_nmi, hungarian_purity
 from .v1_ssl import V1Result, V1SSLConfig, evaluate_sanity_gate, train_v1_per_modality
+from .v2_fusion import V2FusionEncoder
+from .v2_ssl import V2Result, V2SSLConfig, evaluate_rq1_purity, train_v2_fusion
 
 __all__ = [
     "V1Result",
     "V1SSLConfig",
+    "V2FusionEncoder",
+    "V2Result",
+    "V2SSLConfig",
     "cluster_purity_and_nmi",
+    "evaluate_rq1_purity",
     "evaluate_sanity_gate",
     "hungarian_purity",
     "train_v1_per_modality",
+    "train_v2_fusion",
 ]

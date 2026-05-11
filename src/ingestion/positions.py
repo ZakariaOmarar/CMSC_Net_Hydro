@@ -115,6 +115,10 @@ class PositionRegistry:
             return cls(_parse_d2_node_position_txt(Path(kwargs["path"])))
         if dataset_id == "d3":
             return cls(_parse_d3_position_json(Path(kwargs["path"])))
+        if dataset_id == "d4":
+            # D4 reuses the D3 sensor layout (same 9 mic + 4 accel names)
+            # so the D3 JSON parser handles it directly.
+            return cls(_parse_d3_position_json(Path(kwargs["path"])))
         if dataset_id in ("illwerke", "illwerke_raw"):
             return cls(_illwerke_geometry())
         raise ValueError(f"unknown dataset id: {dataset_id!r}")
@@ -192,11 +196,18 @@ def _parse_d2_node_position_txt(path: Path) -> list[SensorPosition]:
 # ---------------------------------------------------------------------- D3 ---
 
 def _parse_d3_position_json(path: Path) -> list[SensorPosition]:
-    """Parse `position.json`. IDs starting with `(V)` are vibrations; the rest are mics.
+    """Parse `position.json`.  IDs starting with `(V)` are vibrations; the rest
+    are mics.
 
-    The file's coordinate units are unspecified; we treat the values as meters
-    (D3 lab measurements are small integers in the same range as a turbine
-    housing, so this is the operationally sensible default).
+    **Unit convention** (corrected 2026-05): the JSON values are
+    centimetres on the ~ 10 cm bench-top prototype scale, matching D2's
+    `node_position.txt` format and the spatial-label folder convention
+    (`(x, y, z)` in cm).  The parser therefore divides by 100 to return
+    metres — without this conversion, mic positions land at 0–11 m
+    (eleven *meters*, the ROW II reference scale) instead of 0–0.11 m,
+    which silently breaks SRP-PHAT and the V4 spatial-feature pipeline
+    (V0 SRP-PHAT errors of 4–8 m on a 10 cm prototype were the original
+    symptom).
     """
     if not path.exists():
         raise FileNotFoundError(f"D3 position file not found: {path}")
@@ -207,11 +218,12 @@ def _parse_d3_position_json(path: Path) -> list[SensorPosition]:
     sensors: list[SensorPosition] = []
     for r in records:
         sid = str(r["id"])
-        xyz = (float(r["x"]), float(r["y"]), float(r["z"]))
+        xyz_cm = (float(r["x"]), float(r["y"]), float(r["z"]))
+        xyz_m = tuple(v / 100.0 for v in xyz_cm)  # cm → m
         if sid.startswith("(V)"):
-            sensors.append(SensorPosition(id=sid, modality="vibration", xyz=xyz))
+            sensors.append(SensorPosition(id=sid, modality="vibration", xyz=xyz_m))
         else:
-            sensors.append(SensorPosition(id=sid, modality="mic", xyz=xyz))
+            sensors.append(SensorPosition(id=sid, modality="mic", xyz=xyz_m))
     return sensors
 
 

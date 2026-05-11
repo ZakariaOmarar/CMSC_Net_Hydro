@@ -1,0 +1,48 @@
+# V5.1 — fan-noise robustness conditioning for the V4 localisation head.
+#
+# IMPORTANT methodological note (clarified 2026-05): the D3 / D4
+# `speed{N}` token is **NOT** an operational SCADA variable; it is the
+# level of an external background-noise fan added to the recording rig
+# to make both mode discovery and anomaly localisation harder.  V5.1 is
+# therefore a *robustness ablation* — does explicitly informing the
+# localisation head of the noise level help it stay accurate in noisier
+# conditions? — rather than a "SCADA enhancement" study.
+#
+# Three RQ4 rows (V5.1 with D3 + D4):
+#   1. `unconditional`        — A3 ablation: c=0, s=0
+#   2. `c_t-only`             — c=c_t, s=0  (V4 default)
+#   3. `c_t + speed_one_hot`  — c=c_t, s=fan-noise-level one-hot
+# Compare 3-D Euclidean error (mean + 95th).  Target: a non-zero
+# robustness gain in row 3 over row 2 attributable to the noise-level
+# conditioning.
+
+dataset_configs: [configs/datasets/d3.yaml]
+v2_checkpoint: results/v2/fusion_ssl/encoder.pt
+output_dir: results/v5/v5_1_speed
+
+srp_grid:
+  lo: [-0.5, -0.5, 0.0]
+  hi: [0.5, 0.5, 0.6]
+  n: [32, 32, 16]
+
+cnn_feature_dim: 128
+tdoa_feature_dim: 64
+hidden_dim: 128
+n_heads_tdoa: 2
+
+# SCADA: 3-dim one-hot per the D3_SPEED_BUCKETS = (speed1, speed2, speed3).
+scada_dim: 3
+scada_source: d3_speed_one_hot
+
+unconditional: false  # set true for the A3 row
+
+epochs: 50
+batch_size: 16
+lr: 1.0e-3
+weight_decay: 1.0e-5
+val_ratio: 0.3
+seed: 42
+device: cpu
+
+window_seconds: 2.0
+window_stride_seconds: 1.0

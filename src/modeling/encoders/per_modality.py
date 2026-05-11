@@ -109,7 +109,7 @@ class PerModalityEncoder(nn.Module):
         embed_dim: int = 128,
         n_heads: int = 4,
         n_modalities: int = 2,
-        n_datasets: int = 4,
+        n_datasets: int = 5,
     ) -> None:
         super().__init__()
         self.modality = modality
