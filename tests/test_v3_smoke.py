@@ -181,6 +181,23 @@ def test_cnf_film_init_makes_first_step_finite() -> None:
     assert torch.all(torch.isfinite(log_p))
 
 
+def test_cnf_log_det_clamp_bounds_extreme_inputs() -> None:
+    """F6 — per-coupling log-det is clamped to ±50.  With n_layers=6 the
+    accumulated log_det stays within ±300 even on pathological inputs."""
+    torch.manual_seed(0)
+    flow = ConditionalRealNVP(dim=64, c_dim=8, n_layers=6, hidden_dim=16, scale_max=2.0)
+    flow.eval()
+    # Adversarial: huge x, huge c — would otherwise saturate every coupling.
+    x = torch.randn(8, 64) * 100.0
+    c = torch.randn(8, 8) * 100.0
+    with torch.no_grad():
+        _z, log_det = flow.forward(x, c)
+    # Per-layer bound is ±50, so 6 layers bound the accumulated log_det at ±300.
+    assert torch.all(log_det >= -300.0 - 1e-3)
+    assert torch.all(log_det <= 300.0 + 1e-3)
+    assert torch.all(torch.isfinite(log_det))
+
+
 # ---------------------------------------------------------------------------
 # 2. PerClusterThresholds
 # ---------------------------------------------------------------------------
@@ -255,18 +272,42 @@ def test_train_v3_cnf_end_to_end() -> None:
     assert all(np.isfinite(result.train_nll))
     assert all(np.isfinite(result.val_nll))
 
-    # Held-out recordings disjoint.
+    # Held-out recordings disjoint — three-way: train ⊥ threshold-fit ⊥ val.
     train_ids = set(result.train_recording_ids)
     val_ids = set(result.val_recording_ids)
+    fit_ids = set(result.threshold_fit_recording_ids)
     assert train_ids.isdisjoint(val_ids)
+    assert train_ids.isdisjoint(fit_ids)
+    assert fit_ids.isdisjoint(val_ids), (
+        "F1 invariant: threshold-fit cohort must be disjoint from reportable val "
+        f"cohort (overlap = {fit_ids & val_ids})"
+    )
+    assert len(fit_ids) >= 1
+    assert len(val_ids) >= 1
 
     assert result.val_scores.shape[0] == result.val_contexts.shape[0]
     assert result.val_scores.shape[0] == len(result.val_labels)
     assert np.all(np.isfinite(result.val_scores))
 
+    # F6 — outlier-batch tracking is populated for every epoch.
+    assert len(result.train_nll_min) == v3_cfg.epochs
+    assert len(result.train_nll_max) == v3_cfg.epochs
+    assert len(result.val_nll_min) == v3_cfg.epochs
+    assert len(result.val_nll_max) == v3_cfg.epochs
+    # Ordering invariants per epoch: min ≤ mean ≤ max.
+    for i in range(v3_cfg.epochs):
+        if np.isfinite(result.train_nll_min[i]) and np.isfinite(result.train_nll_max[i]):
+            assert result.train_nll_min[i] <= result.train_nll[i] + 1e-6
+            assert result.train_nll_max[i] >= result.train_nll[i] - 1e-6
+
     assert result.thresholds.centroids.shape[0] == v3_cfg.n_threshold_clusters
-    # The fit p99 should be ≥ 95th percentile of val scores by construction.
-    assert result.thresholds.p99.max() >= np.percentile(result.val_scores, 95) - 1e-6
+    # Thresholds are now fit on a disjoint cohort (val_fit), so the p99 of
+    # val_fit and the 95th percentile of val_eval scores have NO guaranteed
+    # ordering — that's the whole point of the F1 fix.  We only require that
+    # the fit produced finite, strictly-positive percentile bars.
+    assert np.all(np.isfinite(result.thresholds.p95))
+    assert np.all(np.isfinite(result.thresholds.p99))
+    assert np.all(result.thresholds.p99 >= result.thresholds.p95)
     assert result.unconditional is False
 
 

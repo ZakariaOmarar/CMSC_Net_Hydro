@@ -71,9 +71,17 @@ class V2SSLConfig:
     hop_length: int = 512
     cwt_n_scales: int = 64
     use_cwt: bool = True
+    # F4 toggle — see `V1SSLConfig.standardize_acoustic`.  Must match the
+    # V1 setting used to pretrain the inherited encoder weights, otherwise
+    # the V2 fusion block sees an acoustic input distribution the V1 CNN
+    # was never trained on.  Default False (F4 found not load-bearing).
+    standardize_acoustic: bool = False
 
     # Vibration features
     vib_kurtosis_window: int = 5
+    # Vibration amplitude + envelope z-score — see
+    # `V1SSLConfig.standardize_vibration`.
+    standardize_vibration: bool = True
 
     # Augmentations (feature space)
     gain_jitter_db: float = 6.0
@@ -182,6 +190,7 @@ def _precompute_paired(
             n_fft=cfg.n_fft,
             hop_length=cfg.hop_length,
             cwt_n_scales=cfg.cwt_n_scales,
+            standardize=cfg.standardize_acoustic,
         )
     else:
         mels = []
@@ -197,7 +206,9 @@ def _precompute_paired(
         acoustic_features = np.stack(mels, axis=0)
 
     vibration_features = compute_vibration_input_stack(
-        s.segment.accel_data, kurtosis_window=cfg.vib_kurtosis_window
+        s.segment.accel_data,
+        kurtosis_window=cfg.vib_kurtosis_window,
+        standardize=cfg.standardize_vibration,
     )
 
     if acoustic_features.shape[-1] < 2 or vibration_features.shape[-1] < 2:
@@ -485,22 +496,80 @@ class V2Result:
     drop_vibration: bool
 
 
+def _time_split_paired_segment(
+    seg: _PairedSegment, val_ratio: float
+) -> tuple[_PairedSegment | None, _PairedSegment | None]:
+    """Paired-segment analogue of `v1_ssl._time_split_segment`.
+
+    Splits a single `_PairedSegment` along its time axes (acoustic and
+    vibration sliced consistently in wall-clock seconds) so that
+    single-recording mode-label groups still produce both a train and a
+    val pseudo-segment.  See the v1 docstring for the methodological
+    rationale; the temporal-leakage caveat applies equally here.
+    """
+    T_ac = int(seg.acoustic_features.shape[-1])
+    T_vib = int(seg.vibration_features.shape[-1])
+    if T_ac < 4 or T_vib < 4:
+        return None, None
+
+    # Anchor the split in wall-clock time so the acoustic and vibration
+    # halves cover the same physical interval of the recording.
+    t_total_s = T_ac / max(seg.acoustic_fs, 1e-9)
+    t_val_s = t_total_s * float(val_ratio)
+    n_val_ac = max(2, int(round(t_val_s * seg.acoustic_fs)))
+    n_val_vib = max(2, int(round(t_val_s * seg.vibration_fs)))
+    n_val_ac = min(n_val_ac, T_ac - 2)
+    n_val_vib = min(n_val_vib, T_vib - 2)
+    if n_val_ac < 2 or n_val_vib < 2 or T_ac - n_val_ac < 2 or T_vib - n_val_vib < 2:
+        return None, None
+
+    train_seg = _PairedSegment(
+        acoustic_features=seg.acoustic_features[..., : T_ac - n_val_ac].copy(),
+        acoustic_xyz=seg.acoustic_xyz,
+        acoustic_fs=seg.acoustic_fs,
+        vibration_features=seg.vibration_features[..., : T_vib - n_val_vib].copy(),
+        vibration_xyz=seg.vibration_xyz,
+        vibration_fs=seg.vibration_fs,
+        dataset_idx=seg.dataset_idx,
+        mode_label=seg.mode_label,
+        recording_id=f"{seg.recording_id}__train_half",
+        source_dir=seg.source_dir,
+    )
+    val_seg = _PairedSegment(
+        acoustic_features=seg.acoustic_features[..., T_ac - n_val_ac :].copy(),
+        acoustic_xyz=seg.acoustic_xyz,
+        acoustic_fs=seg.acoustic_fs,
+        vibration_features=seg.vibration_features[..., T_vib - n_val_vib :].copy(),
+        vibration_xyz=seg.vibration_xyz,
+        vibration_fs=seg.vibration_fs,
+        dataset_idx=seg.dataset_idx,
+        mode_label=seg.mode_label,
+        recording_id=f"{seg.recording_id}__val_half",
+        source_dir=seg.source_dir,
+    )
+    return train_seg, val_seg
+
+
 def _split_segments_by_recording(
     segments: list[_PairedSegment], val_ratio: float, seed: int
 ) -> tuple[list[_PairedSegment], list[_PairedSegment]]:
     """Stratified-by-mode-label held-out split at the recording level.
 
-    See `v1_ssl._split_segments_by_recording` for the rationale.  Each
-    explicitly-labeled mode contributes ⌊val_ratio · count⌋ recordings
-    (≥ 1 when count ≥ 2) to val; unlabeled D3 / D4 healthy speed-bucket
-    recordings are split round-robin within the `None` group.
+    Mirrors `v1_ssl._split_segments_by_recording`: modes with ≥ 2
+    recordings use the standard recording-level stratified split; modes
+    with exactly 1 recording are **time-split** so they still appear in
+    val (see `_time_split_paired_segment`).  Unlabeled D3 / D4
+    speed-bucket recordings (mode_label = None) follow the
+    ≥ 2 / == 1 branching like any other label.
     """
     rng = np.random.default_rng(seed)
     rec_to_label: dict[tuple, str | None] = {}
+    rec_to_seg: dict[tuple, _PairedSegment] = {}
     for s in segments:
         key = (s.dataset_idx, s.recording_id, s.source_dir)
         if key not in rec_to_label:
             rec_to_label[key] = s.mode_label
+            rec_to_seg[key] = s
 
     by_label: dict[str | None, list] = {}
     for key, lbl in rec_to_label.items():
@@ -508,21 +577,31 @@ def _split_segments_by_recording(
 
     train_keys: set = set()
     val_keys: set = set()
+    time_split_train: list[_PairedSegment] = []
+    time_split_val: list[_PairedSegment] = []
     for lbl, recs in by_label.items():
         recs_shuffled = list(recs)
         rng.shuffle(recs_shuffled)
-        if len(recs_shuffled) <= 1:
-            train_keys.update(recs_shuffled)
+        if len(recs_shuffled) == 1:
+            only_key = recs_shuffled[0]
+            tr, va = _time_split_paired_segment(rec_to_seg[only_key], val_ratio)
+            if tr is not None and va is not None:
+                time_split_train.append(tr)
+                time_split_val.append(va)
+            else:
+                train_keys.update(recs_shuffled)
             continue
         n_val_for_label = max(1, int(round(len(recs_shuffled) * val_ratio)))
         n_val_for_label = min(n_val_for_label, len(recs_shuffled) - 1)
         val_keys.update(recs_shuffled[:n_val_for_label])
         train_keys.update(recs_shuffled[n_val_for_label:])
 
-    if not train_keys:
+    if not train_keys and not time_split_train:
         train_keys = {val_keys.pop()}
     train = [s for s in segments if (s.dataset_idx, s.recording_id, s.source_dir) in train_keys]
     val = [s for s in segments if (s.dataset_idx, s.recording_id, s.source_dir) in val_keys]
+    train.extend(time_split_train)
+    val.extend(time_split_val)
     return train, val
 
 

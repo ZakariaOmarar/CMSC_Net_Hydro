@@ -117,7 +117,13 @@ class FiLMCoupling(nn.Module):
         s = (torch.tanh(self.scale_net(x_a, c)) * self.scale_max) * inv_mask
         t = self.translate_net(x_a, c) * inv_mask
         z = x_a + inv_mask * (x * torch.exp(s) + t)
-        log_det = s.sum(dim=-1)
+        # Per-coupling log-det clamp (F6 — defensive bound on the worst-case
+        # batch contribution).  |log_det| is *already* bounded by
+        # `scale_max * (dim/2)` by construction (s = tanh(.) * scale_max), so
+        # the clamp at ±50 is a defensive belt-and-suspenders against the
+        # combination of large `dim` and `scale_max` blowing up the
+        # accumulated log-det when summed across n_layers couplings.
+        log_det = s.sum(dim=-1).clamp(-50.0, 50.0)
         return z, log_det
 
 

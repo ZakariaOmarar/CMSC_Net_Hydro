@@ -78,11 +78,31 @@ class V4Config:
 
     # Heatmap soft-argmax + FiLM-residual head
     soft_argmax_temperature: float = 1.0
-    residual_scale_m: float = 0.05  # bound the FiLM-residual at ±5 cm
+    # Residual half-range in metres.  Was 0.05 in the second-pass audit;
+    # the 2026-05-11 run showed soft-argmax centre-bias of 10–15 cm on
+    # corner-of-grid positions (e.g. D4 `(-20, 0, 0)`) that the ±5 cm
+    # residual could not correct.  0.20 m lets the head reach any voxel
+    # in the prototype bounding box while the tanh squash + AdamW weight
+    # decay still prefer small residuals when soft-argmax is accurate.
+    residual_scale_m: float = 0.20
 
     # Conditioning
     scada_dim: int = 0  # 0 → no SCADA slot; V5.1/V5.2 set this.
     unconditional: bool = False  # A3 ablation
+    # Channel-ablation modes (A5 in REVIEW.md sixth-pass audit):
+    #   - "both": full V4 architecture (acoustic SRP + structure-borne TDOA).
+    #   - "srp_only": zero the TDOA tokens at inference and training, so the
+    #     head must regress from the SRP volume + FiLM(c) alone.
+    #   - "tdoa_only": zero the SRP volume at inference and training, so the
+    #     head's soft-argmax starts at the grid centroid for every window
+    #     and the localization comes entirely from the FiLM(c)-conditioned
+    #     residual on the TDOA tokens.
+    # This ablation isolates the marginal contribution of the structure-
+    # borne accelerometer TDOA pathway from the acoustic SRP pathway —
+    # i.e. it answers "which modality is doing the localization work?"
+    # at the V4-head input level, complementary to the A1 modality-severing
+    # ablation that lives in V2.
+    channel_mode: Literal["both", "srp_only", "tdoa_only"] = "both"
 
     # Training
     epochs: int = 50
@@ -325,9 +345,28 @@ def _stack_tdoa(samples: list[V4Sample]) -> torch.Tensor:
     return torch.from_numpy(out)
 
 
-def _make_batch(samples: list[V4Sample]) -> dict:
+def _make_batch(
+    samples: list[V4Sample],
+    *,
+    channel_mode: Literal["both", "srp_only", "tdoa_only"] = "both",
+) -> dict:
     volumes = torch.from_numpy(np.stack([s.srp_volume for s in samples], axis=0)).float()
     tdoa = _stack_tdoa(samples).float()
+    if channel_mode == "srp_only":
+        # Severing the structure-borne TDOA pathway: zero the token
+        # features (path_diff_m + endpoint coords + distance) so the
+        # TDOA-set encoder reads a no-information input.  The encoder's
+        # PMA output is still computed (so the head's input dim is
+        # preserved), but it carries no spatial information.
+        tdoa = torch.zeros_like(tdoa)
+    elif channel_mode == "tdoa_only":
+        # Severing the acoustic-SRP pathway: zero the SRP volume so the
+        # 3-D CNN sees a flat-zero input.  The soft-argmax over a flat
+        # logit volume collapses to the uniform centroid of the grid →
+        # init_xyz is the grid centre on every window, and any
+        # localization signal must come through the FiLM-conditioned
+        # residual on (global_feat, tdoa_feat, init_xyz).
+        volumes = torch.zeros_like(volumes)
     contexts = torch.from_numpy(np.stack([s.context for s in samples], axis=0)).float()
     targets = torch.from_numpy(np.stack([s.target_xyz for s in samples], axis=0)).float()
     scada = None
@@ -358,6 +397,14 @@ class V4Result:
     val_init_xyz: np.ndarray  # (n_val, 3) — pure soft-argmax output
     val_residuals: np.ndarray  # (n_val, 3) — FiLM-residual contribution
     val_recording_breakdown: dict  # recording_id -> {n, mae, target, pred_mean}
+    # Bootstrap 95 % CI on val MAE — percentile method, 1000 resamples at
+    # the window level.  With ~ 3 val recordings and ~ 300 val windows
+    # the single-point MAE has high variance; reporting `MAE ± CI` is
+    # the standard small-sample regression discipline (Efron & Tibshirani,
+    # 1993, "An Introduction to the Bootstrap").
+    val_mae_ci_low: float = float("nan")
+    val_mae_ci_high: float = float("nan")
+    val_mae_ci_method: str = "percentile_bootstrap_1000"
 
 
 def _grid_coords_from_spec(grid: GridSpec) -> torch.Tensor:
@@ -474,7 +521,7 @@ def train_v4_localization(
         for i in range(0, n_train, cfg.batch_size):
             idx = perm[i : i + cfg.batch_size]
             batch = _to_device(
-                _augment_batch(_make_batch([train_samples[j] for j in idx]), aug_gen)
+                _augment_batch(_make_batch([train_samples[j] for j in idx], channel_mode=cfg.channel_mode), aug_gen)
             )
             pred = head(
                 batch["volumes"],
@@ -499,7 +546,7 @@ def train_v4_localization(
         v_n = 0
         with torch.no_grad():
             for i in range(0, len(val_samples), cfg.batch_size):
-                batch = _to_device(_make_batch(val_samples[i : i + cfg.batch_size]))
+                batch = _to_device(_make_batch(val_samples[i : i + cfg.batch_size], channel_mode=cfg.channel_mode))
                 pred = head(
                     batch["volumes"],
                     batch["tdoa"],
@@ -529,7 +576,7 @@ def train_v4_localization(
     with torch.no_grad():
         for i in range(0, len(val_samples), cfg.batch_size):
             batch_samples = val_samples[i : i + cfg.batch_size]
-            batch = _to_device(_make_batch(batch_samples))
+            batch = _to_device(_make_batch(batch_samples, channel_mode=cfg.channel_mode))
             out = head(
                 batch["volumes"],
                 batch["tdoa"],
@@ -553,6 +600,25 @@ def train_v4_localization(
         errs = np.linalg.norm(val_predictions - val_targets, axis=-1)
         val_mae = float(errs.mean())
         val_p95 = float(np.percentile(errs, 95))
+        # 95 % percentile-bootstrap CI on MAE, 1000 window-level resamples.
+        # Standard small-sample uncertainty quantification on a regression
+        # head (Efron & Tibshirani, 1993).  Resamples at the window level
+        # rather than the recording level because window-level resampling
+        # treats every val window as an independent draw from the head's
+        # output distribution; recording-level CI would require ≥ 10 val
+        # recordings, which the V4 cohort does not have.
+        rng_ci = np.random.default_rng(cfg.seed)
+        n_boot = 1000
+        n_err = errs.shape[0]
+        if n_err >= 2:
+            boot_maes = np.empty(n_boot, dtype=np.float64)
+            for i in range(n_boot):
+                idx = rng_ci.integers(0, n_err, size=n_err)
+                boot_maes[i] = float(errs[idx].mean())
+            ci_low = float(np.percentile(boot_maes, 2.5))
+            ci_high = float(np.percentile(boot_maes, 97.5))
+        else:
+            ci_low = ci_high = val_mae
         # Per-recording breakdown: mean(pred) vs target, recording-level MAE.
         breakdown: dict = {}
         for k in set(val_keys):
@@ -578,6 +644,8 @@ def train_v4_localization(
         val_targets = np.zeros((0, 3), dtype=np.float32)
         val_mae = float("nan")
         val_p95 = float("nan")
+        ci_low = float("nan")
+        ci_high = float("nan")
         breakdown = {}
 
     def _qualify(s: V4Sample) -> str:
@@ -597,6 +665,8 @@ def train_v4_localization(
         val_init_xyz=val_init,
         val_residuals=val_delta,
         val_recording_breakdown=breakdown,
+        val_mae_ci_low=ci_low,
+        val_mae_ci_high=ci_high,
     )
 
 

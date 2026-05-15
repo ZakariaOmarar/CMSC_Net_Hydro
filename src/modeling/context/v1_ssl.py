@@ -74,9 +74,21 @@ class V1SSLConfig:
     hop_length: int = 512
     cwt_n_scales: int = 64
     use_cwt: bool = True  # smoke-test override: skip CWT to speed up
+    # F4 toggle — per-channel z-score of the log-mel + CWT stack before the
+    # CNN.  Default False: the 2026-05-14 audit found F4 is NOT load-bearing
+    # — the V1 acoustic encoder trains fine without it once BatchNorm is the
+    # encoder norm (the real collapse cause was F7/GroupNorm, not F4).  Kept
+    # as a knob because the log-mel-vs-CWT channel-scale mismatch is a real
+    # concern worth revisiting if the SSL objective changes.
+    standardize_acoustic: bool = False
 
     # Vibration feature parameters
     vib_kurtosis_window: int = 5
+    # Vibration amplitude + envelope z-score toggle (pre-existing behaviour;
+    # default True).  Rolling kurtosis is always kept raw — see
+    # `compute_vibration_input_stack`; the F5 experiment that z-scored it
+    # showed no benefit and was reverted.
+    standardize_vibration: bool = True
 
     # Augmentations (applied in feature space)
     gain_jitter_db: float = 6.0
@@ -143,6 +155,7 @@ def _precompute_segment(
                 n_fft=cfg.n_fft,
                 hop_length=cfg.hop_length,
                 cwt_n_scales=cfg.cwt_n_scales,
+                standardize=cfg.standardize_acoustic,
             )
         else:
             # Fast path for smoke tests — log-mel only, duplicated as channel 1.
@@ -163,7 +176,9 @@ def _precompute_segment(
         feature_fs = float(s.segment.mic_sample_rate) / float(cfg.hop_length)
     elif modality == "vibration":
         features = compute_vibration_input_stack(
-            s.segment.accel_data, kurtosis_window=cfg.vib_kurtosis_window
+            s.segment.accel_data,
+            kurtosis_window=cfg.vib_kurtosis_window,
+            standardize=cfg.standardize_vibration,
         )
         xyz = s.vib_positions.astype(np.float32)
         feature_fs = float(s.segment.accel_sample_rate)
@@ -417,27 +432,89 @@ class V1Result:
     modality: str
 
 
+def _time_split_segment(
+    seg: _PrecomputedSegment, val_ratio: float
+) -> tuple[_PrecomputedSegment | None, _PrecomputedSegment | None]:
+    """Split a single segment in time: first ``(1 − val_ratio)`` of frames →
+    train pseudo-segment, last ``val_ratio`` of frames → val pseudo-segment.
+
+    Used by `_split_segments_by_recording` when a `mode_label` group
+    has only one recording — without this, that mode never appears in
+    val and the K = 3 sanity-gate cannot evaluate it.  Time-splitting
+    the same recording trades a small temporal-correlation leak (no
+    different from any within-recording train/val split in the
+    machine-condition-monitoring literature) for full coverage of the
+    K = 3 mode hypothesis at evaluation time.  The pseudo-segments
+    share `mode_label`, `xyz`, `feature_fs`, `dataset_idx`, and
+    `source_dir`, and differ only in `features` (sliced along the last
+    axis) and `recording_id` (suffixed `__train_half` / `__val_half`).
+    Returns ``(None, None)`` if the segment is too short to split.
+    """
+    T = int(seg.features.shape[-1])
+    if T < 4:
+        return None, None
+    n_val = max(2, int(round(T * val_ratio)))
+    n_val = min(n_val, T - 2)
+    if n_val < 2 or T - n_val < 2:
+        return None, None
+    train_feats = seg.features[..., : T - n_val]
+    val_feats = seg.features[..., T - n_val :]
+    train_seg = _PrecomputedSegment(
+        features=train_feats,
+        xyz=seg.xyz,
+        dataset_idx=seg.dataset_idx,
+        mode_label=seg.mode_label,
+        recording_id=f"{seg.recording_id}__train_half",
+        source_dir=seg.source_dir,
+        feature_fs=seg.feature_fs,
+    )
+    val_seg = _PrecomputedSegment(
+        features=val_feats,
+        xyz=seg.xyz,
+        dataset_idx=seg.dataset_idx,
+        mode_label=seg.mode_label,
+        recording_id=f"{seg.recording_id}__val_half",
+        source_dir=seg.source_dir,
+        feature_fs=seg.feature_fs,
+    )
+    return train_seg, val_seg
+
+
 def _split_segments_by_recording(
     segments: list[_PrecomputedSegment], val_ratio: float, seed: int
 ) -> tuple[list[_PrecomputedSegment], list[_PrecomputedSegment]]:
     """Stratified-by-mode-label held-out split at the *recording* level.
 
-    The cluster-purity sanity gate is uninterpretable when the held-out
-    val contains a single mode label (Hungarian then collapses to that
-    one class and the K-means assignment carries no information).  We
-    therefore stratify the split by `mode_label`: each labeled mode
-    contributes ⌊val_ratio · count⌋ recordings (≥ 1 when count ≥ 2) to
-    val.  Recordings with `mode_label = None` (D3 / D4 healthy speed
-    buckets — mode unrecorded by protocol) are split round-robin without
-    stratification.
+    Three regimes per `mode_label` group:
+
+    * ``count ≥ 2`` recordings — standard recording-level stratified split:
+      each labeled mode contributes ⌊val_ratio · count⌋ recordings (≥ 1)
+      to val with the rest in train.  No within-recording leakage.
+
+    * ``count == 1`` recordings — the recording is **time-split**: first
+      ``(1 − val_ratio)`` of its feature frames go into a "train half"
+      pseudo-segment, the last ``val_ratio`` into a "val half" pseudo-
+      segment.  This guarantees the mode appears in val for the K = 3
+      sanity-gate (the alternative — putting the single recording
+      entirely in train — was the structural reason Standstill never
+      appeared in val before this fix; see REVIEW.md fifth-pass note).
+      The temporal-correlation cost is the same as any within-recording
+      split in the CBM literature and is documented as a known limit.
+
+    * ``count == 0`` recordings — nothing to do.
+
+    Recordings with `mode_label = None` (D3 / D4 healthy speed-bucket
+    recordings — mode unrecorded by protocol) are split at the recording
+    level without stratification.
     """
     rng = np.random.default_rng(seed)
-    # Group recordings by (dataset_idx, recording_id, source_dir) → mode_label.
     rec_to_label: dict[tuple, str | None] = {}
+    rec_to_seg: dict[tuple, _PrecomputedSegment] = {}
     for s in segments:
         key = (s.dataset_idx, s.recording_id, s.source_dir)
         if key not in rec_to_label:
             rec_to_label[key] = s.mode_label
+            rec_to_seg[key] = s
 
     by_label: dict[str | None, list] = {}
     for key, lbl in rec_to_label.items():
@@ -445,14 +522,21 @@ def _split_segments_by_recording(
 
     train_keys: set = set()
     val_keys: set = set()
+    time_split_train: list[_PrecomputedSegment] = []
+    time_split_val: list[_PrecomputedSegment] = []
     for lbl, recs in by_label.items():
         recs_shuffled = list(recs)
         rng.shuffle(recs_shuffled)
-        if len(recs_shuffled) <= 1:
-            # Cannot stratify a single-recording mode — keep it in train so
-            # SSL still benefits from it, and accept that the sanity gate
-            # will not see this mode in val.
-            train_keys.update(recs_shuffled)
+        if len(recs_shuffled) == 1:
+            # Time-split the single recording so this mode appears in val.
+            only_key = recs_shuffled[0]
+            tr, va = _time_split_segment(rec_to_seg[only_key], val_ratio)
+            if tr is not None and va is not None:
+                time_split_train.append(tr)
+                time_split_val.append(va)
+            else:
+                # Segment too short to split — fall back to train-only.
+                train_keys.update(recs_shuffled)
             continue
         n_val_for_label = max(1, int(round(len(recs_shuffled) * val_ratio)))
         # Keep at least one in train per label too.
@@ -462,6 +546,8 @@ def _split_segments_by_recording(
 
     train = [s for s in segments if (s.dataset_idx, s.recording_id, s.source_dir) in train_keys]
     val = [s for s in segments if (s.dataset_idx, s.recording_id, s.source_dir) in val_keys]
+    train.extend(time_split_train)
+    val.extend(time_split_val)
     return train, val
 
 

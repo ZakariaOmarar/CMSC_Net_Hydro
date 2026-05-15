@@ -268,4 +268,80 @@ class PerClusterThresholds:
         return self
 
 
-__all__ = ["PerClusterThresholds"]
+def per_cluster_alert_breakdown(
+    thresholds: PerClusterThresholds,
+    contexts: np.ndarray,
+    scores: np.ndarray,
+    *,
+    percentile: int | str = 95,
+    label_per_cluster: dict[int, str] | None = None,
+) -> dict:
+    """Break a cohort's alert rate down by predicted V2 K-means cluster.
+
+    The orchestrator's V3 cohort-validation block reports an aggregate
+    alert rate per cohort (healthy hold-out, D2 RF, D3 hit, D4 RF).
+    For the **per-mode FPR breakdown** the plan §V3 calls for, we
+    additionally split each cohort's windows by which K-means cluster
+    of `c_t` they were assigned to.  This answers:
+
+      * "Does the healthy hold-out alert rate hit the 5 % target *in
+        every cluster*, or only in the cluster K-means chose as
+        biggest?"  (per-cluster healthy alert rate near 5 % is the
+        publishable claim that the K = 3 mode hypothesis defends.)
+
+      * "Are the D2 RandomFault alerts concentrated in the cluster
+        that maps to the Turbine mode (the regime D2 RF was actually
+        recorded in)?"  (this is the cluster-correctness check the
+        chained-system narrative depends on.)
+
+    The breakdown is unsupervised in cluster identity (the K-means
+    cluster IDs are arbitrary integers).  When ``label_per_cluster`` is
+    supplied (typically derived from a Hungarian match in Chapter 6),
+    each row is also tagged with the mode name for the result tables.
+
+    Returns a JSON-friendly dict:
+
+    .. code::
+
+        {
+          "percentile": 95,
+          "n_total": int,
+          "n_alerts_total": int,
+          "alert_rate_total": float,
+          "per_cluster": {
+            "0": {"n": ..., "n_alerts": ..., "alert_rate": ..., "label": ...},
+            "1": {...},
+            ...
+          }
+        }
+    """
+    contexts = np.asarray(contexts, dtype=np.float64)
+    scores = np.asarray(scores, dtype=np.float64).ravel()
+    if contexts.shape[0] != scores.shape[0]:
+        raise ValueError("contexts and scores must have the same first dim")
+    alerts, clusters = thresholds.alert(contexts, scores, percentile=percentile)
+
+    K = int(thresholds.centroids.shape[0])
+    per_cluster: dict[str, dict] = {}
+    for k in range(K):
+        mask = clusters == k
+        n_k = int(mask.sum())
+        n_alerts_k = int(alerts[mask].sum()) if n_k > 0 else 0
+        per_cluster[str(int(k))] = {
+            "n": n_k,
+            "n_alerts": n_alerts_k,
+            "alert_rate": float(n_alerts_k / n_k) if n_k > 0 else float("nan"),
+            "label": (label_per_cluster or {}).get(int(k), None),
+        }
+    n_total = int(scores.shape[0])
+    n_alerts_total = int(alerts.sum()) if n_total > 0 else 0
+    return {
+        "percentile": percentile if isinstance(percentile, str) else int(percentile),
+        "n_total": n_total,
+        "n_alerts_total": n_alerts_total,
+        "alert_rate_total": float(n_alerts_total / n_total) if n_total > 0 else float("nan"),
+        "per_cluster": per_cluster,
+    }
+
+
+__all__ = ["PerClusterThresholds", "per_cluster_alert_breakdown"]

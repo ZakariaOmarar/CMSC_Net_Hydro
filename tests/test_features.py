@@ -106,3 +106,60 @@ def test_vibration_input_stack_legacy_unstandardized(name: str) -> None:
     seg, _, vib = _short_segment(name)
     stack = compute_vibration_input_stack(vib, kurtosis_window=5, standardize=False)
     assert np.all(stack[:, 1, :] >= 0.0)  # envelope = |hilbert(x)| ≥ 0
+
+
+@pytest.mark.parametrize("name", ["d1", "d2", "d3"])
+def test_vibration_kurtosis_is_raw_regardless_of_standardize(name: str) -> None:
+    """Rolling kurtosis (channel 2) is dimensionless and kept RAW — the
+    ``standardize`` flag only affects amplitude + envelope (channels 0, 1).
+    The F5 audit experiment z-scored kurtosis and found no benefit, so it
+    was reverted to the known-good raw form."""
+    seg, _, vib = _short_segment(name)
+    if vib.shape[1] < 20:
+        pytest.skip("segment too short to evaluate rolling kurtosis stats")
+
+    stack_std = compute_vibration_input_stack(vib, kurtosis_window=5, standardize=True)
+    stack_raw = compute_vibration_input_stack(vib, kurtosis_window=5, standardize=False)
+
+    # The kurtosis channel must be byte-identical with and without standardize.
+    np.testing.assert_array_equal(stack_std[:, 2, :], stack_raw[:, 2, :])
+
+
+@pytest.mark.parametrize("name", ["d1", "d2", "d3"])
+def test_acoustic_stack_is_per_channel_zscored(name: str) -> None:
+    """F4 — log-mel (channel 0) and CWT (channel 1) are each z-scored across
+    (mics, frequency, time) when ``standardize=True``.  Under the legacy
+    ``standardize=False`` path they retain their raw (different-scale) ranges."""
+    seg, mic, _ = _short_segment(name)
+    stack_z = compute_encoder_input_stack(
+        mic,
+        fs=seg.segment.mic_sample_rate,
+        n_mels=32,
+        n_fft=512,
+        hop_length=256,
+        cwt_n_scales=24,
+        standardize=True,
+    )
+    stack_raw = compute_encoder_input_stack(
+        mic,
+        fs=seg.segment.mic_sample_rate,
+        n_mels=32,
+        n_fft=512,
+        hop_length=256,
+        cwt_n_scales=24,
+        standardize=False,
+    )
+    for ch in (0, 1):
+        ch_z = stack_z[:, ch, :, :]
+        ch_raw = stack_raw[:, ch, :, :]
+        assert abs(float(ch_z.mean())) < 1e-3
+        # Unit variance (non-degenerate input — real mic data is never flat).
+        assert abs(float(ch_z.std()) - 1.0) < 1e-2
+        # Raw path retains the original log1p-scaled range (≥ 0).
+        assert float(ch_raw.min()) >= 0.0
+    # The two channels in the z-scored stack should now have comparable
+    # dynamic ranges (within an order of magnitude).
+    mel_range = float(np.ptp(stack_z[:, 0, :, :]))
+    cwt_range = float(np.ptp(stack_z[:, 1, :, :]))
+    ratio = max(mel_range, cwt_range) / max(min(mel_range, cwt_range), 1e-6)
+    assert ratio < 10.0, f"channel range mismatch after z-score: ratio={ratio:.2f}"

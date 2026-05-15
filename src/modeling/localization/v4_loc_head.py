@@ -129,12 +129,34 @@ class TDOASetEncoder(nn.Module):
 
 
 class FiLMResidualHead(nn.Module):
-    """FiLM-conditioned residual MLP on `[global_feat, tdoa_feat]` → Δ(x, y, z).
+    """FiLM-conditioned residual MLP on `[global_feat, tdoa_feat, init_xyz]`
+    → Δ(x, y, z).
 
-    The residual is added to the soft-argmax initial estimate.  γ/β are
-    zero-init so an all-zero conditioner is the identity FiLM (A3 ablation
-    invariant); even under the ablation, the residual MLP still runs on
-    `[global_feat, tdoa_feat]` and contributes an unconditional correction.
+    The residual is added to the soft-argmax initial estimate.  Three design
+    choices that distinguish this head from the prior bounded-only version:
+
+    1. **`init_xyz` is concatenated into the input feature.**  The MLP can
+       now learn *how much to trust the soft-argmax estimate* depending on
+       where it lies in the grid — corner-of-grid soft-argmax estimates are
+       systematically biased toward the grid centre (the softmax-weighted
+       centroid pulls inward), and passing the estimate as a feature lets
+       the head learn to apply a larger correction when the estimate is
+       near the grid boundary.
+
+    2. **Residual bound widened to ±`residual_scale_m`** (default 0.20 m).
+       The previous ±0.05 m cap was insufficient to correct the soft-argmax
+       centre-bias on corner positions of the V4 cohort
+       (e.g. ground-truth `(-0.20, 0, 0)` vs. soft-argmax pulling inward by
+       ~ 10–15 cm); see REVIEW.md fourth-pass note.  The tanh squash keeps
+       the residual from blowing up while allowing full grid-extent
+       corrections when warranted.
+
+    3. **FiLM γ/β zero-init + final-layer zero-init** preserve the A3
+       ablation invariant: at init the head returns the soft-argmax
+       prediction exactly, regardless of `c` / `s`.  Under `unconditional`
+       the FiLM is the identity; the MLP still runs on the per-window
+       features and can learn an unconditional correction, which is the
+       A3 lower bound.
     """
 
     def __init__(
@@ -143,11 +165,13 @@ class FiLMResidualHead(nn.Module):
         c_dim: int,
         s_dim: int = 0,
         hidden_dim: int = 128,
-        residual_scale: float = 0.05,
+        residual_scale: float = 0.20,
     ) -> None:
         super().__init__()
         cond_dim = c_dim + s_dim
-        self.in_proj = nn.Linear(in_dim, hidden_dim)
+        # The MLP sees the feature stack + the soft-argmax init position
+        # (3 extra dims).  See class-level docstring for the rationale.
+        self.in_proj = nn.Linear(in_dim + 3, hidden_dim)
         self.film_gamma = nn.Linear(cond_dim, hidden_dim)
         self.film_beta = nn.Linear(cond_dim, hidden_dim)
         nn.init.zeros_(self.film_gamma.weight)
@@ -160,9 +184,6 @@ class FiLMResidualHead(nn.Module):
             nn.GELU(),
             nn.Linear(hidden_dim, 3),
         )
-        # Bound the residual via tanh so a poorly-conditioned residual
-        # cannot blow up the soft-argmax prior.  `residual_scale` is in
-        # metres — 5 cm is generous on a ~10 cm prototype but not unbounded.
         self.residual_scale = float(residual_scale)
         self.s_dim = s_dim
         self.c_dim = c_dim
@@ -172,9 +193,16 @@ class FiLMResidualHead(nn.Module):
         nn.init.zeros_(self.head[-1].bias)
 
     def forward(
-        self, x: torch.Tensor, c: torch.Tensor, s: torch.Tensor | None = None
+        self,
+        x: torch.Tensor,
+        c: torch.Tensor,
+        s: torch.Tensor | None = None,
+        init_xyz: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        h = self.in_proj(x)
+        if init_xyz is None:
+            init_xyz = torch.zeros(x.shape[0], 3, device=x.device, dtype=x.dtype)
+        h_in = torch.cat([x, init_xyz], dim=-1)
+        h = self.in_proj(h_in)
         if self.s_dim > 0:
             if s is None:
                 s = torch.zeros(x.shape[0], self.s_dim, device=x.device, dtype=x.dtype)
@@ -207,7 +235,7 @@ class V4LocalizationHead(nn.Module):
         s_dim: int = 0,
         hidden_dim: int = 128,
         n_heads_tdoa: int = 2,
-        residual_scale_m: float = 0.05,
+        residual_scale_m: float = 0.20,
         soft_argmax_temperature: float = 1.0,
     ) -> None:
         super().__init__()
@@ -251,7 +279,9 @@ class V4LocalizationHead(nn.Module):
             c = torch.zeros_like(c)
             if s is not None:
                 s = torch.zeros_like(s)
-        delta = self.residual(feat, c, s)
+        # Pass init_xyz into the residual MLP so it can learn corner-bias
+        # corrections; see FiLMResidualHead docstring.
+        delta = self.residual(feat, c, s, init_xyz=init_xyz)
         pred = init_xyz + delta
         if return_components:
             return {

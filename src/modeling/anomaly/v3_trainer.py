@@ -80,6 +80,16 @@ class V3Config:
     # over-loosens the threshold.
     n_threshold_clusters: int = 3
     threshold_percentile: int = 95
+
+    # Nested held-out split inside `val_segs`: a `threshold_fit_val_ratio`
+    # fraction of val recordings goes to *fitting* the K-means centroids and
+    # per-cluster percentile bar; the remaining fraction is the *reportable*
+    # held-out cohort whose NLL and alert rate are quoted in the thesis.
+    # Without this split the same windows define the clusters, set the bar,
+    # and are scored against the bar — per-cluster p95/p99 are optimistically
+    # biased.  Split is by recording (uses `_split_segments_by_recording`),
+    # so windows from a single recording cannot span both halves.
+    threshold_fit_val_ratio: float = 0.5
     # The Youden's-J calibration helper exists in `threshold.py` for
     # post-hoc analysis but is **NOT** wired into the orchestrator.  It
     # would require per-window anomaly labels (or an assumption that all
@@ -135,8 +145,22 @@ class V3Result:
     thresholds: PerClusterThresholds
     train_nll: list[float]
     val_nll: list[float]
+    # F6 — per-epoch outlier-batch tracking (min / max of per-batch
+    # train NLL and per-window val NLL).  Spread between max and the
+    # mean diagnoses single-batch loss spikes hiding in the average.
+    train_nll_min: list[float]
+    train_nll_max: list[float]
+    val_nll_min: list[float]
+    val_nll_max: list[float]
     train_recording_ids: list[str]
+    # Reportable held-out cohort — disjoint from train AND from the cohort
+    # used to fit per-cluster thresholds.  All quoted val numbers
+    # (`val_scores`, `val_contexts`, `val_labels`, per-epoch `val_nll`)
+    # come from this cohort.
     val_recording_ids: list[str]
+    # Cohort used to fit K-means centroids + per-cluster p95/p99 — disjoint
+    # from the reportable val cohort.  Exposed for transparency / auditing.
+    threshold_fit_recording_ids: list[str]
     val_scores: np.ndarray
     val_contexts: np.ndarray
     val_labels: list[str]
@@ -170,32 +194,54 @@ def train_v3_cnf(
     train_segs, val_segs = _split_segments_by_recording(
         segments, v3_cfg.val_ratio, v3_cfg.seed
     )
+    # Nested split inside the held-out val cohort: a `threshold_fit_val_ratio`
+    # fraction of val recordings is reserved for K-means + percentile fit;
+    # the remaining fraction is the reportable held-out cohort.  Seed offset
+    # by +1 to avoid coupling the two permutations.
+    val_fit_segs, val_eval_segs = _split_segments_by_recording(
+        val_segs, v3_cfg.threshold_fit_val_ratio, v3_cfg.seed + 1
+    )
     train_ds = _PairedWindowedDataset(train_segs, v2_cfg)
-    val_ds = _PairedWindowedDataset(val_segs, v2_cfg)
+    val_fit_ds = _PairedWindowedDataset(val_fit_segs, v2_cfg)
+    val_eval_ds = _PairedWindowedDataset(val_eval_segs, v2_cfg)
     if len(train_ds) == 0:
         raise RuntimeError("V3: zero training windows after splitting")
+    if len(val_fit_ds) == 0 or len(val_eval_ds) == 0:
+        raise RuntimeError(
+            "V3: threshold-fit nested split produced an empty cohort "
+            f"(val_fit={len(val_fit_ds)}, val_eval={len(val_eval_ds)}); "
+            "reduce `threshold_fit_val_ratio` or increase `val_ratio`."
+        )
 
     train_loader = tud.DataLoader(
         train_ds,
         batch_sampler=_PairedGroupedBatchSampler(train_ds, v3_cfg.batch_size, shuffle=False, seed=v3_cfg.seed),
         collate_fn=_collate,
     )
-    val_loader = tud.DataLoader(
-        val_ds,
-        batch_sampler=_PairedGroupedBatchSampler(val_ds, v3_cfg.batch_size, shuffle=False, seed=v3_cfg.seed),
+    val_fit_loader = tud.DataLoader(
+        val_fit_ds,
+        batch_sampler=_PairedGroupedBatchSampler(val_fit_ds, v3_cfg.batch_size, shuffle=False, seed=v3_cfg.seed),
+        collate_fn=_collate,
+    )
+    val_eval_loader = tud.DataLoader(
+        val_eval_ds,
+        batch_sampler=_PairedGroupedBatchSampler(val_eval_ds, v3_cfg.batch_size, shuffle=False, seed=v3_cfg.seed),
         collate_fn=_collate,
     )
 
     # Extract once — encoder is frozen so a single forward pass over the data
     # gives the full training set.
     x_train, c_train, _ = _extract_xc(v2_encoder, train_loader, device)
-    x_val, c_val, val_labels = _extract_xc(v2_encoder, val_loader, device)
+    x_val_fit, c_val_fit, _val_fit_labels = _extract_xc(v2_encoder, val_fit_loader, device)
+    x_val, c_val, val_labels = _extract_xc(v2_encoder, val_eval_loader, device)
 
     if v3_cfg.unconditional:
         c_train_used = torch.zeros_like(c_train)
+        c_val_fit_used = torch.zeros_like(c_val_fit)
         c_val_used = torch.zeros_like(c_val)
     else:
         c_train_used = c_train
+        c_val_fit_used = c_val_fit
         c_val_used = c_val
 
     flow = ConditionalRealNVP(
@@ -219,6 +265,14 @@ def train_v3_cnf(
     n_train = int(x_train.shape[0])
     train_nll: list[float] = []
     val_nll: list[float] = []
+    # F6 — per-epoch outlier-batch tracking.  A coupling layer can occasionally
+    # produce a single batch with very large NLL (an unbounded affine
+    # transform on an OOD x); we track min/max so the orchestrator can flag
+    # epochs where a single batch dominates the mean loss.
+    train_nll_min: list[float] = []
+    train_nll_max: list[float] = []
+    val_nll_min: list[float] = []
+    val_nll_max: list[float] = []
 
     suffix = "unconditional" if v3_cfg.unconditional else "conditional"
     epoch_iter = tqdm(
@@ -232,6 +286,8 @@ def train_v3_cnf(
         perm = torch.randperm(n_train)
         loss_sum = 0.0
         n = 0
+        epoch_min = float("inf")
+        epoch_max = float("-inf")
         for i in range(0, n_train, v3_cfg.batch_size):
             idx = perm[i : i + v3_cfg.batch_size]
             xb = x_train[idx].to(device)
@@ -240,33 +296,58 @@ def train_v3_cnf(
             loss = -log_p.mean()
             optim.zero_grad()
             loss.backward()
+            # F6 — gradient clipping (Pascanu et al., 2013).  Without this a
+            # single batch landing in the tail of the conditional density can
+            # produce a huge gradient that pushes the affine couplings into a
+            # regime they cannot easily recover from.
+            torch.nn.utils.clip_grad_norm_(flow.parameters(), max_norm=5.0)
             optim.step()
-            loss_sum += float(loss.item()) * xb.shape[0]
+            loss_f = float(loss.item())
+            loss_sum += loss_f * xb.shape[0]
             n += xb.shape[0]
+            if loss_f < epoch_min:
+                epoch_min = loss_f
+            if loss_f > epoch_max:
+                epoch_max = loss_f
         if scheduler is not None:
             scheduler.step()
         train_nll.append(loss_sum / max(1, n))
+        train_nll_min.append(epoch_min if epoch_min != float("inf") else float("nan"))
+        train_nll_max.append(epoch_max if epoch_max != float("-inf") else float("nan"))
 
         flow.eval()
         with torch.no_grad():
             v_log_p = flow.log_prob(x_val.to(device), c_val_used.to(device))
-            val_nll.append(float((-v_log_p.mean()).item()))
+            v_nll_per_window = (-v_log_p).cpu().numpy()
+            val_nll.append(float(v_nll_per_window.mean()))
+            val_nll_min.append(float(v_nll_per_window.min()) if v_nll_per_window.size else float("nan"))
+            val_nll_max.append(float(v_nll_per_window.max()) if v_nll_per_window.size else float("nan"))
         epoch_iter.set_postfix(
             train_nll=f"{train_nll[-1]:.3f}", val_nll=f"{val_nll[-1]:.3f}"
         )
 
     flow.eval()
     with torch.no_grad():
+        # Threshold-fit cohort scores (used only to set the percentile bar).
+        scores_val_fit = (
+            flow.anomaly_score(x_val_fit.to(device), c_val_fit_used.to(device))
+            .cpu()
+            .numpy()
+        )
+        # Reportable held-out cohort scores (all downstream metrics).
         scores_val = (
             flow.anomaly_score(x_val.to(device), c_val_used.to(device)).cpu().numpy()
         )
 
     # Threshold fitting always clusters on the *real* `c_t` (label-free);
-    # the unconditional flag only affects the flow itself.
-    n_clusters = min(v3_cfg.n_threshold_clusters, max(1, c_val.shape[0]))
+    # the unconditional flag only affects the flow itself.  Critically, the
+    # cohort feeding `.fit()` is `val_fit`, which is disjoint from the
+    # `val_eval` cohort whose scores are returned for reporting — this is
+    # what closes the F1 leakage path.
+    n_clusters = min(v3_cfg.n_threshold_clusters, max(1, c_val_fit.shape[0]))
     thresholds = PerClusterThresholds.fit(
-        c_val.numpy(),
-        scores_val,
+        c_val_fit.numpy(),
+        scores_val_fit,
         n_clusters=n_clusters,
         seed=v3_cfg.seed,
     )
@@ -279,8 +360,13 @@ def train_v3_cnf(
         thresholds=thresholds,
         train_nll=train_nll,
         val_nll=val_nll,
+        train_nll_min=train_nll_min,
+        train_nll_max=train_nll_max,
+        val_nll_min=val_nll_min,
+        val_nll_max=val_nll_max,
         train_recording_ids=sorted({_qualify(s) for s in train_segs}),
-        val_recording_ids=sorted({_qualify(s) for s in val_segs}),
+        val_recording_ids=sorted({_qualify(s) for s in val_eval_segs}),
+        threshold_fit_recording_ids=sorted({_qualify(s) for s in val_fit_segs}),
         val_scores=scores_val,
         val_contexts=c_val.numpy(),
         val_labels=val_labels,

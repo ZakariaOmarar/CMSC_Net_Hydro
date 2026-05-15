@@ -33,8 +33,12 @@ def compute_vibration_input_stack(
         standardize: When True (default), the amplitude and Hilbert-envelope
             channels are z-score-normalised.  See `standardization_stats`
             for the granularity options.  Rolling kurtosis is dimensionless
-            and never re-standardised.  Set False to reproduce the
-            pre-2026-05 behaviour for legacy comparisons.
+            and is **not** re-standardised — the F5 audit experiment
+            (2026-05-14) z-scored it per-recording and found no measurable
+            benefit to V1 vibration cluster quality (NMI 0.073 with vs 0.108
+            without), so kurtosis is kept raw as the known-good behaviour.
+            Set False to reproduce the pre-2026-05 behaviour for legacy
+            comparisons (amplitude + envelope also left un-standardised).
         standardization_stats: When `standardize=True` and this is None, the
             standardisation is computed **per-recording-per-channel**
             (legacy default): each channel of each recording is z-scored to
@@ -134,7 +138,10 @@ def compute_vibration_input_stack(
                     envelope = envelope / env_std
             out[i, 1] = envelope.astype(np.float32)
 
-        # Rolling kurtosis with centred window — dimensionless, kept as-is.
+        # Rolling kurtosis with centred window — dimensionless, kept raw.
+        # (The F5 audit experiment z-scored this channel per-recording and
+        # measured no V1 vibration cluster-quality benefit, so it was
+        # reverted to the known-good raw form — see module docstring.)
         rk = np.zeros(T, dtype=np.float64)
         for t in range(half, T - half):
             window = x[t - half : t + half + 1]

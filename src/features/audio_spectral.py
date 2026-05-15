@@ -73,6 +73,7 @@ def compute_encoder_input_stack(
     hop_length: int = 256,
     cwt_n_scales: int = 64,
     cwt_min_freq_hz: float = 20.0,
+    standardize: bool = False,
 ) -> np.ndarray:
     """Build the V1 acoustic encoder input.
 
@@ -81,12 +82,22 @@ def compute_encoder_input_stack(
         fs: Microphone sample rate.
         n_mels / n_fft / hop_length: log-mel parameters.
         cwt_n_scales / cwt_min_freq_hz: CWT scalogram parameters.
+        standardize: When True, each of the two representations (log-mel =
+            channel 0, CWT = channel 1) is per-recording z-scored across all
+            mics, frequencies and frames so both feed the ``Conv2d`` on a
+            unit-variance scale.  **Default False** — this is the F4 audit
+            experiment (2026-05-14); it was found not to be load-bearing
+            (the V1 acoustic encoder trains fine without it once BatchNorm
+            is used) and is left off as the known-good behaviour.  The knob
+            is retained because the channel-scale-mismatch concern is real
+            and may matter once the SSL objective is revisited.
 
     Returns:
         ``(n_mics, 2, F, T_frames)`` float32 array. Channel 0 is log-mel,
         channel 1 is CWT (resampled along time and frequency to match log-mel
         with simple linear interpolation, so the CNN sees both representations
-        on a shared grid).
+        on a shared grid).  With ``standardize=True`` each channel has zero
+        mean and unit variance over the (mic, frequency, time) axes.
     """
     if mic_data.ndim != 2:
         raise ValueError("mic_data must be 2-D (n_mics, n_samples)")
@@ -121,7 +132,21 @@ def compute_encoder_input_stack(
         cwt_aligned = _bilinear_resize(cwt, (target_F, target_T))
         aligned.append(np.stack([mel, cwt_aligned], axis=0))
 
-    return np.stack(aligned, axis=0).astype(np.float32)
+    stack = np.stack(aligned, axis=0).astype(np.float32)
+
+    if standardize:
+        # Per-channel (log-mel vs CWT) per-recording z-score.  Statistics are
+        # taken across mics + frequency + time — preserving relative dynamics
+        # WITHIN each channel while equalising the BETWEEN-channel scale that
+        # would otherwise let the first ``Conv2d`` learn to ignore the
+        # smaller-magnitude channel.
+        eps = 1e-8
+        for ch in (0, 1):
+            mean = float(stack[:, ch, :, :].mean())
+            std = float(stack[:, ch, :, :].std())
+            stack[:, ch, :, :] = (stack[:, ch, :, :] - mean) / max(std, eps)
+
+    return stack
 
 
 def _bilinear_resize(arr: np.ndarray, new_shape: tuple[int, int]) -> np.ndarray:

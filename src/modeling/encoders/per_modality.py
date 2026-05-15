@@ -27,6 +27,34 @@ import torch.nn as nn
 from .set_transformer import MAB, PMA, ChannelTokenEnricher
 
 
+def _norm2d(num_channels: int, norm: str) -> nn.Module:
+    """Normalisation layer for the 2-D acoustic CNN — see `_norm` rationale."""
+    if norm == "group":
+        groups = min(8, max(1, num_channels // 4))
+        return nn.GroupNorm(num_groups=groups, num_channels=num_channels)
+    return nn.BatchNorm2d(num_channels)
+
+
+def _norm1d(num_channels: int, norm: str) -> nn.Module:
+    """Normalisation layer for the 1-D vibration CNN — see `_norm` rationale."""
+    if norm == "group":
+        groups = min(8, max(1, num_channels // 4))
+        return nn.GroupNorm(num_groups=groups, num_channels=num_channels)
+    return nn.BatchNorm1d(num_channels)
+
+
+# Normalisation choice (F7).  The 2026-05-14 run swapped BatchNorm → GroupNorm
+# for channel-count invariance, but this collapsed the V1 acoustic contrastive
+# encoder: the NT-Xent loss returned to its degenerate fixed point (≈ ln(N))
+# and the embeddings went to effective rank 1.9 / cosine 0.99999.  BatchNorm's
+# cross-sample batch coupling is load-bearing for SimCLR-style contrastive
+# pretraining — removing it removes the implicit anti-collapse pressure.  The
+# default is therefore BACK to "batch"; "group" is retained as an opt-in knob
+# (the channel-count-invariance concern F7 raised is real, but the fix is a
+# variance-regularised SSL objective, not a bare norm swap — see Chapter 7).
+_DEFAULT_NORM = "batch"
+
+
 class Acoustic2DCNN(nn.Module):
     """Plain 2-D CNN backbone applied per microphone.
 
@@ -34,19 +62,21 @@ class Acoustic2DCNN(nn.Module):
     Output: `(B, N_mic, feature_dim)` — per-mic feature vector
     """
 
-    def __init__(self, in_channels: int = 2, feature_dim: int = 128) -> None:
+    def __init__(
+        self, in_channels: int = 2, feature_dim: int = 128, norm: str = _DEFAULT_NORM
+    ) -> None:
         super().__init__()
         self.cnn = nn.Sequential(
             nn.Conv2d(in_channels, 32, kernel_size=3, padding=1),
-            nn.BatchNorm2d(32),
+            _norm2d(32, norm),
             nn.GELU(),
             nn.MaxPool2d(2),
             nn.Conv2d(32, 64, kernel_size=3, padding=1),
-            nn.BatchNorm2d(64),
+            _norm2d(64, norm),
             nn.GELU(),
             nn.MaxPool2d(2),
             nn.Conv2d(64, 128, kernel_size=3, padding=1),
-            nn.BatchNorm2d(128),
+            _norm2d(128, norm),
             nn.GELU(),
             nn.AdaptiveAvgPool2d(1),
         )
@@ -69,17 +99,20 @@ class Vibration1DCNN(nn.Module):
     Output: `(B, N_vib, feature_dim)` — per-vibration feature vector
     """
 
-    def __init__(self, in_channels: int = 3, feature_dim: int = 128) -> None:
+    def __init__(
+        self, in_channels: int = 3, feature_dim: int = 128, norm: str = _DEFAULT_NORM
+    ) -> None:
         super().__init__()
+        # Normalisation: see `_DEFAULT_NORM` rationale above (F7).
         self.cnn = nn.Sequential(
             nn.Conv1d(in_channels, 32, kernel_size=5, padding=2),
-            nn.BatchNorm1d(32),
+            _norm1d(32, norm),
             nn.GELU(),
             nn.Conv1d(32, 64, kernel_size=5, padding=2),
-            nn.BatchNorm1d(64),
+            _norm1d(64, norm),
             nn.GELU(),
             nn.Conv1d(64, 128, kernel_size=5, padding=2),
-            nn.BatchNorm1d(128),
+            _norm1d(128, norm),
             nn.GELU(),
             nn.AdaptiveAvgPool1d(1),
         )
@@ -110,14 +143,19 @@ class PerModalityEncoder(nn.Module):
         n_heads: int = 4,
         n_modalities: int = 2,
         n_datasets: int = 5,
+        norm: str = _DEFAULT_NORM,
     ) -> None:
         super().__init__()
         self.modality = modality
         if modality == "acoustic":
-            self.backbone: nn.Module = Acoustic2DCNN(in_channels=2, feature_dim=feature_dim)
+            self.backbone: nn.Module = Acoustic2DCNN(
+                in_channels=2, feature_dim=feature_dim, norm=norm
+            )
             self.modality_idx = 0
         elif modality == "vibration":
-            self.backbone = Vibration1DCNN(in_channels=3, feature_dim=feature_dim)
+            self.backbone = Vibration1DCNN(
+                in_channels=3, feature_dim=feature_dim, norm=norm
+            )
             self.modality_idx = 1
         else:
             raise ValueError(f"unknown modality {modality!r}")

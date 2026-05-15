@@ -404,8 +404,8 @@ def test_train_v4_end_to_end_with_synthetic_labels() -> None:
         # Diagnostic fields populated.
         assert result.val_init_xyz.shape == result.val_predictions.shape
         assert result.val_residuals.shape == result.val_predictions.shape
-        # Residual is bounded by ±residual_scale_m (default 0.05) per dim.
-        assert float(np.abs(result.val_residuals).max()) <= 0.05 + 1e-5
+        # Residual is bounded by ±residual_scale_m (default 0.20) per dim.
+        assert float(np.abs(result.val_residuals).max()) <= 0.20 + 1e-5
         # Per-recording breakdown is populated for every val recording.
         assert set(result.val_recording_breakdown.keys()) == set(result.val_recording_ids)
         for k, row in result.val_recording_breakdown.items():
