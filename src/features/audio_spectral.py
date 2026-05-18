@@ -1,11 +1,15 @@
 """Acoustic encoder-input features: log-mel + CWT scalograms stacked per mic.
 
 Produces a 4-D tensor with shape ``(n_mics, 2, F, T_frames)`` where channel 0 is
-log-mel and channel 1 is the CWT scalogram resampled to the same time/frequency
-grid. This is the direct input format for the V1 acoustic 2-D CNN encoder.
+a power-to-dB log-mel spectrogram and channel 1 is a CWT scalogram
+**re-gridded** to the log-mel ``(F, T)`` shape.  The two channels are
+intentionally **complementary spectral views** rather than co-registered
+images — see :func:`compute_encoder_input_stack` for the asymmetric-band
+design rationale.
 
-Distinct from `acoustic_representations.py`, which produces individual features
-for downstream feature-frame baselines.
+Distinct from :mod:`src.features.acoustic_representations`, which exposes
+the individual primitives (STFT, MFCC+deltas) for the V0 / classical
+baselines.
 """
 
 from __future__ import annotations
@@ -20,15 +24,43 @@ def compute_log_mel_spectrogram(
     fs: int,
     *,
     n_fft: int = 1024,
-    hop_length: int = 256,
+    hop_length: int = 512,
     n_mels: int = 64,
     fmin: float = 20.0,
     fmax: float | None = None,
+    top_db: float = 80.0,
 ) -> np.ndarray:
-    """Log-mel spectrogram for one channel.
+    """Power-to-dB log-mel spectrogram for one channel.
 
-    Returns a 2-D array of shape ``(n_mels, n_frames)``, in log1p of the mel
-    power. Uses librosa under the hood.
+    Returns a 2-D array of shape ``(n_mels, n_frames)`` in **decibels** with
+    a fixed dynamic-range floor of ``top_db`` dB below the maximum *that the
+    function would otherwise compute* for the input (i.e. clip-from-below
+    only — there is no gain normalisation).  This is the standard log-mel
+    convention used in audio-classification benchmarks (Choi et al., 2017;
+    librosa convention) and is gain-equivariant: a +6 dB gain on the input
+    shifts every output bin by +6 dB rather than reshaping the distribution.
+
+    Args:
+        signal: 1-D mono microphone waveform.
+        fs: Sample rate in Hz.
+        n_fft: STFT window length (samples).  Default 1024 → 64 ms at 16 kHz.
+        hop_length: STFT hop length (samples).  Default 512 → 32 ms stride,
+            matching the publication-run configs in
+            `configs/test_datasets/v1_per_modality_ssl.yaml` and
+            `src/modeling/orchestration/full_run.py`.
+        n_mels: Number of mel filterbank bands.  Default 64 (publication
+            value in the V1/V2 YAMLs; `full_run.py` overrides to 48 for the
+            CPU-budget runs).
+        fmin: Lower mel-band edge in Hz.  Default 20 Hz rejects microphone
+            self-noise roll-off and AC line hum.
+        fmax: Upper mel-band edge in Hz; None ⇒ Nyquist.
+        top_db: Dynamic-range floor below the peak of THIS recording's mel
+            power.  Default 80 dB matches librosa's `power_to_db` default.
+
+    Returns:
+        ``(n_mels, n_frames)`` float64 array in dB.  Typical range is
+        ``[-top_db, 0]`` relative to the per-recording peak; absolute
+        scale is preserved up to ``ref=1.0`` (no gain normalisation).
     """
     import librosa
 
@@ -61,7 +93,13 @@ def compute_log_mel_spectrogram(
         fmax=fmax,
         power=2.0,
     )
-    return np.log1p(mel_power).astype(np.float64)
+    # `ref=1.0` keeps absolute amplitude (no per-recording peak normalisation),
+    # so cross-recording amplitude differences (e.g. Pump > Standstill at the
+    # casing wall) survive into the encoder; BatchNorm absorbs the residual
+    # bias.  `top_db=80` clips the noise floor at -80 dB below the peak,
+    # preventing -∞ on silent bins.
+    log_mel = librosa.power_to_db(mel_power, ref=1.0, top_db=top_db)
+    return np.asarray(log_mel, dtype=np.float64)
 
 
 def compute_encoder_input_stack(
@@ -70,34 +108,69 @@ def compute_encoder_input_stack(
     *,
     n_mels: int = 64,
     n_fft: int = 1024,
-    hop_length: int = 256,
+    hop_length: int = 512,
     cwt_n_scales: int = 64,
     cwt_min_freq_hz: float = 20.0,
+    cwt_max_freq_hz: float = 250.0,
     standardize: bool = False,
 ) -> np.ndarray:
-    """Build the V1 acoustic encoder input.
+    """Build the V1 / V2 acoustic encoder input as two complementary spectral views.
+
+    **Asymmetric-band design (intentional).**  Channel 0 carries a log-mel
+    spectrogram over the full **20 Hz – 8 kHz** acoustic band; channel 1
+    carries a CWT scalogram over a **narrow 20 – 250 Hz mechanical-tone
+    band** that brackets the ROW II target frequencies (5.87 Hz shaft,
+    43.75 Hz runner-blade-passing, 100 Hz rotor-pole-passing, 117 Hz
+    guide-vane-passing — see `src/config/constants.py`).  After
+    construction both channels share the same ``(n_mels, T_frames)``
+    tensor shape so the downstream ``Conv2d`` can consume them as a 2-channel
+    image, but **row index does NOT correspond to the same physical
+    frequency in both channels** — row 0 is ~ 20 Hz in both, row 63 is
+    ~ 8 kHz in log-mel and ~ 250 Hz in CWT.  The Conv2d therefore treats
+    the two channels as parallel feature streams rather than co-registered
+    views, mirroring the design pattern used in dual-resolution Conv2d
+    audio classifiers (e.g. Pons et al. 2019).  This is the deliberate
+    division of labour: log-mel covers broadband knock-impulse signatures
+    spanning 200 Hz – 4 kHz, CWT zooms in on the narrow mechanical-tone
+    band where mode discriminability lives and where short-window log-mel
+    is comparatively blind (Khamaisi et al.; Vibrational-Hill-Chart
+    studies cited in Chapter 2).
+
+    **Time-axis aggregation.**  The CWT is computed at a 1 kHz decimated
+    rate (see `compute_cwt_scalogram`) which yields ~ 32× more time samples
+    than the log-mel grid at the publication hop.  Reducing this to
+    `T_frames` is done by **non-overlapping max-pool** along the time axis
+    (not bilinear interpolation), preserving the peak energy of transient
+    events — bilinear interp would average a 10 ms knock impulse with its
+    surrounding silence and weaken the very signature the CWT is most
+    useful for.  Frequency-axis remapping (typically a no-op since
+    `n_mels == cwt_n_scales == 64` in the publication config) uses
+    linear interpolation since adjacent CWT scales represent physically
+    close frequencies.
 
     Args:
-        mic_data: Shape ``(n_mics, n_samples)``.
-        fs: Microphone sample rate.
-        n_mels / n_fft / hop_length: log-mel parameters.
-        cwt_n_scales / cwt_min_freq_hz: CWT scalogram parameters.
-        standardize: When True, each of the two representations (log-mel =
-            channel 0, CWT = channel 1) is per-recording z-scored across all
-            mics, frequencies and frames so both feed the ``Conv2d`` on a
-            unit-variance scale.  **Default False** — this is the F4 audit
-            experiment (2026-05-14); it was found not to be load-bearing
-            (the V1 acoustic encoder trains fine without it once BatchNorm
-            is used) and is left off as the known-good behaviour.  The knob
-            is retained because the channel-scale-mismatch concern is real
-            and may matter once the SSL objective is revisited.
+        mic_data: ``(n_mics, n_samples)`` microphone waveforms.
+        fs: Microphone sample rate (16 000 Hz for this thesis).
+        n_mels / n_fft / hop_length: log-mel parameters; see
+            :func:`compute_log_mel_spectrogram`.  Defaults match the
+            publication YAML.
+        cwt_n_scales / cwt_min_freq_hz / cwt_max_freq_hz: CWT scalogram
+            parameters; see :func:`compute_cwt_scalogram`.  The 20-250 Hz
+            default band is justified above.
+        standardize: When True, each channel is per-recording z-scored
+            across (mics, frequency, time) so the two channels enter the
+            Conv2d on a unit-variance scale.  **Default False** — the F4
+            audit (2026-05-14) found it not load-bearing once BatchNorm
+            is the encoder norm.  Kept as a knob because the
+            channel-scale mismatch is real if the SSL objective ever
+            changes.
 
     Returns:
-        ``(n_mics, 2, F, T_frames)`` float32 array. Channel 0 is log-mel,
-        channel 1 is CWT (resampled along time and frequency to match log-mel
-        with simple linear interpolation, so the CNN sees both representations
-        on a shared grid).  With ``standardize=True`` each channel has zero
-        mean and unit variance over the (mic, frequency, time) axes.
+        ``(n_mics, 2, n_mels, T_frames)`` float32 array.  Channel 0 is
+        log-mel (dB), channel 1 is the time-max-pooled, frequency-
+        interpolated CWT scalogram.  With ``standardize=True`` each
+        channel has zero mean and unit variance over (mic, frequency,
+        time); otherwise raw scales are preserved.
     """
     if mic_data.ndim != 2:
         raise ValueError("mic_data must be 2-D (n_mics, n_samples)")
@@ -121,6 +194,7 @@ def compute_encoder_input_stack(
                 fs,
                 n_scales=cwt_n_scales,
                 min_freq_hz=cwt_min_freq_hz,
+                max_freq_hz=cwt_max_freq_hz,
             )
         )
 
@@ -129,17 +203,19 @@ def compute_encoder_input_stack(
 
     aligned: list[np.ndarray] = []
     for mel, cwt in zip(log_mels, cwts):
-        cwt_aligned = _bilinear_resize(cwt, (target_F, target_T))
+        # Time axis: non-overlapping max-pool to preserve transient peaks.
+        # Frequency axis: linear interp (adjacent CWT scales are physically
+        # close, so interpolation is a valid magnitude reconstruction).
+        cwt_time_pooled = _max_pool_time(cwt, target_T)
+        if cwt_time_pooled.shape[0] != target_F:
+            cwt_aligned = _linear_resize_freq(cwt_time_pooled, target_F)
+        else:
+            cwt_aligned = cwt_time_pooled
         aligned.append(np.stack([mel, cwt_aligned], axis=0))
 
     stack = np.stack(aligned, axis=0).astype(np.float32)
 
     if standardize:
-        # Per-channel (log-mel vs CWT) per-recording z-score.  Statistics are
-        # taken across mics + frequency + time — preserving relative dynamics
-        # WITHIN each channel while equalising the BETWEEN-channel scale that
-        # would otherwise let the first ``Conv2d`` learn to ignore the
-        # smaller-magnitude channel.
         eps = 1e-8
         for ch in (0, 1):
             mean = float(stack[:, ch, :, :].mean())
@@ -149,28 +225,50 @@ def compute_encoder_input_stack(
     return stack
 
 
-def _bilinear_resize(arr: np.ndarray, new_shape: tuple[int, int]) -> np.ndarray:
-    """Resize a 2-D array to ``new_shape`` via separable linear interpolation."""
-    target_F, target_T = new_shape
-    cur_F, cur_T = arr.shape
-    if cur_F == target_F and cur_T == target_T:
+# ---------------------------------------------------------------------------
+# Re-gridding helpers
+# ---------------------------------------------------------------------------
+
+
+def _max_pool_time(arr: np.ndarray, target_T: int) -> np.ndarray:
+    """Non-overlapping max-pool along the last (time) axis to length ``target_T``.
+
+    Preserves transient peak energy under aggressive downsampling
+    (~32× from the 1 kHz CWT rate to the 31.25 Hz log-mel grid at the
+    publication hop).  A bilinear interpolator would *average* across the
+    pooling block and erase short impulse onsets — exactly the signal we
+    most want to keep.  When ``target_T > T`` (upsampling, rare),
+    nearest-neighbour index replication is used because there is no peak
+    energy to preserve in that direction.
+    """
+    F, T = arr.shape
+    if T == target_T:
         return arr.astype(np.float64)
+    if T < target_T:
+        idx = np.linspace(0, T - 1, target_T).round().astype(int)
+        return arr[:, idx].astype(np.float64)
+    # Non-overlapping block max-pool: split [0, T] into target_T blocks.
+    edges = np.linspace(0, T, target_T + 1).astype(int)
+    # Guarantee at least one sample per block.
+    edges[1:] = np.maximum(edges[1:], edges[:-1] + 1)
+    edges[-1] = T
+    out = np.empty((F, target_T), dtype=np.float64)
+    for t in range(target_T):
+        a, b = int(edges[t]), int(edges[t + 1])
+        out[:, t] = arr[:, a:b].max(axis=-1)
+    return out
 
-    # Interpolate along time first.
-    t_src = np.linspace(0.0, 1.0, cur_T)
-    t_dst = np.linspace(0.0, 1.0, target_T)
-    along_T = np.empty((cur_F, target_T), dtype=np.float64)
-    for r in range(cur_F):
-        along_T[r] = np.interp(t_dst, t_src, arr[r])
 
+def _linear_resize_freq(arr: np.ndarray, target_F: int) -> np.ndarray:
+    """1-D linear interpolation along the first (frequency) axis."""
+    cur_F, T = arr.shape
     if cur_F == target_F:
-        return along_T
-
+        return arr.astype(np.float64)
     f_src = np.linspace(0.0, 1.0, cur_F)
     f_dst = np.linspace(0.0, 1.0, target_F)
-    out = np.empty((target_F, target_T), dtype=np.float64)
-    for c in range(target_T):
-        out[:, c] = np.interp(f_dst, f_src, along_T[:, c])
+    out = np.empty((target_F, T), dtype=np.float64)
+    for c in range(T):
+        out[:, c] = np.interp(f_dst, f_src, arr[:, c])
     return out
 
 

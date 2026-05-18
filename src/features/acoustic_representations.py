@@ -1,10 +1,23 @@
 """Acoustic time-frequency representations for encoder-oriented workflows.
 
-CWT scalograms are the primary input planned for the cross-attention transformer
-being developed in the thesis — they preserve both temporal and frequency structure
-that plain STFT spectrograms smear around low-frequency turbine tones. MFCCs
-provide a compact perceptual alternative. The STFT utility is kept for classical
-baselines and direct comparison with published benchmarks.
+CWT scalograms are the primary input planned for the cross-attention
+transformer being developed in the thesis — they preserve both temporal
+and frequency structure that plain STFT spectrograms smear around the
+low-frequency turbine tones (≤ 125 Hz on the ROW II machine).  MFCCs
+provide a compact perceptual alternative used by the V0 LightGBM mode
+classifier.  The STFT utility is kept for classical baselines and
+direct comparison with published benchmarks.
+
+**Analysis-grid convention.**  Every spectral primitive here defaults
+to ``n_fft = 1024`` (64 ms at 16 kHz) and ``hop_length = 512`` (32 ms
+stride) so MFCC, STFT, and the log-mel + CWT encoder stack
+(`audio_spectral.compute_encoder_input_stack`) share an identical
+time-frequency analysis grid.  This is required for thesis comparisons
+across V0 baselines and the V1 / V2 encoder — different ``n_fft`` /
+``hop_length`` would confound any feature-set ablation.  Power-magnitude
+representations use ``power_to_db`` (dB) compression with ``ref=1.0``
+(absolute, no per-recording gain normalisation) so cross-recording
+amplitude information survives.
 """
 
 from __future__ import annotations
@@ -132,12 +145,18 @@ def compute_mfcc_with_deltas(
     fs: int,
     *,
     n_mfcc: int = 40,
-    n_fft: int = 2048,
+    n_fft: int = 1024,
     hop_length: int = 512,
 ) -> np.ndarray:
     """Compute MFCC, delta, and delta-delta for one channel.
 
-    Returns a 2D array with shape ``(3 * n_mfcc, n_frames)``.
+    Returns a 2D array with shape ``(3 * n_mfcc, n_frames)``.  Defaults
+    match :func:`audio_spectral.compute_log_mel_spectrogram` so the V0
+    LightGBM mode classifier and the V1 / V2 SSL encoder train on
+    the same analysis grid; without this alignment a baseline-vs-
+    SSL comparison would be confounded by the analysis window.
+    Delta and delta-delta are computed with librosa's default 9-frame
+    Savitzky-Golay-style estimator.
     """
     import librosa
 
@@ -172,7 +191,7 @@ def compute_mfcc_stack(
     fs: int,
     *,
     n_mfcc: int = 40,
-    n_fft: int = 2048,
+    n_fft: int = 1024,
     hop_length: int = 512,
 ) -> np.ndarray:
     """Compute stacked MFCC(+delta/+delta-delta) across mic channels.
@@ -196,12 +215,19 @@ def compute_mfcc_stack(
 def compute_log_stft_spectrogram(
     signal: np.ndarray,
     *,
-    n_fft: int = 2048,
+    n_fft: int = 1024,
     hop_length: int = 512,
+    top_db: float = 80.0,
 ) -> np.ndarray:
-    """Compute log(1 + |STFT|) for one channel.
+    """Compute power-to-dB STFT spectrogram for one channel.
 
-    This is provided as a classical baseline representation.
+    Classical baseline representation, in dB rather than ``log1p`` so
+    the dynamic range matches :func:`audio_spectral.compute_log_mel_spectrogram`
+    and the published audio-classification baselines this thesis compares
+    against.  ``ref=1.0`` (no peak normalisation) preserves cross-recording
+    amplitude; ``top_db`` clips the noise floor to avoid -∞ on silent bins.
+    Defaults match the log-mel / encoder grid (``n_fft = 1024``,
+    ``hop_length = 512``).
     """
     import librosa
 
@@ -215,13 +241,14 @@ def compute_log_stft_spectrogram(
         raise ValueError("signal length must be >= n_fft")
 
     stft = librosa.stft(x.astype(np.float32), n_fft=n_fft, hop_length=hop_length)
-    return np.log1p(np.abs(stft)).astype(np.float64)
+    power = np.abs(stft) ** 2
+    return librosa.power_to_db(power, ref=1.0, top_db=top_db).astype(np.float64)
 
 
 def compute_stft_stack(
     mic_data: np.ndarray,
     *,
-    n_fft: int = 2048,
+    n_fft: int = 1024,
     hop_length: int = 512,
 ) -> np.ndarray:
     """Compute stacked log-STFT representations for all mic channels."""
