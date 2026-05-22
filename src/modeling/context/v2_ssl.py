@@ -812,20 +812,23 @@ def train_v2_fusion(
         - Otherwise falls back to the legacy symmetric 50/50 coin-flip
           gated by `cfg.modality_dropout_p` (kept for back-compatibility).
         """
+        # Generator and target device must agree — `gen` lives on the same
+        # device as `aug_gen` (the training device).  Sample scalars there.
+        gd = gen.device
         ap = float(cfg.acoustic_dropout_p)
         vp = float(cfg.vibration_dropout_p)
         if ap > 0.0 or vp > 0.0:
-            if ap > 0.0 and float(torch.rand((), generator=gen, device="cpu")) < ap:
+            if ap > 0.0 and float(torch.rand((), generator=gen, device=gd)) < ap:
                 ac = torch.zeros_like(ac)
-            if vp > 0.0 and float(torch.rand((), generator=gen, device="cpu")) < vp:
+            if vp > 0.0 and float(torch.rand((), generator=gen, device=gd)) < vp:
                 vib = torch.zeros_like(vib)
             return ac, vib
         if cfg.modality_dropout_p <= 0.0:
             return ac, vib
-        u = float(torch.rand((), generator=gen, device="cpu"))
+        u = float(torch.rand((), generator=gen, device=gd))
         if u >= cfg.modality_dropout_p:
             return ac, vib
-        if float(torch.rand((), generator=gen, device="cpu")) < 0.5:
+        if float(torch.rand((), generator=gen, device=gd)) < 0.5:
             return torch.zeros_like(ac), vib
         return ac, torch.zeros_like(vib)
 

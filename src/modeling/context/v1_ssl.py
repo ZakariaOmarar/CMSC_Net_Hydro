@@ -781,7 +781,10 @@ def train_v1_per_modality(
         weight_decay=cfg.weight_decay,
     )
 
-    aug_gen = torch.Generator(device=device)
+    # Augmenter sees CPU tensors (it runs before the .to(device) move below),
+    # so the generator MUST be on CPU — torch requires generator and target
+    # tensor device to match.
+    aug_gen = torch.Generator(device="cpu")
     aug_gen.manual_seed(cfg.seed)
     augmenter = _Augmenter(modality, cfg, aug_gen)
 
