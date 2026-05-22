@@ -34,6 +34,7 @@ Thumbs.db
 
 # Folder
 data/
+!src/data/
 artifacts/
 .venv/
 .pytest_cache/
