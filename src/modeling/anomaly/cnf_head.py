@@ -41,6 +41,7 @@ class FiLMMLP(nn.Module):
         hidden_dim: int,
         c_dim: int,
         n_hidden: int = 2,
+        dropout_p: float = 0.0,
     ) -> None:
         super().__init__()
         self.cond_norm = nn.LayerNorm(c_dim)
@@ -61,16 +62,22 @@ class FiLMMLP(nn.Module):
             nn.init.zeros_(b.weight)
             nn.init.zeros_(b.bias)
         self.out_proj = nn.Linear(hidden_dim, out_dim)
+        # Coupling MLP dropout — applied after each GELU between the FiLM
+        # blocks.  `nn.Dropout(0.0)` is a no-op so the default keeps the
+        # coupling byte-equivalent to pre-fix behaviour.
+        self.dropout = nn.Dropout(dropout_p)
 
     def forward(self, x: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
         c_n = self.cond_norm(c)
         h = self.in_proj(x)
         h = h * (1.0 + self.film_gamma[0](c_n)) + self.film_beta[0](c_n)
         h = F.gelu(h)
+        h = self.dropout(h)
         for i, layer in enumerate(self.hidden):
             h = layer(h)
             h = h * (1.0 + self.film_gamma[i + 1](c_n)) + self.film_beta[i + 1](c_n)
             h = F.gelu(h)
+            h = self.dropout(h)
         return self.out_proj(h)
 
 
@@ -99,13 +106,14 @@ class FiLMCoupling(nn.Module):
         mask: torch.Tensor,
         n_hidden: int = 2,
         scale_max: float = 2.0,
+        dropout_p: float = 0.0,
     ) -> None:
         super().__init__()
         if mask.numel() != dim:
             raise ValueError(f"mask numel {mask.numel()} must equal dim {dim}")
         self.register_buffer("mask", mask.float())
-        self.scale_net = FiLMMLP(dim, dim, hidden_dim, c_dim, n_hidden)
-        self.translate_net = FiLMMLP(dim, dim, hidden_dim, c_dim, n_hidden)
+        self.scale_net = FiLMMLP(dim, dim, hidden_dim, c_dim, n_hidden, dropout_p=dropout_p)
+        self.translate_net = FiLMMLP(dim, dim, hidden_dim, c_dim, n_hidden, dropout_p=dropout_p)
         self.scale_max = float(scale_max)
 
     def forward(
@@ -142,6 +150,7 @@ class ConditionalRealNVP(nn.Module):
         hidden_dim: int = 64,
         n_hidden_per_net: int = 2,
         scale_max: float = 2.0,
+        dropout_p: float = 0.0,
     ) -> None:
         super().__init__()
         if n_layers < 1:
@@ -157,6 +166,7 @@ class ConditionalRealNVP(nn.Module):
                 FiLMCoupling(
                     dim, c_dim, hidden_dim, mask,
                     n_hidden=n_hidden_per_net, scale_max=scale_max,
+                    dropout_p=dropout_p,
                 )
             )
 

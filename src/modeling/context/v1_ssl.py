@@ -175,6 +175,26 @@ class V1SSLConfig:
         "Healthy",
     )
 
+    # Early stopping on val NT-Xent loss.  Patience counts consecutive epochs
+    # without > `early_stop_min_delta` absolute improvement; when reached, the
+    # loop breaks and (if `restore_best`) the encoder weights are reset to the
+    # epoch with the best (lowest) val loss.  Best-state snapshot uses a
+    # tensor-clone dict comprehension rather than `copy.deepcopy` to avoid
+    # RAM fragmentation and PyTorch-autograd edge cases on long runs.
+    patience: int = 3
+    restore_best: bool = True
+    early_stop_min_delta: float = 1e-4
+
+    # Cross-recording mixup.  When > 0, each training window is linearly
+    # blended with a partner window from a *different recording, same mode,
+    # same dataset, same shape*: `feat = λ * feat_anchor + (1-λ) * feat_partner`
+    # with `λ ~ Beta(α, α)`.  Inflates the effective recording cohort from
+    # O(N_rec) to O(N_rec²) — the highest-ROI data-side regularizer for the
+    # 6-10-recording cohort.  Default 0.0 disables (byte-equivalent to pre-fix
+    # behaviour); recommended ablation values: {0.0, 0.2, 0.4}.  Only applied
+    # to TRAIN windows — val windows are passed through untouched.
+    mixup_alpha: float = 0.0
+
     # System
     seed: int = 42
     device: str = "auto"
@@ -324,12 +344,19 @@ class _WindowedFeatureDataset(tud.Dataset):
         self,
         segments: list[_PrecomputedSegment],
         cfg: V1SSLConfig,
+        *,
+        enable_mixup: bool = False,
     ) -> None:
         self.cfg = cfg
         self._segments = segments
+        # Mixup is opt-in per dataset instance; the trainer enables it on the
+        # TRAIN dataset only, never on val.  Reading `cfg.mixup_alpha > 0`
+        # alone would silently blend val windows too.
+        self._mixup_enabled = bool(enable_mixup and cfg.mixup_alpha > 0.0)
 
         if not segments:
             self._refs: list[tuple[int, int, int]] = []
+            self._partner_pool: dict[tuple, list[int]] = {}
             return
 
         self._refs = []
@@ -342,20 +369,77 @@ class _WindowedFeatureDataset(tud.Dataset):
                 if T < n_frames:
                     continue
                 for start in range(0, T - n_frames + 1, stride):
-                    # Stash n_frames in the ref so __getitem__ doesn't recompute.
-                    # The grouped batch sampler buckets by (n_ch, n_frames) so
-                    # each batch is single-scale by construction.
                     self._refs.append((si, start, n_frames))
+
+        # Partner-pool index for cross-recording mixup.  Bucket key is
+        # `(dataset_idx, n_ch, n_frames, mode_label)` — same as the grouped
+        # batch sampler's stack-safety key plus mode_label so we only mix
+        # within-mode (preserves the contrastive task's semantic content).
+        # Sampling at __getitem__ filters this bucket to refs from a
+        # different recording.
+        self._partner_pool = {}
+        if self._mixup_enabled:
+            for ref_i, (si, _start, n_frames) in enumerate(self._refs):
+                seg = self._segments[si]
+                n_ch = int(seg.features.shape[0])
+                key = (int(seg.dataset_idx), n_ch, n_frames, seg.mode_label)
+                self._partner_pool.setdefault(key, []).append(ref_i)
 
     def __len__(self) -> int:
         return len(self._refs)
+
+    def _sample_mixup_partner(self, idx: int) -> int | None:
+        """Pick a ref index from a different recording, same bucket.
+
+        Returns None if no valid partner exists — caller then skips mixup
+        for this anchor (rather than mixing same-recording windows, which
+        would defeat the "cross-recording" purpose).
+        """
+        import random as _r
+
+        si, _start, n_frames = self._refs[idx]
+        seg = self._segments[si]
+        n_ch = int(seg.features.shape[0])
+        key = (int(seg.dataset_idx), n_ch, n_frames, seg.mode_label)
+        candidates = self._partner_pool.get(key)
+        if not candidates or len(candidates) < 2:
+            return None
+        anchor_rec = seg.recording_id
+        # Cheap rejection sampling — small bucket → fast; large bucket → expect
+        # to hit a different recording in ≤ 3 tries.
+        for _ in range(6):
+            cand = candidates[_r.randrange(len(candidates))]
+            if cand == idx:
+                continue
+            cand_seg = self._segments[self._refs[cand][0]]
+            if cand_seg.recording_id != anchor_rec:
+                return cand
+        return None
 
     def __getitem__(self, idx: int):
         si, start, n_frames = self._refs[idx]
         seg = self._segments[si]
         feat = seg.features[..., start : start + n_frames]
+        feat_t = torch.from_numpy(np.ascontiguousarray(feat))
+        if self._mixup_enabled:
+            partner = self._sample_mixup_partner(idx)
+            if partner is not None:
+                import random as _r
+
+                p_si, p_start, _ = self._refs[partner]
+                p_seg = self._segments[p_si]
+                p_feat = p_seg.features[..., p_start : p_start + n_frames]
+                lam = _r.betavariate(self.cfg.mixup_alpha, self.cfg.mixup_alpha)
+                # Symmetric beta keeps mixup variance moderate; max(lam, 1-lam)
+                # ensures the anchor is always the dominant component, which
+                # preserves the "anchor's labels apply" invariant the
+                # contrastive loss assumes.
+                lam = max(lam, 1.0 - lam)
+                feat_t = lam * feat_t + (1.0 - lam) * torch.from_numpy(
+                    np.ascontiguousarray(p_feat)
+                )
         return {
-            "feat": torch.from_numpy(np.ascontiguousarray(feat)),
+            "feat": feat_t,
             "xyz": torch.from_numpy(seg.xyz),
             "dataset_idx": int(seg.dataset_idx),
             "mode_label": seg.mode_label,
@@ -540,6 +624,12 @@ class V1Result:
     val_recording_ids: list[str]
     sanity_gate: dict
     modality: str
+    # None means the loop ran to `cfg.epochs`; an int N means the loop broke
+    # after epoch N because val loss did not improve for `cfg.patience` epochs.
+    # `best_val_loss` is the min val loss observed (which `restore_best`
+    # restored the encoder to if enabled).
+    early_stopped_epoch: int | None = None
+    best_val_loss: float = float("nan")
 
 
 def _time_split_segment(
@@ -748,8 +838,8 @@ def train_v1_per_modality(
 
     train_segs, val_segs = _split_segments_by_recording(segments, cfg.val_ratio, cfg.seed)
 
-    train_ds = _WindowedFeatureDataset(train_segs, cfg)
-    val_ds = _WindowedFeatureDataset(val_segs, cfg)
+    train_ds = _WindowedFeatureDataset(train_segs, cfg, enable_mixup=True)
+    val_ds = _WindowedFeatureDataset(val_segs, cfg, enable_mixup=False)
     if len(train_ds) == 0:
         raise RuntimeError("V1 SSL: zero training windows after splitting; lower window_seconds")
 
@@ -790,6 +880,20 @@ def train_v1_per_modality(
 
     train_history: list[float] = []
     val_history: list[float] = []
+
+    # Early-stop bookkeeping.  Snapshot via tensor-clone (NOT copy.deepcopy):
+    # deepcopy on a state_dict allocates a fresh CPU tensor per parameter via
+    # the pickling path, which fragments system RAM across many "best" updates
+    # over hundreds of epochs.  The dict comprehension below is a single tight
+    # loop of cloned-tensor allocations and lets the previous best_state's
+    # tensors GC the instant we overwrite the binding.
+    def _snapshot(module: torch.nn.Module) -> dict[str, torch.Tensor]:
+        return {k: v.detach().cpu().clone() for k, v in module.state_dict().items()}
+
+    best_val_loss = float("inf")
+    best_encoder_state = _snapshot(encoder)
+    epochs_without_improvement = 0
+    early_stopped_epoch: int | None = None
 
     epoch_iter = tqdm(
         range(cfg.epochs),
@@ -846,6 +950,24 @@ def train_v1_per_modality(
             train=f"{train_history[-1]:.3f}", val=f"{val_history[-1]:.3f}"
         )
 
+        # Early stop on val NT-Xent loss.  Snapshot the encoder (the projection
+        # head is discarded post-training) every time the val loss improves
+        # past `early_stop_min_delta`.  Break when patience runs out.
+        cur_val = val_history[-1]
+        if cur_val < best_val_loss - cfg.early_stop_min_delta:
+            best_val_loss = cur_val
+            best_encoder_state = _snapshot(encoder)
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
+            if epochs_without_improvement >= cfg.patience:
+                early_stopped_epoch = epoch + 1
+                break
+
+    if cfg.restore_best:
+        encoder.load_state_dict(best_encoder_state)
+    del best_encoder_state  # let GC reclaim before sanity-gate eval allocates
+
     # Sanity gate evaluates on the held-out *labeled* subset only.  D3/D4
     # healthy windows participate in training (they're inside `val_segs`
     # by recording split) but their mode_label is None — including them in
@@ -875,6 +997,8 @@ def train_v1_per_modality(
         val_recording_ids=sorted({_qualify(s) for s in val_segs}),
         sanity_gate=sanity,
         modality=modality,
+        early_stopped_epoch=early_stopped_epoch,
+        best_val_loss=best_val_loss,
     )
 
 

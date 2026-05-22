@@ -166,6 +166,7 @@ class FiLMResidualHead(nn.Module):
         s_dim: int = 0,
         hidden_dim: int = 128,
         residual_scale: float = 0.20,
+        dropout_p: float = 0.0,
     ) -> None:
         super().__init__()
         cond_dim = c_dim + s_dim
@@ -178,10 +179,14 @@ class FiLMResidualHead(nn.Module):
         nn.init.zeros_(self.film_gamma.bias)
         nn.init.zeros_(self.film_beta.weight)
         nn.init.zeros_(self.film_beta.bias)
+        # Dropout slots after each GELU.  `nn.Dropout(0.0)` is a no-op so the
+        # default keeps the head byte-equivalent to pre-fix behaviour.
         self.head = nn.Sequential(
             nn.GELU(),
+            nn.Dropout(dropout_p),
             nn.Linear(hidden_dim, hidden_dim),
             nn.GELU(),
+            nn.Dropout(dropout_p),
             nn.Linear(hidden_dim, 3),
         )
         self.residual_scale = float(residual_scale)
@@ -237,6 +242,7 @@ class V4LocalizationHead(nn.Module):
         n_heads_tdoa: int = 2,
         residual_scale_m: float = 0.20,
         soft_argmax_temperature: float = 1.0,
+        head_dropout_p: float = 0.0,
     ) -> None:
         super().__init__()
         if grid_coords.ndim != 4 or grid_coords.shape[-1] != 3:
@@ -255,6 +261,7 @@ class V4LocalizationHead(nn.Module):
             s_dim=s_dim,
             hidden_dim=hidden_dim,
             residual_scale=residual_scale_m,
+            dropout_p=head_dropout_p,
         )
         self.c_dim = c_dim
         self.s_dim = s_dim

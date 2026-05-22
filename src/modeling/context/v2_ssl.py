@@ -185,6 +185,18 @@ class V2SSLConfig:
         "Healthy",
     )
 
+    # Early stopping on val total-loss (simclr + lmm*w + cma*w).  See V1SSLConfig
+    # for the snapshot-strategy rationale (tensor-clone, not deepcopy).
+    patience: int = 3
+    restore_best: bool = True
+    early_stop_min_delta: float = 1e-4
+
+    # Cross-recording mixup — see V1SSLConfig docstring for the design.  V2
+    # blends BOTH modalities with the SAME λ from the SAME partner recording,
+    # preserving the cross-modal pairing inside each mixed window.  Default
+    # 0.0 disables; recommended ablation values: {0.0, 0.2, 0.4}.
+    mixup_alpha: float = 0.0
+
     # System
     seed: int = 42
     device: str = "auto"
@@ -322,11 +334,15 @@ class _PairedWindowedDataset(tud.Dataset):
         self,
         segments: list[_PairedSegment],
         cfg: V2SSLConfig,
+        *,
+        enable_mixup: bool = False,
     ) -> None:
         self.cfg = cfg
         self._segments = segments
+        self._mixup_enabled = bool(enable_mixup and cfg.mixup_alpha > 0.0)
         if not segments:
             self._refs: list[tuple[int, int, int, int, int]] = []
+            self._partner_pool: dict[tuple, list[int]] = {}
             return
 
         self._refs = []
@@ -347,17 +363,72 @@ class _PairedWindowedDataset(tud.Dataset):
                         continue
                     self._refs.append((si, start_ac, start_vib, n_ac, n_vib))
 
+        # Partner-pool index keyed by (dataset_idx, n_mics, n_vib, n_ac, n_vib,
+        # mode_label) — the V2 grouped batch sampler's stack-safety key plus
+        # mode_label.  Both modalities use the same partner so the cross-modal
+        # pairing is preserved.
+        self._partner_pool = {}
+        if self._mixup_enabled:
+            for ref_i, (si, _sa, _sv, n_ac, n_vib) in enumerate(self._refs):
+                seg = self._segments[si]
+                key = (
+                    int(seg.dataset_idx),
+                    int(seg.acoustic_features.shape[0]),
+                    int(seg.vibration_features.shape[0]),
+                    n_ac, n_vib, seg.mode_label,
+                )
+                self._partner_pool.setdefault(key, []).append(ref_i)
+
     def __len__(self) -> int:
         return len(self._refs)
+
+    def _sample_mixup_partner(self, idx: int) -> int | None:
+        import random as _r
+
+        si, _sa, _sv, n_ac, n_vib = self._refs[idx]
+        seg = self._segments[si]
+        key = (
+            int(seg.dataset_idx),
+            int(seg.acoustic_features.shape[0]),
+            int(seg.vibration_features.shape[0]),
+            n_ac, n_vib, seg.mode_label,
+        )
+        candidates = self._partner_pool.get(key)
+        if not candidates or len(candidates) < 2:
+            return None
+        anchor_rec = seg.recording_id
+        for _ in range(6):
+            cand = candidates[_r.randrange(len(candidates))]
+            if cand == idx:
+                continue
+            cand_seg = self._segments[self._refs[cand][0]]
+            if cand_seg.recording_id != anchor_rec:
+                return cand
+        return None
 
     def __getitem__(self, idx: int):
         si, sa, sv, n_ac, n_vib = self._refs[idx]
         seg = self._segments[si]
         ac = seg.acoustic_features[..., sa : sa + n_ac]
         vib = seg.vibration_features[..., sv : sv + n_vib]
+        ac_t = torch.from_numpy(np.ascontiguousarray(ac))
+        vib_t = torch.from_numpy(np.ascontiguousarray(vib))
+        if self._mixup_enabled:
+            partner = self._sample_mixup_partner(idx)
+            if partner is not None:
+                import random as _r
+
+                p_si, p_sa, p_sv, _, _ = self._refs[partner]
+                p_seg = self._segments[p_si]
+                p_ac = p_seg.acoustic_features[..., p_sa : p_sa + n_ac]
+                p_vib = p_seg.vibration_features[..., p_sv : p_sv + n_vib]
+                lam = _r.betavariate(self.cfg.mixup_alpha, self.cfg.mixup_alpha)
+                lam = max(lam, 1.0 - lam)
+                ac_t = lam * ac_t + (1.0 - lam) * torch.from_numpy(np.ascontiguousarray(p_ac))
+                vib_t = lam * vib_t + (1.0 - lam) * torch.from_numpy(np.ascontiguousarray(p_vib))
         return {
-            "ac_feat": torch.from_numpy(np.ascontiguousarray(ac)),
-            "vib_feat": torch.from_numpy(np.ascontiguousarray(vib)),
+            "ac_feat": ac_t,
+            "vib_feat": vib_t,
             "ac_xyz": torch.from_numpy(seg.acoustic_xyz),
             "vib_xyz": torch.from_numpy(seg.vibration_xyz),
             "dataset_idx": int(seg.dataset_idx),
@@ -570,6 +641,8 @@ class V2Result:
     val_recording_ids: list[str]
     rq1: dict
     drop_vibration: bool
+    early_stopped_epoch: int | None = None
+    best_val_loss: float = float("nan")
 
 
 def _time_split_paired_segment(
@@ -752,8 +825,8 @@ def train_v2_fusion(
         raise RuntimeError("V2 SSL: no healthy paired segments found")
 
     train_segs, val_segs = _split_segments_by_recording(segments, cfg.val_ratio, cfg.seed)
-    train_ds = _PairedWindowedDataset(train_segs, cfg)
-    val_ds = _PairedWindowedDataset(val_segs, cfg)
+    train_ds = _PairedWindowedDataset(train_segs, cfg, enable_mixup=True)
+    val_ds = _PairedWindowedDataset(val_segs, cfg, enable_mixup=False)
     if len(train_ds) == 0:
         raise RuntimeError("V2 SSL: zero training windows after splitting; lower window_seconds")
 
@@ -831,6 +904,16 @@ def train_v2_fusion(
         if float(torch.rand((), generator=gen, device=gd)) < 0.5:
             return torch.zeros_like(ac), vib
         return ac, torch.zeros_like(vib)
+
+    # Early-stop bookkeeping — tensor-clone snapshot, NOT copy.deepcopy.
+    # See V1 trainer for the RAM-fragmentation rationale.
+    def _snapshot(module: torch.nn.Module) -> dict[str, torch.Tensor]:
+        return {k: v.detach().cpu().clone() for k, v in module.state_dict().items()}
+
+    best_val_loss = float("inf")
+    best_encoder_state = _snapshot(encoder)
+    epochs_without_improvement = 0
+    early_stopped_epoch: int | None = None
 
     epoch_iter = tqdm(
         range(cfg.epochs),
@@ -936,6 +1019,22 @@ def train_v2_fusion(
             lmm=f"{train_lmm[-1]:.3f}",
         )
 
+        # Early stop on val total-loss.  See V1 trainer for the pattern.
+        cur_val = val_history[-1]
+        if cur_val < best_val_loss - cfg.early_stop_min_delta:
+            best_val_loss = cur_val
+            best_encoder_state = _snapshot(encoder)
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
+            if epochs_without_improvement >= cfg.patience:
+                early_stopped_epoch = _epoch + 1
+                break
+
+    if cfg.restore_best:
+        encoder.load_state_dict(best_encoder_state)
+    del best_encoder_state
+
     # RQ1 cluster purity is computed on labeled-only val segments — D3/D4
     # speed-bucket recordings have no mode_label so including them in the
     # K=3 K-means against the three known modes would be uninterpretable.
@@ -959,6 +1058,8 @@ def train_v2_fusion(
         val_recording_ids=sorted({_qualify(s) for s in val_segs}),
         rq1=rq1,
         drop_vibration=cfg.drop_vibration,
+        early_stopped_epoch=early_stopped_epoch,
+        best_val_loss=best_val_loss,
     )
 
 

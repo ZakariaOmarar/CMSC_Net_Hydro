@@ -149,6 +149,19 @@ class V4Config:
     tdoa_jitter_m: float = 0.001           # ± 1 mm Gaussian on path_diff_m
     augment: bool = True
 
+    # Head dropout — defends against the +1236 % train/val gap the audit
+    # identified.  Threads into the residual MLP via V4LocalizationHead.
+    # Default 0.0 keeps the dataclass byte-equivalent to pre-fix behaviour;
+    # the orchestrator `_v4_cfg` builder sets 0.1.
+    head_dropout_p: float = 0.0
+
+    # Early stopping on val total loss.  Patience=5 (vs V1/V2's 3) because V4
+    # has only ~10 labeled recordings and val loss is dramatically noisier.
+    # Tensor-clone snapshot (NOT copy.deepcopy) — see V1 trainer for rationale.
+    patience: int = 5
+    restore_best: bool = True
+    early_stop_min_delta: float = 1e-3
+
 
 # ---------------------------------------------------------------------------
 # Sample precomputation
@@ -490,6 +503,8 @@ class V4Result:
     val_mae_ci_low: float = float("nan")
     val_mae_ci_high: float = float("nan")
     val_mae_ci_method: str = "percentile_bootstrap_1000"
+    early_stopped_epoch: int | None = None
+    best_val_loss: float = float("nan")
 
 
 def _grid_coords_from_spec(grid: GridSpec) -> torch.Tensor:
@@ -536,6 +551,7 @@ def train_v4_localization(
         n_heads_tdoa=cfg.n_heads_tdoa,
         residual_scale_m=cfg.residual_scale_m,
         soft_argmax_temperature=cfg.soft_argmax_temperature,
+        head_dropout_p=cfg.head_dropout_p,
     ).to(device)
     optim = torch.optim.AdamW(head.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     # Cosine LR schedule — small head + small labeled pool benefits from a
@@ -590,6 +606,18 @@ def train_v4_localization(
 
     aug_gen = torch.Generator(device="cpu")
     aug_gen.manual_seed(cfg.seed)
+
+    # Early-stop bookkeeping — tensor-clone snapshot, NOT copy.deepcopy.
+    # See V1 trainer for the RAM-fragmentation rationale.  V4 has only
+    # ~10 labeled recordings so val loss is dramatically noisier than
+    # V1/V2's — patience=5 + min_delta=1e-3 reflect that.
+    def _snapshot(module: torch.nn.Module) -> dict[str, torch.Tensor]:
+        return {k: v.detach().cpu().clone() for k, v in module.state_dict().items()}
+
+    best_val_loss = float("inf")
+    best_head_state = _snapshot(head)
+    epochs_without_improvement = 0
+    early_stopped_epoch: int | None = None
 
     suffix = "unconditional" if cfg.unconditional else f"scada_dim={cfg.scada_dim}"
     epoch_iter = tqdm(
@@ -651,6 +679,22 @@ def train_v4_localization(
         epoch_iter.set_postfix(
             train=f"{train_history[-1]:.4f}", val=f"{val_history[-1]:.4f}"
         )
+
+        # Early stop on val Smooth-L1.  Snapshot the head every improvement.
+        cur_val = val_history[-1]
+        if cur_val < best_val_loss - cfg.early_stop_min_delta:
+            best_val_loss = cur_val
+            best_head_state = _snapshot(head)
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
+            if epochs_without_improvement >= cfg.patience:
+                early_stopped_epoch = _epoch + 1
+                break
+
+    if cfg.restore_best:
+        head.load_state_dict(best_head_state)
+    del best_head_state
 
     # Final val errors + per-recording diagnostic.  `return_components=True`
     # exposes (init_xyz, delta, pred) so Chapter 6 can attribute MAE to the
@@ -756,6 +800,8 @@ def train_v4_localization(
         val_recording_breakdown=breakdown,
         val_mae_ci_low=ci_low,
         val_mae_ci_high=ci_high,
+        early_stopped_epoch=early_stopped_epoch,
+        best_val_loss=best_val_loss,
     )
 
 

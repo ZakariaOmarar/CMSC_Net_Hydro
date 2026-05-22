@@ -159,6 +159,20 @@ class V3Config:
     # `v3_alert_rate_per_cohort` metric).
     calibrate_with_anomalies: bool = False
 
+    # Early stopping on val mean NLL.  Patience=5 (vs V1/V2's 3) because the
+    # CNF's val NLL is noisier (4-recording fit cohort + outlier batches —
+    # see val_nll_max audit signal).  Restore-best restores the FLOW state;
+    # the V2 encoder is frozen so nothing to restore there.  Tensor-clone
+    # snapshot (NOT copy.deepcopy) — see V1 trainer for rationale.
+    patience: int = 5
+    restore_best: bool = True
+    early_stop_min_delta: float = 1e-3  # NLL units; flow loss is O(10-100)
+
+    # CNF coupling MLP dropout — defends against the +56 % train/val NLL gap
+    # the audit identified.  Default 0.0 keeps the dataclass byte-equivalent
+    # to pre-fix behaviour; the orchestrator `_v3_cfg` builder sets 0.1.
+    dropout_p: float = 0.0
+
     # System
     seed: int = 42
     device: str = "auto"
@@ -359,6 +373,15 @@ class V3Result:
     # weights that scoring / streaming inference must reuse to obtain
     # comparable scores on new windows.
     xt_pool: nn.Module | None = None
+    early_stopped_epoch: int | None = None
+    best_val_nll: float = float("nan")
+    # Cached x / c arrays for the deep-vs-simple comparison (KDE-on-c_t in
+    # `kde_baseline.py`).  These are the same arrays the flow trained on /
+    # was evaluated against, so any KDE built from them is apples-to-apples
+    # with the CNF's NLL.  Stored on CPU as numpy to keep V3Result picklable.
+    train_x: np.ndarray | None = None
+    train_contexts: np.ndarray | None = None
+    val_x: np.ndarray | None = None
 
 
 def train_v3_cnf(
@@ -495,6 +518,7 @@ def train_v3_cnf(
         hidden_dim=v3_cfg.hidden_dim,
         n_hidden_per_net=v3_cfg.n_hidden_per_net,
         scale_max=v3_cfg.scale_max,
+        dropout_p=v3_cfg.dropout_p,
     ).to(device)
     # Co-optimise the flow with `_XtPool` when present (publication default).
     trainable_params: list[torch.nn.Parameter] = list(flow.parameters())
@@ -521,6 +545,24 @@ def train_v3_cnf(
     train_nll_max: list[float] = []
     val_nll_min: list[float] = []
     val_nll_max: list[float] = []
+
+    # Early-stop bookkeeping — tensor-clone snapshot, NOT copy.deepcopy.
+    # See V1 trainer for the RAM-fragmentation rationale.  Snapshot covers
+    # both `flow` and (when present) the learnable `xt_pool` since they are
+    # co-optimised; restoring just the flow would leave the pool at a
+    # non-best state.
+    def _snapshot_combined() -> dict[str, dict[str, torch.Tensor]]:
+        out = {"flow": {k: v.detach().cpu().clone() for k, v in flow.state_dict().items()}}
+        if xt_pool is not None:
+            out["xt_pool"] = {
+                k: v.detach().cpu().clone() for k, v in xt_pool.state_dict().items()
+            }
+        return out
+
+    best_val_nll = float("inf")
+    best_state = _snapshot_combined()
+    epochs_without_improvement = 0
+    early_stopped_epoch: int | None = None
 
     suffix = "unconditional" if v3_cfg.unconditional else "conditional"
     epoch_iter = tqdm(
@@ -609,6 +651,24 @@ def train_v3_cnf(
             train_nll=f"{train_nll[-1]:.3f}", val_nll=f"{val_nll[-1]:.3f}"
         )
 
+        # Early stop on val mean NLL.  Snapshot flow + xt_pool jointly.
+        cur_val = val_nll[-1]
+        if cur_val < best_val_nll - v3_cfg.early_stop_min_delta:
+            best_val_nll = cur_val
+            best_state = _snapshot_combined()
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
+            if epochs_without_improvement >= v3_cfg.patience:
+                early_stopped_epoch = _epoch + 1
+                break
+
+    if v3_cfg.restore_best:
+        flow.load_state_dict(best_state["flow"])
+        if xt_pool is not None and "xt_pool" in best_state:
+            xt_pool.load_state_dict(best_state["xt_pool"])
+    del best_state
+
     flow.eval()
     if xt_pool is not None:
         xt_pool.eval()
@@ -647,6 +707,15 @@ def train_v3_cnf(
     def _qualify(seg: _PairedSegment) -> str:
         return f"{Path(seg.source_dir).name}/{seg.recording_id}"
 
+    # Cache x / c arrays for the deep-vs-simple KDE comparison.  Re-pool the
+    # train cohort with the FINAL xt_pool weights so the cached x_train is
+    # consistent with x_val_final the flow was just evaluated on.
+    if xt_pool is not None:
+        with torch.no_grad():
+            x_train_final = _pool_cached_x(train_cache, xt_pool, device)
+    else:
+        x_train_final = x_train
+
     return V3Result(
         flow=flow,
         thresholds=thresholds,
@@ -664,6 +733,11 @@ def train_v3_cnf(
         val_labels=val_labels,
         unconditional=v3_cfg.unconditional,
         xt_pool=xt_pool,
+        early_stopped_epoch=early_stopped_epoch,
+        best_val_nll=best_val_nll,
+        train_x=x_train_final.detach().cpu().numpy(),
+        train_contexts=c_train.detach().cpu().numpy(),
+        val_x=x_val_final.detach().cpu().numpy(),
     )
 
 

@@ -176,7 +176,14 @@ def _v1_cfg(quick: bool) -> V1SSLConfig:
         epochs=3 if quick else 12,
         batch_size=16,
         lr=1e-3,
-        weight_decay=1e-5,
+        # Bumped 1e-5 → 1e-4 (2026-05-22 baseline_v2 shift).  The prior value
+        # was one order below the standard SimCLR / AdamW convention; combined
+        # with the lack of early stopping (now wired in) this was the dominant
+        # contributor to the overfitting audit's train/val gaps.  Same bump
+        # applied to V1/V2/V3/V4 builders.  The dataclass default still reads
+        # 1e-5 so older import-sites remain byte-reproducible — change this
+        # literal here only, not at the dataclass.
+        weight_decay=1e-4,
         temperature=0.1,
         val_ratio=0.3,
         # n_mels / n_fft / hop_length intentionally NOT set here — inherited
@@ -243,7 +250,14 @@ def _v2_cfg(quick: bool) -> V2SSLConfig:
         epochs=3 if quick else 12,
         batch_size=16,
         lr=1e-3,
-        weight_decay=1e-5,
+        # Bumped 1e-5 → 1e-4 (2026-05-22 baseline_v2 shift).  The prior value
+        # was one order below the standard SimCLR / AdamW convention; combined
+        # with the lack of early stopping (now wired in) this was the dominant
+        # contributor to the overfitting audit's train/val gaps.  Same bump
+        # applied to V1/V2/V3/V4 builders.  The dataclass default still reads
+        # 1e-5 so older import-sites remain byte-reproducible — change this
+        # literal here only, not at the dataclass.
+        weight_decay=1e-4,
         temperature=0.1,
         val_ratio=0.3,
         # n_mels / n_fft / hop_length inherited from `ACOUSTIC_FEATURES` — see _v1_cfg note above.
@@ -303,7 +317,14 @@ def _v3_cfg(quick: bool) -> V3Config:
         epochs=8 if quick else 15,
         batch_size=32,
         lr=1e-3,
-        weight_decay=1e-5,
+        # Bumped 1e-5 → 1e-4 (2026-05-22 baseline_v2 shift).  The prior value
+        # was one order below the standard SimCLR / AdamW convention; combined
+        # with the lack of early stopping (now wired in) this was the dominant
+        # contributor to the overfitting audit's train/val gaps.  Same bump
+        # applied to V1/V2/V3/V4 builders.  The dataclass default still reads
+        # 1e-5 so older import-sites remain byte-reproducible — change this
+        # literal here only, not at the dataclass.
+        weight_decay=1e-4,
         val_ratio=0.3,
         unconditional=False,
         # K = 3 matches the 3-mode hypothesis (Pump / Standstill / Turbine);
@@ -321,6 +342,11 @@ def _v3_cfg(quick: bool) -> V3Config:
         # on the channel-token axis).
         xt_pool="pma2",
         xt_pool_num_heads=4,
+        # CNF coupling MLP dropout — set as part of the 2026-05-22 baseline_v2
+        # shift to defend against the +56 % V3 train/val NLL gap the audit
+        # identified.  Threaded into FiLMMLP between GELU activations via
+        # cnf_head.py.
+        dropout_p=0.1,
         seed=42,
     )
 
@@ -343,7 +369,14 @@ def _v4_cfg(quick: bool, scada_dim: int = 0, unconditional: bool = False) -> V4C
         epochs=15 if quick else 30,
         batch_size=8,
         lr=1e-3,
-        weight_decay=1e-5,
+        # Bumped 1e-5 → 1e-4 (2026-05-22 baseline_v2 shift).  The prior value
+        # was one order below the standard SimCLR / AdamW convention; combined
+        # with the lack of early stopping (now wired in) this was the dominant
+        # contributor to the overfitting audit's train/val gaps.  Same bump
+        # applied to V1/V2/V3/V4 builders.  The dataclass default still reads
+        # 1e-5 so older import-sites remain byte-reproducible — change this
+        # literal here only, not at the dataclass.
+        weight_decay=1e-4,
         val_ratio=0.3,
         seed=42,
         # Soft-argmax / residual / loss / augmentation: see V4Config defaults.
@@ -360,6 +393,12 @@ def _v4_cfg(quick: bool, scada_dim: int = 0, unconditional: bool = False) -> V4C
         srp_volume_noise_std=0.02,
         tdoa_jitter_m=0.001,
         augment=True,
+        # FiLM-residual head dropout — set as part of the 2026-05-22 baseline_v2
+        # shift to defend against the +1236 % V4 train/val gap the audit
+        # identified (10 labeled recordings, 50 fixed epochs, no early stop).
+        # Threaded into FiLMResidualHead between GELU activations via
+        # v4_loc_head.py.
+        head_dropout_p=0.1,
     )
 
 
@@ -1362,6 +1401,109 @@ def main(quick: bool = False) -> dict:
         log(f"V5.1 skipped: {type(e).__name__}: {e}")
         metrics["stages"]["v5_1"] = {"skipped_reason": f"{type(e).__name__}: {e}"}
     _stage_done("stage_7_v5_1")
+
+    # =============================================== deep-vs-simple summary
+    # One-stop comparison block for the thesis chapter: each deep stage's
+    # headline metric vs the closed-form / classical baseline already
+    # computed elsewhere in this pipeline.  A near-zero or negative Δ on
+    # any row means the deep model has not earned its complexity for that
+    # stage on the current cohort.  See the plan
+    # (`i-would-like-you-distributed-pizza`) for the framing rationale.
+    log("\n=== Deep-vs-simple summary ===")
+    deep_vs_simple: dict = {}
+
+    # V3 fusion vs KDE-on-c_t (per-cluster gaussian_kde on V2 c_t buckets).
+    try:
+        from ..anomaly.kde_baseline import fit_and_score_kde_on_ct
+
+        v3_fus = v3_results.get("fusion")
+        if v3_fus is not None and v3_fus.train_x is not None and v3_fus.val_x is not None:
+            kde_res = fit_and_score_kde_on_ct(
+                x_train=v3_fus.train_x,
+                c_train=v3_fus.train_contexts,
+                x_val=v3_fus.val_x,
+                c_val=v3_fus.val_contexts,
+                n_clusters=v3_cfg.n_threshold_clusters,
+                seed=v3_cfg.seed,
+            )
+            v3_nll_val = float(v3_fus.val_nll[-1]) if v3_fus.val_nll else float("nan")
+            delta_nll = v3_nll_val - kde_res.val_nll_mean  # CNF wins if < 0
+            deep_vs_simple["anomaly"] = {
+                "deep_model": "V3 CNF (fusion)",
+                "simple_baseline": "KDE-on-c_t per K-means cluster",
+                "deep_val_nll_mean": v3_nll_val,
+                "simple_val_nll_mean": kde_res.val_nll_mean,
+                "delta_deep_minus_simple": delta_nll,
+                "deep_wins": delta_nll < 0.0,
+                "n_clusters_used": kde_res.n_clusters_used,
+                "kde_n_per_cluster_train": kde_res.n_per_cluster_train.tolist(),
+                "kde_n_per_cluster_val": kde_res.n_per_cluster_val.tolist(),
+            }
+            log(f"  V3 vs KDE: V3 NLL={v3_nll_val:.3f} | KDE NLL={kde_res.val_nll_mean:.3f} | "
+                f"Δ={delta_nll:+.3f} ({'V3 wins' if delta_nll < 0 else 'KDE wins'})")
+        else:
+            deep_vs_simple["anomaly"] = {"skipped": "v3_fusion train_x/val_x unavailable"}
+    except Exception as e:
+        log(f"  V3 vs KDE skipped: {type(e).__name__}: {e}")
+        deep_vs_simple["anomaly"] = {"skipped_reason": f"{type(e).__name__}: {e}"}
+
+    # V4 fusion vs V0 accel-TDOA multilateration (closed-form, no trainable
+    # parameters).  Both already computed above; this block surfaces the Δ.
+    try:
+        v4_fus_metrics = metrics["stages"].get("v4_four_paradigms", {}).get("fusion", {})
+        v0_multi = metrics["stages"].get("v0_multilateration", {})
+        v4_mae = v4_fus_metrics.get("val_mae_3d")
+        # Pool V0 MAE across D2/D3/D4 (mean of per-dataset means, weighted
+        # by n_successful).  Single value comparable to V4's pooled val MAE.
+        v0_errs: list[float] = []
+        for dsid, payload in v0_multi.items():
+            n = int(payload.get("n_successful", 0))
+            mean = payload.get("mean_error_m")
+            if n > 0 and isinstance(mean, (int, float)) and not (isinstance(mean, float) and (mean != mean)):
+                v0_errs.extend([float(mean)] * n)
+        v0_mae = float(np.mean(v0_errs)) if v0_errs else float("nan")
+        if isinstance(v4_mae, (int, float)) and v0_errs:
+            delta_mae = float(v4_mae) - v0_mae  # V4 wins if < 0
+            deep_vs_simple["localisation"] = {
+                "deep_model": "V4 fusion head",
+                "simple_baseline": "V0 accel-TDOA multilateration (closed-form)",
+                "deep_val_mae_m": float(v4_mae),
+                "simple_val_mae_m": v0_mae,
+                "delta_deep_minus_simple_m": delta_mae,
+                "deep_wins": delta_mae < 0.0,
+                "n_recordings_v0": len(v0_errs),
+            }
+            log(f"  V4 vs V0 multilat: V4 MAE={v4_mae:.3f} m | V0 MAE={v0_mae:.3f} m | "
+                f"Δ={delta_mae:+.3f} m ({'V4 wins' if delta_mae < 0 else 'V0 wins'})")
+        else:
+            deep_vs_simple["localisation"] = {"skipped": "v4_fusion or v0_multilateration unavailable"}
+    except Exception as e:
+        log(f"  V4 vs V0 multilat skipped: {type(e).__name__}: {e}")
+        deep_vs_simple["localisation"] = {"skipped_reason": f"{type(e).__name__}: {e}"}
+
+    # V2 fusion clustering vs LightGBM mode classifier (D1).  Metrics are not
+    # directly comparable (NMI vs macro-F1) so we report both side-by-side
+    # without a Δ; the thesis chapter can frame the comparison qualitatively.
+    try:
+        v2_metrics = metrics["stages"].get("v2", {})
+        v0_lgbm = metrics["stages"].get("v0", {}).get("v0_lgbm_d1", {})
+        if v2_metrics and v0_lgbm and "val_macro_f1" in v0_lgbm:
+            deep_vs_simple["mode_clustering"] = {
+                "deep_model": "V2 fusion (K=3 K-means on c_t)",
+                "simple_baseline": "V0 LightGBM mode classifier (D1)",
+                "deep_rq1_nmi": v2_metrics.get("rq1_nmi"),
+                "deep_rq1_purity": v2_metrics.get("rq1_purity"),
+                "simple_val_macro_f1": v0_lgbm.get("val_macro_f1"),
+                "note": "metrics not directly comparable; reported side-by-side",
+            }
+            log(f"  V2 vs V0 LGBM: V2 NMI={v2_metrics.get('rq1_nmi', 0):.3f} | "
+                f"V0 F1={v0_lgbm.get('val_macro_f1', 0):.3f} (different units)")
+    except Exception as e:
+        log(f"  V2 vs V0 LGBM skipped: {type(e).__name__}: {e}")
+        deep_vs_simple["mode_clustering"] = {"skipped_reason": f"{type(e).__name__}: {e}"}
+
+    metrics["deep_vs_simple"] = deep_vs_simple
+    _stage_done("stage_7b_deep_vs_simple")
 
     # ============================================================ persist
     metrics_path = out_dir / "metrics.json"
