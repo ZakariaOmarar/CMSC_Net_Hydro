@@ -31,7 +31,7 @@ import torch.nn.functional as F
 import torch.utils.data as tud
 from tqdm.auto import tqdm
 
-from ...config import resolve_device
+from ...config import describe_device, resolve_device
 from ...config.architecture import (
     ACOUSTIC_CWT,
     ACOUSTIC_FEATURES,
@@ -740,6 +740,7 @@ def train_v1_per_modality(
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
     device = resolve_device(cfg.device)
+    print(f"V1 {modality}: device={describe_device(device)}")
 
     segments = _gather_healthy_segments(loaders, modality, cfg)
     if not segments:
@@ -752,15 +753,18 @@ def train_v1_per_modality(
     if len(train_ds) == 0:
         raise RuntimeError("V1 SSL: zero training windows after splitting; lower window_seconds")
 
+    pin = device.type == "cuda"
     train_loader = tud.DataLoader(
         train_ds,
         batch_sampler=_GroupedBatchSampler(train_ds, cfg.batch_size, shuffle=True, seed=cfg.seed),
         collate_fn=_collate,
+        pin_memory=pin,
     )
     val_loader = tud.DataLoader(
         val_ds,
         batch_sampler=_GroupedBatchSampler(val_ds, cfg.batch_size, shuffle=False, seed=cfg.seed),
         collate_fn=_collate,
+        pin_memory=pin,
     )
 
     encoder = PerModalityEncoder(

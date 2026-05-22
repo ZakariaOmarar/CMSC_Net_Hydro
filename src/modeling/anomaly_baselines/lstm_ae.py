@@ -20,7 +20,7 @@ import torch
 import torch.nn as nn
 import torch.utils.data as tud
 
-from ...config import resolve_device
+from ...config import describe_device, resolve_device
 from ...features.audio_spectral import compute_log_mel_spectrogram
 from ...ingestion.test_dataset_loader import (
     DatasetSpec,
@@ -345,21 +345,25 @@ def train_v0_lstm_ae(
     val_x = (val_x - mean) / std
 
     device = resolve_device(cfg.device)
+    print(f"V0 LSTM-AE: device={describe_device(device)}")
     model = LSTMAutoencoderV0(cfg).to(device)
     optim = torch.optim.AdamW(
         model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay
     )
     loss_fn = nn.MSELoss()
 
+    pin = device.type == "cuda"
     train_loader = tud.DataLoader(
         tud.TensorDataset(torch.from_numpy(train_x)),
         batch_size=cfg.batch_size,
         shuffle=True,
+        pin_memory=pin,
     )
     val_loader = tud.DataLoader(
         tud.TensorDataset(torch.from_numpy(val_x)),
         batch_size=cfg.batch_size,
         shuffle=False,
+        pin_memory=pin,
     )
 
     train_history: list[float] = []

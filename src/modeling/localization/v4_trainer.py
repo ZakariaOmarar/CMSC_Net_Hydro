@@ -31,7 +31,7 @@ import torch.nn.functional as F
 import torch.utils.data as tud
 from tqdm.auto import tqdm
 
-from ...config import resolve_device
+from ...config import describe_device, resolve_device
 from ...config.architecture import V4_LOCALIZATION
 from ...features.audio_spectral import compute_encoder_input_stack, compute_log_mel_spectrogram
 from ...features.vibration_temporal import compute_vibration_input_stack
@@ -519,6 +519,7 @@ def train_v4_localization(
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
     device = resolve_device(cfg.device)
+    print(f"V4: device={describe_device(device)}")
 
     train_samples, val_samples = _split_samples_by_recording(samples, cfg.val_ratio, cfg.seed)
 

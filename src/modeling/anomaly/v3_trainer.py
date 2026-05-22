@@ -26,7 +26,7 @@ import torch.nn as nn
 import torch.utils.data as tud
 from tqdm.auto import tqdm
 
-from ...config import resolve_device
+from ...config import describe_device, resolve_device
 from ...config.architecture import V3_ANOMALY
 from ...ingestion.test_dataset_loader import TestDatasetLoader
 from ..context.v2_fusion import V2FusionEncoder
@@ -376,6 +376,7 @@ def train_v3_cnf(
     torch.manual_seed(v3_cfg.seed)
     np.random.seed(v3_cfg.seed)
     device = resolve_device(v3_cfg.device)
+    print(f"V3: device={describe_device(device)}")
     v2_encoder = v2_encoder.to(device)
     v2_encoder.eval()
     for p in v2_encoder.parameters():
@@ -415,20 +416,24 @@ def train_v3_cnf(
             "reduce `threshold_fit_val_ratio` or increase `val_ratio`."
         )
 
+    pin = device.type == "cuda"
     train_loader = tud.DataLoader(
         train_ds,
         batch_sampler=_PairedGroupedBatchSampler(train_ds, v3_cfg.batch_size, shuffle=False, seed=v3_cfg.seed),
         collate_fn=_collate,
+        pin_memory=pin,
     )
     val_fit_loader = tud.DataLoader(
         val_fit_ds,
         batch_sampler=_PairedGroupedBatchSampler(val_fit_ds, v3_cfg.batch_size, shuffle=False, seed=v3_cfg.seed),
         collate_fn=_collate,
+        pin_memory=pin,
     )
     val_eval_loader = tud.DataLoader(
         val_eval_ds,
         batch_sampler=_PairedGroupedBatchSampler(val_eval_ds, v3_cfg.batch_size, shuffle=False, seed=v3_cfg.seed),
         collate_fn=_collate,
+        pin_memory=pin,
     )
 
     # ----- xt_pool wiring -----
