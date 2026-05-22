@@ -128,7 +128,7 @@ def evaluate_synthetic_anomaly_auc(
     snr_db_list: tuple[float, ...] = (-10.0, -5.0, 0.0, 5.0, 10.0),
     n_boot: int = 1000,
     seed: int = 0,
-    device: torch.device | str = "cpu",
+    device: torch.device | str = "auto",
 ) -> SyntheticAnomalyAUC:
     """Compute V3 ROC-AUC against feature-space synthetic anomalies.
 

@@ -204,7 +204,7 @@ def precompute_v4_samples(
     window_stride_seconds: float | None = None,
     burst_aware_srp: bool = False,
     burst_seconds: float = 0.10,
-    device: torch.device | str = "cpu",
+    device: torch.device | str = "auto",
 ) -> list[V4Sample]:
     """Walk segments, slice labeled anomaly windows, build `V4Sample`s.
 

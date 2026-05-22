@@ -680,7 +680,7 @@ def score_segments(
     v2_cfg: V2SSLConfig,
     batch_size: int = 32,
     unconditional: bool = False,
-    device: torch.device | str = "cpu",
+    device: torch.device | str = "auto",
     xt_pool: nn.Module | None = None,
     window_seconds_override: float | dict[str, float] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
@@ -749,7 +749,7 @@ def gate_samples_by_alert(
     percentile: int = 99,
     unconditional: bool = False,
     keep_dataset_ids: tuple[str, ...] = (),
-    device: torch.device | str = "cpu",
+    device: torch.device | str = "auto",
 ) -> tuple[list, dict]:
     """Filter ``samples`` (any object with `context`, `x_for_v3`, `dataset_id`
     fields — typically `V4Sample`) to only those V3 flags as anomalous.
@@ -878,7 +878,7 @@ def encoder_level_transition_fpr(
     n_crossfade_windows: int = 8,
     percentile: int | str = 95,
     unconditional: bool = False,
-    device: torch.device | str = "cpu",
+    device: torch.device | str = "auto",
 ) -> dict:
     """Cross-dataset transition stress-test that bypasses sensor-count mismatch.
 
@@ -981,7 +981,7 @@ def transition_fpr(
     crossfade_seconds: float = 1.0,
     percentile: int = 99,
     unconditional: bool = False,
-    device: torch.device | str = "cpu",
+    device: torch.device | str = "auto",
 ) -> dict:
     """Splice (A → crossfade → B), score every window, return the FPR.
 

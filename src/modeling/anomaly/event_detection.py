@@ -267,7 +267,7 @@ def sliding_window_v3_inference(
     *,
     v2_cfg,
     inference_stride_s: float = 0.25,
-    device: str = "cpu",
+    device: str = "auto",
 ):
     """Run V3 on a single paired segment at a finer-than-training stride.
 

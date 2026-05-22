@@ -37,6 +37,7 @@ import numpy as np
 import torch
 import torch.utils.data as tud
 
+from ...config import resolve_device
 from .cluster_metric import cluster_purity_and_nmi
 from .v2_fusion import V2FusionEncoder
 from .v2_ssl import (
@@ -117,7 +118,7 @@ def run_modality_balance_probe(
     n_clusters: int = 3,
     healthy_mode_labels: tuple[str, ...] = ("Pump", "Standstill", "Turbine"),
     seed: int = 42,
-    device: torch.device | str = "cpu",
+    device: torch.device | str = "auto",
 ) -> ModalityBalanceResult:
     """Evaluate V2 cluster-purity under three inference-time modality regimes.
 
@@ -137,7 +138,7 @@ def run_modality_balance_probe(
     Returns:
       `ModalityBalanceResult` with the three cluster-metric dicts.
     """
-    device = torch.device(device)
+    device = resolve_device(device)
     encoder = encoder.to(device)
 
     healthy = [s for s in healthy_segments if s.mode_label in healthy_mode_labels]
