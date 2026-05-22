@@ -28,6 +28,7 @@ from typing import Literal
 import torch
 import torch.nn as nn
 
+from ...config.architecture import ENCODER
 from ..encoders import PMA, PerModalityEncoder
 from ..fusion import BidirectionalCrossAttention
 
@@ -40,19 +41,26 @@ class V2FusionEncoder(nn.Module):
 
     def __init__(
         self,
-        feature_dim: int = 128,
-        embed_dim: int = 128,
-        n_heads: int = 4,
+        feature_dim: int = ENCODER.feature_dim,
+        embed_dim: int = ENCODER.embed_dim,
+        n_heads: int = ENCODER.n_heads,
         n_modalities: int = 2,
-        n_datasets: int = 5,
+        n_datasets: int | None = None,
         context_mode: ContextMode = "joint_pma",
-        num_context_seeds: int = 2,
+        num_context_seeds: int = ENCODER.num_context_seeds,
+        acoustic_cnn_width_mult: int = ENCODER.acoustic_cnn_width_mult,
+        pool_type: str = ENCODER.pool_type,
+        pool_reduction: int = ENCODER.pool_reduction,
     ) -> None:
         super().__init__()
         if context_mode not in ("joint_pma", "skip", "dual_pma"):
             raise ValueError(f"unknown context_mode {context_mode!r}")
         if num_context_seeds < 1:
             raise ValueError(f"num_context_seeds must be ≥ 1; got {num_context_seeds}")
+        # V1→V2 weight transfer requires identical pool shapes on both
+        # backbones, so the pool kwargs are propagated to both encoders
+        # in lock-step.  `load_v1_weights(strict=True)` will raise if the
+        # caller mismatches V1 / V2 pool configs.
         self.acoustic = PerModalityEncoder(
             modality="acoustic",
             feature_dim=feature_dim,
@@ -60,6 +68,9 @@ class V2FusionEncoder(nn.Module):
             n_heads=n_heads,
             n_modalities=n_modalities,
             n_datasets=n_datasets,
+            acoustic_cnn_width_mult=acoustic_cnn_width_mult,
+            pool_type=pool_type,
+            pool_reduction=pool_reduction,
         )
         self.vibration = PerModalityEncoder(
             modality="vibration",
@@ -68,7 +79,11 @@ class V2FusionEncoder(nn.Module):
             n_heads=n_heads,
             n_modalities=n_modalities,
             n_datasets=n_datasets,
+            pool_type=pool_type,
+            pool_reduction=pool_reduction,
         )
+        self.pool_type = pool_type
+        self.pool_reduction = int(pool_reduction)
         self.fusion = BidirectionalCrossAttention(embed_dim, num_heads=n_heads)
         # Multi-seed PMA: `num_context_seeds` independent learned queries
         # attend over the fused tokens.  Their outputs are mean-pooled into

@@ -107,21 +107,31 @@ class PositionRegistry:
         )
 
     @classmethod
-    def for_dataset(cls, dataset_id: str, **kwargs) -> "PositionRegistry":
-        dataset_id = dataset_id.lower()
-        if dataset_id == "d1":
+    def from_source(
+        cls, position_source: str, position_path: Path | None = None
+    ) -> "PositionRegistry":
+        """Dispatch on `position_source` enum (single source: `DatasetMetadata`).
+
+        Parsers are keyed by data layout, not by dataset id — so D3, D4, D5
+        and any future circular-rig dataset that ships `position.json` all
+        share `d3_position_json` and require no new branch.
+        """
+        if position_source == "default":
             return cls(_d1_default_geometry())
-        if dataset_id == "d2":
-            return cls(_parse_d2_node_position_txt(Path(kwargs["path"])))
-        if dataset_id == "d3":
-            return cls(_parse_d3_position_json(Path(kwargs["path"])))
-        if dataset_id == "d4":
-            # D4 reuses the D3 sensor layout (same 9 mic + 4 accel names)
-            # so the D3 JSON parser handles it directly.
-            return cls(_parse_d3_position_json(Path(kwargs["path"])))
-        if dataset_id in ("illwerke", "illwerke_raw"):
+        if position_source == "rowii":
             return cls(_illwerke_geometry())
-        raise ValueError(f"unknown dataset id: {dataset_id!r}")
+        if position_path is None:
+            raise ValueError(
+                f"position_source={position_source!r} requires a position_path"
+            )
+        if position_source == "d2_node_position_txt":
+            return cls(_parse_d2_node_position_txt(position_path))
+        if position_source == "d3_position_json":
+            return cls(_parse_d3_position_json(position_path))
+        raise ValueError(
+            f"unknown position_source {position_source!r} "
+            f"(known: default, rowii, d2_node_position_txt, d3_position_json)"
+        )
 
 
 # ---------------------------------------------------------------------- D1 ---
@@ -129,14 +139,41 @@ class PositionRegistry:
 def _d1_default_geometry() -> list[SensorPosition]:
     """Synthesize a placeholder geometry for D1 (which has no native positions).
 
-    Mics B, C, D, E are placed on a 1.0 m circle at z=2.0 m at 0/90/180/270°.
-    Vibrations B, C, D, E are placed on a 0.6 m circle at z=0.0 m, offset 45°.
-    These are NOT physical positions; they exist so position embeddings are
+    Mics B, C, D, E sit on a 0.10 m circle at z = 0.20 m at 0 / 90 / 180 / 270°.
+    Vibrations B, C, D, E sit on a 0.06 m circle at z = 0.0 m offset 45°.
+    These are NOT physical positions; they exist so position embeddings remain
     well-defined and consistent across runs.
+
+    **Scale rationale (corrected 2026-05-20):**  Two physically distinct
+    prototypes underlie this corpus:
+
+      * D1 / D2 used a **rectangular bench-top rig** (see
+        ``configs/datasets/d2.yaml`` / `node_position.txt`).  D2 sensors span
+        ``x ∈ [0, 0.155] m, y ∈ [0, 0.41] m, z ∈ [0.12, 0.24] m`` — i.e. a
+        corner-origin frame with a ~ 41 cm long y-axis.  D1 has no native
+        positions; we synthesize a placeholder geometry below.
+      * D3 / D4 use a **circular 3D-printed rig** (see ``configs/datasets/
+        d3.yaml``).  D3/D4 sensors span ``x ∈ [0, 0.11] m, y ∈ [-0.05,
+        0.05] m, z ∈ [0.01, 0.08] m`` — a centred frame on the order of
+        10 cm overall.
+
+    Earlier revisions of this docstring claimed "D2/D3/D4 positions all land
+    in [-0.20, +0.20] m"; that was incorrect for D2 (y reaches 0.41 m) and
+    led to an under-sized V4 SRP-PHAT grid.  The two rigs are deliberately
+    in different coordinate frames; the dataset embedding lets the encoder
+    learn a per-rig spatial prior, but downstream V4 localisation must size
+    its candidate grid from the actual per-sample sensor positions, not
+    from a global constant.
+
+    The placeholder D1 geometry (0.10 m / 0.06 m circles) preserves the
+    *role* (deterministic positional-embedding input) at a defensible scale
+    matched to D3/D4.  It is NOT a model of D1's rectangular rig — D1's true
+    sensor layout is unrecorded — and should not be used for any geometry-
+    dependent computation (TDOA, SRP-PHAT, etc.).
     """
     sensors: list[SensorPosition] = []
-    mic_radius, mic_z = 1.0, 2.0
-    vib_radius, vib_z = 0.6, 0.0
+    mic_radius, mic_z = 0.10, 0.20
+    vib_radius, vib_z = 0.06, 0.0
     for ch_id, deg in zip("BCDE", (0, 90, 180, 270)):
         theta = math.radians(deg)
         sensors.append(

@@ -15,15 +15,19 @@ Two ablation knobs:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import copy
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Iterable, Literal
 
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.utils.data as tud
 from tqdm.auto import tqdm
 
+from ...config import resolve_device
+from ...config.architecture import V3_ANOMALY
 from ...ingestion.test_dataset_loader import TestDatasetLoader
 from ..context.v2_fusion import V2FusionEncoder
 from ..context.v2_ssl import (
@@ -36,8 +40,49 @@ from ..context.v2_ssl import (
     _precompute_paired,
     _split_segments_by_recording,
 )
+from ..encoders.set_transformer import PMA
 from .cnf_head import ConditionalRealNVP
 from .threshold import PerClusterThresholds
+
+
+XtPoolKind = Literal["mean", "pma2"]
+
+
+class _XtPool(nn.Module):
+    """Learnable channel-token pool for V3's `x_t` extraction.
+
+    Replaces the legacy ``fused.mean(dim=1)`` (single first-moment average
+    over the `(N_a + N_v)` channel-token axis) with two learned attention
+    seeds (PMA, Lee et al. ICML 2019), concatenated and projected back to
+    ``embed_dim``.
+
+    Motivation (2026-05-19):
+
+      The legacy mean pool was the **second** dilution stage for V3 at
+      ``hop_length=43``: a knock signature that survived the per-mic
+      ``AdaptiveAvgPool2d`` only contributes ``1/(N_a + N_v)`` to the
+      channel-mean.  PMA-2 lets V3 jointly model a "stationary-mode-
+      consistent" attention pattern (uniform weights) and a "transient-
+      event-localized" attention pattern (mass on whichever mics see the
+      knock peak) — two seeds is the minimum count strictly greater than
+      V2's existing PMA-1 context pool, so the V3 ``x_t`` carries
+      complementary information rather than a rescaled copy of ``c_t``.
+
+      Trained jointly with the conditional flow on the frozen V2 encoder
+      output.
+    """
+
+    def __init__(self, embed_dim: int, num_heads: int = 4) -> None:
+        super().__init__()
+        self.embed_dim = int(embed_dim)
+        self.pma = PMA(embed_dim, num_seeds=2, num_heads=num_heads)
+        self.proj = nn.Linear(2 * embed_dim, embed_dim)
+
+    def forward(self, fused: torch.Tensor) -> torch.Tensor:
+        # fused: (B, N_a + N_v, embed_dim)
+        pooled = self.pma(fused)                 # (B, 2, embed_dim)
+        flat = pooled.flatten(start_dim=1)       # (B, 2 * embed_dim)
+        return self.proj(flat)                   # (B, embed_dim)
 
 
 # ---------------------------------------------------------------------------
@@ -49,37 +94,52 @@ from .threshold import PerClusterThresholds
 class V3Config:
     """V3 conditional anomaly head config."""
 
-    # CNF dims
-    n_layers: int = 6
-    hidden_dim: int = 64
-    n_hidden_per_net: int = 2
-    # Per-coupling log-scale bound: tanh(scale_net) * scale_max.  2.0 is the
-    # standard RealNVP setting and gives each layer a Jacobian factor in
-    # [e⁻², e²]; the prior 1.0 default was over-conservative for a 128-D
-    # latent with only 6 coupling layers.
-    scale_max: float = 2.0
+    # Per-stage window override (2026-05-19).  When set, the V3 trainer
+    # builds a shallow copy of the V2 config with
+    # `window_scales_seconds=(override,)` (single-scale) before
+    # constructing `_PairedWindowedDataset`.  The frozen V2 encoder is
+    # scale-invariant by virtue of ASP pooling (Okabe 2018), so the
+    # smaller window is consumed without re-pretraining V2.  May be:
+    #
+    #   * ``None`` — inherit V2's scale set (legacy behaviour),
+    #   * a ``float`` — single override applied to every dataset, or
+    #   * a ``dict[dataset_id, float]`` — per-dataset override.  Publication
+    #     defaults are 1.0 s on D3/D4 (transient-tight; the smallest sub-2 s
+    #     scale where ASP-σ still has ≥ 30 post-MaxPool frames at hop=43)
+    #     and 3.0 s on D1/D2 (which cannot go below 1.5 s).
+    # Default ``None`` keeps V3 backwards-compatible (inherits v2_cfg
+    # window).  The orchestrator (full_run._v3_cfg) sets the publication
+    # per-dataset dict from `WINDOWING.v3_window_seconds_override`.
+    window_seconds_override: float | dict[str, float] | None = None
 
-    # Training
+    # V3 channel-token pool kind for `x_t`.  Mean-pool dilutes transient
+    # signatures on the channel-token axis; PMA-2 (the publication
+    # default) learns 2 attention seeds that capture both stationary-mode
+    # and transient-event patterns.  See `_XtPool` docstring above for the
+    # full justification.
+    xt_pool: XtPoolKind = V3_ANOMALY.xt_pool
+    xt_pool_num_heads: int = V3_ANOMALY.xt_pool_num_heads
+
+    # CNF dims — sourced from `V3_ANOMALY` in architecture.py.
+    n_layers: int = V3_ANOMALY.n_layers
+    hidden_dim: int = V3_ANOMALY.hidden_dim
+    n_hidden_per_net: int = 2   # CNF coupling MLP depth; not centralised
+    scale_max: float = V3_ANOMALY.scale_max
+
+    # Training schedule — per-experiment, not centralised.
     epochs: int = 30
     batch_size: int = 32
     lr: float = 1e-3
     weight_decay: float = 1e-5
     val_ratio: float = 0.3
-    # Cosine LR schedule with eta_min = 1 % of base lr.  Improves the
-    # tail of NLL training relative to the previous fixed-rate AdamW.
     use_cosine_lr: bool = True
 
     # A2 ablation — zero c at train+infer for unconditional flow.
     unconditional: bool = False
 
     # Threshold fit — fully unsupervised on healthy data.
-    # K = 3 matches the operating-mode hypothesis (Pump / Standstill /
-    # Turbine).  A larger K splits real modes into noise sub-clusters whose
-    # individual thresholds inherit only a fraction of the per-mode healthy
-    # tail and therefore over-trigger; a smaller K conflates modes and
-    # over-loosens the threshold.
-    n_threshold_clusters: int = 3
-    threshold_percentile: int = 95
+    n_threshold_clusters: int = V3_ANOMALY.n_threshold_clusters
+    threshold_percentile: int = V3_ANOMALY.threshold_percentile
 
     # Nested held-out split inside `val_segs`: a `threshold_fit_val_ratio`
     # fraction of val recordings goes to *fitting* the K-means centroids and
@@ -101,7 +161,7 @@ class V3Config:
 
     # System
     seed: int = 42
-    device: str = "cpu"
+    device: str = "auto"
 
 
 # ---------------------------------------------------------------------------
@@ -113,12 +173,103 @@ def _extract_xc(
     encoder: V2FusionEncoder,
     loader: tud.DataLoader,
     device: torch.device,
+    xt_pool: nn.Module | None = None,
+    grad: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, list[str]]:
-    """Run frozen V2 encoder forward; collect mean-pool x, PMA c, mode labels."""
+    """Run frozen V2 encoder forward; collect x_t, c_t, mode labels.
+
+    When ``xt_pool`` is None (legacy path) or an ``nn.Identity``-like marker,
+    ``x_t = fused.mean(dim=1)`` — preserves the original `cfg.xt_pool="mean"`
+    behaviour.  When ``xt_pool`` is an :class:`_XtPool`, the V2 encoder is run
+    under ``no_grad`` (it is frozen) but the ``xt_pool`` forward is on the
+    autograd tape so the V3 trainer can co-optimise it with the flow.
+
+    The ``grad`` flag controls whether ``xt_pool`` is invoked under
+    ``torch.no_grad`` (set to True at training time, False for inference /
+    feature extraction).
+    """
     encoder.eval()
     xs: list[torch.Tensor] = []
     cs: list[torch.Tensor] = []
     labels: list[str] = []
+    use_grad = bool(grad and xt_pool is not None)
+    for batch in loader:
+        ac = batch["ac_feat"].to(device)
+        vib = batch["vib_feat"].to(device)
+        ac_xyz = batch["ac_xyz"].to(device)
+        vib_xyz = batch["vib_xyz"].to(device)
+        ds_idx = batch["dataset_idx"].to(device)
+        with torch.no_grad():
+            out = encoder(ac, ac_xyz, vib, vib_xyz, ds_idx, mask_p=0.0)
+            fused = torch.cat([out["a_fused"], out["v_fused"]], dim=1)
+            c_t = out["context"]
+        if xt_pool is not None:
+            if use_grad:
+                x_t = xt_pool(fused)
+            else:
+                with torch.no_grad():
+                    x_t = xt_pool(fused)
+        else:
+            x_t = fused.mean(dim=1)
+        xs.append(x_t.detach().cpu())
+        cs.append(c_t.detach().cpu())
+        labels.extend(batch["mode_label"])
+    return torch.cat(xs, dim=0), torch.cat(cs, dim=0), labels
+
+
+def _resolve_v3_override(
+    v3_cfg: V3Config, dataset_ids: Iterable[str]
+) -> dict[str, float] | None:
+    """Normalise the V3 ``window_seconds_override`` to a per-dataset dict.
+
+    Returns None when no override is set; otherwise a fully-populated
+    dict keyed by the dataset ids the trainer is about to consume.
+    """
+    override = v3_cfg.window_seconds_override
+    if override is None:
+        return None
+    if isinstance(override, dict):
+        return {str(k): float(v) for k, v in override.items()}
+    return {str(d): float(override) for d in dataset_ids}
+
+
+def _make_override_v2_cfg(
+    v2_cfg: V2SSLConfig,
+    override_per_dataset: dict[str, float] | None,
+) -> V2SSLConfig:
+    """Return a shallow `V2SSLConfig` copy with the V3 override applied.
+
+    The override is materialised as a per-dataset
+    ``window_scales_seconds_per_dataset`` dict so the V3
+    ``_PairedWindowedDataset`` reuses the same multi-scale plumbing as
+    V1 / V2 SSL.  When ``override_per_dataset`` is None the original
+    config is returned unchanged.
+    """
+    if not override_per_dataset:
+        return v2_cfg
+    per_ds = {ds: (float(v),) for ds, v in override_per_dataset.items()}
+    return replace(v2_cfg, window_scales_seconds_per_dataset=per_ds)
+
+
+def _cache_fused(
+    encoder: V2FusionEncoder,
+    loader: tud.DataLoader,
+    device: torch.device,
+) -> list[dict]:
+    """Run the frozen V2 encoder once and cache per-batch (fused, c, labels).
+
+    Used by the ``xt_pool="pma2"`` path so the learnable :class:`_XtPool`
+    can be co-optimised with the flow over many epochs without re-running
+    the encoder.  Each cache entry preserves the grouped-batch contract
+    (uniform `N_a + N_v` within a batch) so `_XtPool(fused)` succeeds
+    without padding masks.
+
+    Memory cost is proportional to ``num_windows * (N_a + N_v) * embed_dim``;
+    at the typical V3 cohort size (~10 k windows, 13 channels, 128 dims)
+    this is ~67 MB on CPU — well below RAM budgets.
+    """
+    encoder.eval()
+    cache: list[dict] = []
     with torch.no_grad():
         for batch in loader:
             ac = batch["ac_feat"].to(device)
@@ -127,11 +278,49 @@ def _extract_xc(
             vib_xyz = batch["vib_xyz"].to(device)
             ds_idx = batch["dataset_idx"].to(device)
             out = encoder(ac, ac_xyz, vib, vib_xyz, ds_idx, mask_p=0.0)
-            fused = torch.cat([out["a_fused"], out["v_fused"]], dim=1)
-            xs.append(fused.mean(dim=1).cpu())
-            cs.append(out["context"].cpu())
-            labels.extend(batch["mode_label"])
-    return torch.cat(xs, dim=0), torch.cat(cs, dim=0), labels
+            fused = torch.cat([out["a_fused"], out["v_fused"]], dim=1).detach().cpu()
+            c = out["context"].detach().cpu()
+            cache.append(
+                {
+                    "fused": fused,
+                    "c": c,
+                    "labels": list(batch["mode_label"]),
+                }
+            )
+    return cache
+
+
+def _pool_cached_x(
+    cache: list[dict],
+    xt_pool: nn.Module | None,
+    device: torch.device,
+) -> torch.Tensor:
+    """Apply ``xt_pool`` (or the legacy mean-pool) over a fused cache.
+
+    Always runs under ``no_grad`` — used for the final extract-once paths
+    (val NLL evaluation, threshold fitting, post-training scoring).
+    """
+    chunks: list[torch.Tensor] = []
+    with torch.no_grad():
+        for entry in cache:
+            fused = entry["fused"].to(device)
+            if xt_pool is None:
+                x = fused.mean(dim=1)
+            else:
+                x = xt_pool(fused)
+            chunks.append(x.detach().cpu())
+    return torch.cat(chunks, dim=0)
+
+
+def _stack_c_from_cache(cache: list[dict]) -> torch.Tensor:
+    return torch.cat([entry["c"] for entry in cache], dim=0)
+
+
+def _stack_labels_from_cache(cache: list[dict]) -> list[str]:
+    out: list[str] = []
+    for entry in cache:
+        out.extend(entry["labels"])
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +354,11 @@ class V3Result:
     val_contexts: np.ndarray
     val_labels: list[str]
     unconditional: bool
+    # `_XtPool` module trained jointly with the flow.  None when the legacy
+    # mean-pool path was used (`xt_pool="mean"`).  Carries learned PMA-2
+    # weights that scoring / streaming inference must reuse to obtain
+    # comparable scores on new windows.
+    xt_pool: nn.Module | None = None
 
 
 def train_v3_cnf(
@@ -181,7 +375,7 @@ def train_v3_cnf(
 
     torch.manual_seed(v3_cfg.seed)
     np.random.seed(v3_cfg.seed)
-    device = torch.device(v3_cfg.device)
+    device = resolve_device(v3_cfg.device)
     v2_encoder = v2_encoder.to(device)
     v2_encoder.eval()
     for p in v2_encoder.parameters():
@@ -190,6 +384,14 @@ def train_v3_cnf(
     segments = _gather_paired_segments(loaders, v2_cfg)
     if not segments:
         raise RuntimeError("V3: no healthy paired segments found")
+
+    # Apply the per-stage window override (2026-05-19).  Materialised as a
+    # per-dataset `window_scales_seconds_per_dataset` dict so the existing
+    # multi-scale dataset plumbing handles it — the override degenerates to
+    # "single scale, equal to override" for each dataset present.
+    dataset_ids = sorted({s.dataset_id for s in segments})
+    override_per_ds = _resolve_v3_override(v3_cfg, dataset_ids)
+    effective_v2_cfg = _make_override_v2_cfg(v2_cfg, override_per_ds)
 
     train_segs, val_segs = _split_segments_by_recording(
         segments, v3_cfg.val_ratio, v3_cfg.seed
@@ -201,9 +403,9 @@ def train_v3_cnf(
     val_fit_segs, val_eval_segs = _split_segments_by_recording(
         val_segs, v3_cfg.threshold_fit_val_ratio, v3_cfg.seed + 1
     )
-    train_ds = _PairedWindowedDataset(train_segs, v2_cfg)
-    val_fit_ds = _PairedWindowedDataset(val_fit_segs, v2_cfg)
-    val_eval_ds = _PairedWindowedDataset(val_eval_segs, v2_cfg)
+    train_ds = _PairedWindowedDataset(train_segs, effective_v2_cfg)
+    val_fit_ds = _PairedWindowedDataset(val_fit_segs, effective_v2_cfg)
+    val_eval_ds = _PairedWindowedDataset(val_eval_segs, effective_v2_cfg)
     if len(train_ds) == 0:
         raise RuntimeError("V3: zero training windows after splitting")
     if len(val_fit_ds) == 0 or len(val_eval_ds) == 0:
@@ -229,11 +431,48 @@ def train_v3_cnf(
         collate_fn=_collate,
     )
 
-    # Extract once — encoder is frozen so a single forward pass over the data
-    # gives the full training set.
-    x_train, c_train, _ = _extract_xc(v2_encoder, train_loader, device)
-    x_val_fit, c_val_fit, _val_fit_labels = _extract_xc(v2_encoder, val_fit_loader, device)
-    x_val, c_val, val_labels = _extract_xc(v2_encoder, val_eval_loader, device)
+    # ----- xt_pool wiring -----
+    # ``pma2`` is the publication default (Lee et al. ICML 2019 PMA, with
+    # 2 seeds; see `_XtPool` docstring).  ``mean`` reproduces the legacy
+    # mean-pool path one-for-one for ablation / hop=512 reproducibility.
+    if v3_cfg.xt_pool == "pma2":
+        # Cache the fused tokens once so the joint flow + xt_pool training
+        # loop avoids re-running the encoder every epoch (encoder is frozen).
+        train_cache = _cache_fused(v2_encoder, train_loader, device)
+        val_fit_cache = _cache_fused(v2_encoder, val_fit_loader, device)
+        val_eval_cache = _cache_fused(v2_encoder, val_eval_loader, device)
+        embed_dim = int(train_cache[0]["fused"].shape[-1])
+        xt_pool: nn.Module | None = _XtPool(
+            embed_dim=embed_dim, num_heads=int(v3_cfg.xt_pool_num_heads)
+        ).to(device)
+    elif v3_cfg.xt_pool == "mean":
+        train_cache = None
+        val_fit_cache = None
+        val_eval_cache = None
+        xt_pool = None
+    else:
+        raise ValueError(f"unknown xt_pool {v3_cfg.xt_pool!r}")
+
+    if xt_pool is None:
+        # Legacy mean-pool: extract once, then train flow on tensors.
+        x_train, c_train, _ = _extract_xc(v2_encoder, train_loader, device)
+        x_val_fit, c_val_fit, _val_fit_labels = _extract_xc(v2_encoder, val_fit_loader, device)
+        x_val, c_val, val_labels = _extract_xc(v2_encoder, val_eval_loader, device)
+    else:
+        # PMA-2 path: initial x is the pool's random-init output; the
+        # per-epoch loop below re-runs the pool with current weights.  We
+        # still pre-compute c (V2's PMA context, frozen) once.
+        c_train = _stack_c_from_cache(train_cache)
+        c_val_fit = _stack_c_from_cache(val_fit_cache)
+        c_val = _stack_c_from_cache(val_eval_cache)
+        val_labels = _stack_labels_from_cache(val_eval_cache)
+        # Seed x tensors so flow dimensionality can be inferred below.
+        # These tensors are NOT used in training; the training loop re-pools
+        # each epoch from `train_cache`.  We compute them with the pool's
+        # initialisation so flow.__init__ sees the right shape.
+        x_train = _pool_cached_x(train_cache, xt_pool, device)
+        x_val_fit = _pool_cached_x(val_fit_cache, xt_pool, device)
+        x_val = _pool_cached_x(val_eval_cache, xt_pool, device)
 
     if v3_cfg.unconditional:
         c_train_used = torch.zeros_like(c_train)
@@ -252,8 +491,12 @@ def train_v3_cnf(
         n_hidden_per_net=v3_cfg.n_hidden_per_net,
         scale_max=v3_cfg.scale_max,
     ).to(device)
+    # Co-optimise the flow with `_XtPool` when present (publication default).
+    trainable_params: list[torch.nn.Parameter] = list(flow.parameters())
+    if xt_pool is not None:
+        trainable_params += list(xt_pool.parameters())
     optim = torch.optim.AdamW(
-        flow.parameters(), lr=v3_cfg.lr, weight_decay=v3_cfg.weight_decay
+        trainable_params, lr=v3_cfg.lr, weight_decay=v3_cfg.weight_decay
     )
     if v3_cfg.use_cosine_lr:
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -283,32 +526,60 @@ def train_v3_cnf(
     )
     for _epoch in epoch_iter:
         flow.train()
-        perm = torch.randperm(n_train)
+        if xt_pool is not None:
+            xt_pool.train()
         loss_sum = 0.0
         n = 0
         epoch_min = float("inf")
         epoch_max = float("-inf")
-        for i in range(0, n_train, v3_cfg.batch_size):
-            idx = perm[i : i + v3_cfg.batch_size]
-            xb = x_train[idx].to(device)
-            cb = c_train_used[idx].to(device)
-            log_p = flow.log_prob(xb, cb)
-            loss = -log_p.mean()
-            optim.zero_grad()
-            loss.backward()
-            # F6 — gradient clipping (Pascanu et al., 2013).  Without this a
-            # single batch landing in the tail of the conditional density can
-            # produce a huge gradient that pushes the affine couplings into a
-            # regime they cannot easily recover from.
-            torch.nn.utils.clip_grad_norm_(flow.parameters(), max_norm=5.0)
-            optim.step()
-            loss_f = float(loss.item())
-            loss_sum += loss_f * xb.shape[0]
-            n += xb.shape[0]
-            if loss_f < epoch_min:
-                epoch_min = loss_f
-            if loss_f > epoch_max:
-                epoch_max = loss_f
+        if xt_pool is None:
+            # Legacy path — tensor-only.
+            perm = torch.randperm(n_train)
+            for i in range(0, n_train, v3_cfg.batch_size):
+                idx = perm[i : i + v3_cfg.batch_size]
+                xb = x_train[idx].to(device)
+                cb = c_train_used[idx].to(device)
+                log_p = flow.log_prob(xb, cb)
+                loss = -log_p.mean()
+                optim.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(flow.parameters(), max_norm=5.0)
+                optim.step()
+                loss_f = float(loss.item())
+                loss_sum += loss_f * xb.shape[0]
+                n += xb.shape[0]
+                if loss_f < epoch_min:
+                    epoch_min = loss_f
+                if loss_f > epoch_max:
+                    epoch_max = loss_f
+        else:
+            # PMA-2 path — iterate over the cached fused batches in shuffled
+            # order; re-pool with the current xt_pool weights every step so
+            # `_XtPool` is co-optimised with the flow.
+            order = torch.randperm(len(train_cache)).tolist()
+            cum_idx = 0
+            for batch_pos in order:
+                entry = train_cache[batch_pos]
+                fused = entry["fused"].to(device)
+                B = int(fused.shape[0])
+                # Slice the matching c rows from c_train_used (which is a
+                # CPU tensor concatenated in cache order — see `_cache_fused`).
+                cb = c_train_used[cum_idx : cum_idx + B].to(device)
+                cum_idx += B
+                xb = xt_pool(fused)
+                log_p = flow.log_prob(xb, cb)
+                loss = -log_p.mean()
+                optim.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=5.0)
+                optim.step()
+                loss_f = float(loss.item())
+                loss_sum += loss_f * B
+                n += B
+                if loss_f < epoch_min:
+                    epoch_min = loss_f
+                if loss_f > epoch_max:
+                    epoch_max = loss_f
         if scheduler is not None:
             scheduler.step()
         train_nll.append(loss_sum / max(1, n))
@@ -316,8 +587,15 @@ def train_v3_cnf(
         train_nll_max.append(epoch_max if epoch_max != float("-inf") else float("nan"))
 
         flow.eval()
+        if xt_pool is not None:
+            xt_pool.eval()
         with torch.no_grad():
-            v_log_p = flow.log_prob(x_val.to(device), c_val_used.to(device))
+            if xt_pool is not None:
+                # Re-pool the cached val_eval with current weights.
+                x_val_epoch = _pool_cached_x(val_eval_cache, xt_pool, device)
+            else:
+                x_val_epoch = x_val
+            v_log_p = flow.log_prob(x_val_epoch.to(device), c_val_used.to(device))
             v_nll_per_window = (-v_log_p).cpu().numpy()
             val_nll.append(float(v_nll_per_window.mean()))
             val_nll_min.append(float(v_nll_per_window.min()) if v_nll_per_window.size else float("nan"))
@@ -327,16 +605,25 @@ def train_v3_cnf(
         )
 
     flow.eval()
+    if xt_pool is not None:
+        xt_pool.eval()
+        # Re-pool with final pool weights so threshold-fit and held-out scores
+        # both reflect the converged `_XtPool` state.
+        x_val_fit_final = _pool_cached_x(val_fit_cache, xt_pool, device)
+        x_val_final = _pool_cached_x(val_eval_cache, xt_pool, device)
+    else:
+        x_val_fit_final = x_val_fit
+        x_val_final = x_val
     with torch.no_grad():
         # Threshold-fit cohort scores (used only to set the percentile bar).
         scores_val_fit = (
-            flow.anomaly_score(x_val_fit.to(device), c_val_fit_used.to(device))
+            flow.anomaly_score(x_val_fit_final.to(device), c_val_fit_used.to(device))
             .cpu()
             .numpy()
         )
         # Reportable held-out cohort scores (all downstream metrics).
         scores_val = (
-            flow.anomaly_score(x_val.to(device), c_val_used.to(device)).cpu().numpy()
+            flow.anomaly_score(x_val_final.to(device), c_val_used.to(device)).cpu().numpy()
         )
 
     # Threshold fitting always clusters on the *real* `c_t` (label-free);
@@ -371,6 +658,7 @@ def train_v3_cnf(
         val_contexts=c_val.numpy(),
         val_labels=val_labels,
         unconditional=v3_cfg.unconditional,
+        xt_pool=xt_pool,
     )
 
 
@@ -388,16 +676,41 @@ def score_segments(
     batch_size: int = 32,
     unconditional: bool = False,
     device: torch.device | str = "cpu",
+    xt_pool: nn.Module | None = None,
+    window_seconds_override: float | dict[str, float] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
     """Score a list of paired segments with the trained flow.
 
     Returns ``(scores, contexts, mode_labels)`` aligned per window.
+
+    ``xt_pool`` is the learned ``_XtPool`` from
+    :class:`V3Result.xt_pool` — pass it through so inference reuses the
+    same per-window summary the flow was trained on.  When None, the
+    legacy mean-pool path is used (only valid if the flow was trained
+    with ``xt_pool="mean"``).
+
+    ``window_seconds_override`` mirrors :attr:`V3Config.window_seconds_override`
+    and is applied to ``v2_cfg`` before the dataset is constructed.
     """
-    device = torch.device(device)
+    device = resolve_device(device)
     v2_encoder = v2_encoder.to(device).eval()
     flow = flow.to(device).eval()
+    if xt_pool is not None:
+        xt_pool = xt_pool.to(device).eval()
 
-    ds = _PairedWindowedDataset(segments, v2_cfg)
+    # Materialise the override as a per-dataset dict before constructing the
+    # dataset, so the V2 paired dataset's wall-clock pairing is preserved.
+    if window_seconds_override is not None:
+        dataset_ids = sorted({s.dataset_id for s in segments})
+        if isinstance(window_seconds_override, dict):
+            override_per_ds = {str(k): float(v) for k, v in window_seconds_override.items()}
+        else:
+            override_per_ds = {str(d): float(window_seconds_override) for d in dataset_ids}
+        effective_cfg = _make_override_v2_cfg(v2_cfg, override_per_ds)
+    else:
+        effective_cfg = v2_cfg
+
+    ds = _PairedWindowedDataset(segments, effective_cfg)
     if len(ds) == 0:
         return np.zeros(0, dtype=np.float64), np.zeros((0, flow.c_dim), dtype=np.float64), []
     loader = tud.DataLoader(
@@ -406,7 +719,7 @@ def score_segments(
         collate_fn=_collate,
     )
 
-    x, c, labels = _extract_xc(v2_encoder, loader, device)
+    x, c, labels = _extract_xc(v2_encoder, loader, device, xt_pool=xt_pool, grad=False)
     c_used = torch.zeros_like(c) if unconditional else c
     with torch.no_grad():
         scores = flow.anomaly_score(x.to(device), c_used.to(device)).cpu().numpy()
@@ -447,7 +760,7 @@ def gate_samples_by_alert(
     if not samples:
         return [], {"n_in": 0, "n_kept": 0, "by_dataset": {}}
 
-    device = torch.device(device)
+    device = resolve_device(device)
     flow = flow.to(device).eval()
 
     xs = torch.from_numpy(np.stack([s.x_for_v3 for s in samples], axis=0)).to(device)
@@ -542,6 +855,7 @@ def make_transition_segment(
         vibration_xyz=seg_a.vibration_xyz,
         vibration_fs=seg_a.vibration_fs,
         dataset_idx=seg_a.dataset_idx,
+        dataset_id=getattr(seg_a, "dataset_id", "synthetic"),
         mode_label=label or f"transition[{seg_a.mode_label}->{seg_b.mode_label}]",
         recording_id=f"{seg_a.recording_id}__to__{seg_b.recording_id}",
         source_dir=str(seg_a.source_dir),
@@ -572,7 +886,7 @@ def encoder_level_transition_fpr(
     at the endpoints.  The FPR over the crossfade region is the same
     diagnostic V3 should pass.
     """
-    device = torch.device(device)
+    device = resolve_device(device)
     v2_encoder = v2_encoder.to(device).eval()
     flow = flow.to(device).eval()
 

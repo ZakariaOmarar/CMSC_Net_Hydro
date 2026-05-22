@@ -12,4 +12,4 @@ healthy_latent_root: artifacts/latents
 mode_consistency_window: 5
 mode_stable_min_windows: 3
 mode_z_threshold: 3.0
-device: cpu
+device: auto

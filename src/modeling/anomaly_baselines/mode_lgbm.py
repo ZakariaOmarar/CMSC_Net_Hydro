@@ -93,6 +93,11 @@ def extract_mode_features(
     feature_names : list of human-readable names, length n_features
     """
     fs = int(segment.segment.mic_sample_rate)
+    # V0 baselines deliberately use `cfg.hop_length=512` (coarse 31.25 Hz
+    # acoustic frame rate) for fast baseline computation.  They do NOT go
+    # through V2's cross-attention, so the registry's per-dataset hop
+    # (`hop_for_dataset` in v2_ssl) does not apply.
+    hop = cfg.hop_length
 
     # --- Acoustic side: per-mic log-mel + RMS-style stats, then mean over mics.
     mel_per_mic: list[np.ndarray] = []
@@ -115,7 +120,7 @@ def extract_mode_features(
                 x.astype(np.float32),
                 fs=fs,
                 n_fft=cfg.n_fft,
-                hop_length=cfg.hop_length,
+                hop_length=hop,
                 n_mels=cfg.n_mels,
             )
         )
@@ -126,7 +131,7 @@ def extract_mode_features(
     mic_kurt = float(np.mean(kurt_per_mic))
     mic_centroid = float(np.mean(centroid_per_mic))
 
-    frames_per_window = max(1, int(round(cfg.window_seconds * fs / cfg.hop_length)))
+    frames_per_window = max(1, int(round(cfg.window_seconds * fs / hop)))
     step = max(1, int(round(frames_per_window * (1.0 - cfg.window_overlap))))
     n_frames = mel_pool.shape[1]
     if n_frames < frames_per_window:

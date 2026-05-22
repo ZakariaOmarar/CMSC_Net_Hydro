@@ -18,7 +18,7 @@ pretrain_context_epochs: 25
 joint_finetune_epochs: 0
 joint_ntxent_weight: 0.1
 contrastive_temperature: 0.2
-device: cpu
+device: auto
 latent_mode: mic_vibration
 latent_acoustic_rep: mfcc
 latent_window_s: 5.0

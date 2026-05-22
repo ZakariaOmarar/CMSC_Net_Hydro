@@ -59,6 +59,8 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
+from ...config import resolve_device
+
 from .cnf_head import ConditionalRealNVP
 
 
@@ -149,7 +151,7 @@ def evaluate_synthetic_anomaly_auc(
     Returns:
       `SyntheticAnomalyAUC` with the AUC and 95 % CI per SNR.
     """
-    device = torch.device(device)
+    device = resolve_device(device)
     flow = flow.to(device).eval()
     rng = np.random.default_rng(int(seed))
 

@@ -33,6 +33,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from ...config import resolve_device
 from ...modeling.context.cluster_metric import cluster_purity_and_nmi
 from ...modeling.context.v1_ssl import V1SSLConfig
 from ...modeling.context.v2_fusion import V2FusionEncoder
@@ -79,7 +80,7 @@ def _load_v2_encoder(cfg: V2SSLConfig, ckpt: Path | None = None) -> V2FusionEnco
 
 def main(v2_ckpt: Path | None = None, label: str = "v2") -> dict:
     cfg = _v2_cfg(quick=False)  # match the full-epoch run
-    device = torch.device("cpu")
+    device = resolve_device("auto")
 
     print(f"Loading checkpoints ... (V2 from {v2_ckpt or 'results/full_run/v2/encoder.pt'})")
     v1_acoustic = _load_v1_encoder("acoustic", cfg).to(device)

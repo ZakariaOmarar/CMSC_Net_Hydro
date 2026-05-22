@@ -268,11 +268,34 @@ class V4LocalizationHead(nn.Module):
         *,
         unconditional: bool = False,
         return_components: bool = False,
+        external_init_xyz: torch.Tensor | None = None,
     ) -> torch.Tensor | dict:
+        """Localisation forward pass.
+
+        ``external_init_xyz`` (R3.3 / 2026-05-16): when provided, OVERRIDES
+        the acoustic soft-argmax as the spatial init.  Used by
+        ``channel_mode="vibration_only_learned"`` to bootstrap the head
+        from a classical accel-TDOA multilateration estimate (mirror of
+        the acoustic init from `srp_phat_3d` → `soft_argmax_3d`), so the
+        vibration pipeline has a meaningful spatial prior instead of the
+        grid-centroid collapse that the older ``tdoa_only`` mode produces.
+        Shape must be ``(B, 3)`` in metres.  The 3-D CNN still runs
+        (`logits` / `global_feat` are computed and returned), but only
+        `global_feat` propagates to the residual MLP — the soft-argmax of
+        the (zeroed) volume is discarded.
+        """
         logits, global_feat = self.cnn(volume)
-        init_xyz = soft_argmax_3d(
-            logits, self.grid_coords, temperature=self.soft_argmax_temperature
-        )
+        if external_init_xyz is not None:
+            if external_init_xyz.shape != (volume.shape[0], 3):
+                raise ValueError(
+                    f"external_init_xyz must be (B, 3); got "
+                    f"{tuple(external_init_xyz.shape)} vs B={volume.shape[0]}"
+                )
+            init_xyz = external_init_xyz.to(device=volume.device, dtype=volume.dtype)
+        else:
+            init_xyz = soft_argmax_3d(
+                logits, self.grid_coords, temperature=self.soft_argmax_temperature
+            )
         tdoa_feat = self.tdoa(tdoa_tokens)
         feat = torch.cat([global_feat, tdoa_feat], dim=-1)
         if unconditional:

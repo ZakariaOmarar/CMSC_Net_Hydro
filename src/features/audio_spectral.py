@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from ..config.architecture import ACOUSTIC_CWT, ACOUSTIC_FEATURES
 from .acoustic_representations import compute_cwt_scalogram
 
 
@@ -23,12 +24,12 @@ def compute_log_mel_spectrogram(
     signal: np.ndarray,
     fs: int,
     *,
-    n_fft: int = 1024,
-    hop_length: int = 512,
-    n_mels: int = 64,
-    fmin: float = 20.0,
-    fmax: float | None = None,
-    top_db: float = 80.0,
+    n_fft: int = ACOUSTIC_FEATURES.n_fft,
+    hop_length: int = ACOUSTIC_FEATURES.hop_length,
+    n_mels: int = ACOUSTIC_FEATURES.n_mels,
+    fmin: float = ACOUSTIC_FEATURES.fmin_hz,
+    fmax: float | None = ACOUSTIC_FEATURES.fmax_hz,
+    top_db: float = ACOUSTIC_FEATURES.top_db,
 ) -> np.ndarray:
     """Power-to-dB log-mel spectrogram for one channel.
 
@@ -106,12 +107,12 @@ def compute_encoder_input_stack(
     mic_data: np.ndarray,
     fs: int,
     *,
-    n_mels: int = 64,
-    n_fft: int = 1024,
-    hop_length: int = 512,
-    cwt_n_scales: int = 64,
-    cwt_min_freq_hz: float = 20.0,
-    cwt_max_freq_hz: float = 250.0,
+    n_mels: int = ACOUSTIC_FEATURES.n_mels,
+    n_fft: int = ACOUSTIC_FEATURES.n_fft,
+    hop_length: int = ACOUSTIC_FEATURES.hop_length,
+    cwt_n_scales: int = ACOUSTIC_CWT.n_scales,
+    cwt_min_freq_hz: float = ACOUSTIC_CWT.min_freq_hz,
+    cwt_max_freq_hz: float = ACOUSTIC_CWT.max_freq_hz,
     standardize: bool = False,
 ) -> np.ndarray:
     """Build the V1 / V2 acoustic encoder input as two complementary spectral views.

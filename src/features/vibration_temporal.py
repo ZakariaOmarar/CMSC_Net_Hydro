@@ -51,16 +51,18 @@ import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
 from scipy.signal import hilbert
 
+from ..config.architecture import VIBRATION_FEATURES
+
 Channel2Mode = Literal["kurtosis", "crest_factor", "none"]
 
 
 def channel2_statistic_name(
     sample_rate: float,
     *,
-    kurtosis_window_seconds: float = 0.10,
-    min_kurtosis_samples: int = 31,
-    crest_factor_window_seconds: float = 1.0,
-    min_crest_factor_samples: int = 4,
+    kurtosis_window_seconds: float = VIBRATION_FEATURES.kurtosis_window_seconds,
+    min_kurtosis_samples: int = VIBRATION_FEATURES.min_kurtosis_samples,
+    crest_factor_window_seconds: float = VIBRATION_FEATURES.crest_factor_window_seconds,
+    min_crest_factor_samples: int = VIBRATION_FEATURES.min_crest_factor_samples,
 ) -> Channel2Mode:
     """Return which impulsiveness statistic channel 2 will carry for ``sample_rate``.
 
@@ -84,11 +86,11 @@ def compute_vibration_input_stack(
     accel_data: np.ndarray,
     *,
     sample_rate: float,
-    kurtosis_window_seconds: float = 0.10,
-    min_kurtosis_samples: int = 31,
-    crest_factor_window_seconds: float = 1.0,
-    min_crest_factor_samples: int = 4,
-    standardize: bool = True,
+    kurtosis_window_seconds: float = VIBRATION_FEATURES.kurtosis_window_seconds,
+    min_kurtosis_samples: int = VIBRATION_FEATURES.min_kurtosis_samples,
+    crest_factor_window_seconds: float = VIBRATION_FEATURES.crest_factor_window_seconds,
+    min_crest_factor_samples: int = VIBRATION_FEATURES.min_crest_factor_samples,
+    standardize: bool = VIBRATION_FEATURES.standardize,
     standardization_stats: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> np.ndarray:
     """Build the V1 vibration encoder input.

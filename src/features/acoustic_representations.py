@@ -24,16 +24,18 @@ from __future__ import annotations
 
 import numpy as np
 
+from ..config.architecture import ACOUSTIC_CWT, ACOUSTIC_FEATURES
+
 
 def compute_cwt_scalogram(
     signal: np.ndarray,
     fs: int,
     *,
-    wavelet: str = "cmor1.5-1.0",
-    n_scales: int = 64,
-    min_freq_hz: float = 20.0,
-    max_freq_hz: float | None = 250.0,
-    decimate_to_hz: int | None = 1000,
+    wavelet: str = ACOUSTIC_CWT.wavelet,
+    n_scales: int = ACOUSTIC_CWT.n_scales,
+    min_freq_hz: float = ACOUSTIC_CWT.min_freq_hz,
+    max_freq_hz: float | None = ACOUSTIC_CWT.max_freq_hz,
+    decimate_to_hz: int | None = ACOUSTIC_CWT.decimate_to_hz,
 ) -> np.ndarray:
     """Compute a log-compressed CWT scalogram for a single acoustic channel.
 
@@ -113,11 +115,11 @@ def compute_cwt_scalogram_stack(
     mic_data: np.ndarray,
     fs: int,
     *,
-    wavelet: str = "cmor1.5-1.0",
-    n_scales: int = 64,
-    min_freq_hz: float = 20.0,
-    max_freq_hz: float | None = 250.0,
-    decimate_to_hz: int | None = 1000,
+    wavelet: str = ACOUSTIC_CWT.wavelet,
+    n_scales: int = ACOUSTIC_CWT.n_scales,
+    min_freq_hz: float = ACOUSTIC_CWT.min_freq_hz,
+    max_freq_hz: float | None = ACOUSTIC_CWT.max_freq_hz,
+    decimate_to_hz: int | None = ACOUSTIC_CWT.decimate_to_hz,
 ) -> np.ndarray:
     """Compute CWT scalograms for all mic channels.
 
@@ -215,9 +217,9 @@ def compute_mfcc_stack(
 def compute_log_stft_spectrogram(
     signal: np.ndarray,
     *,
-    n_fft: int = 1024,
-    hop_length: int = 512,
-    top_db: float = 80.0,
+    n_fft: int = ACOUSTIC_FEATURES.n_fft,
+    hop_length: int = ACOUSTIC_FEATURES.hop_length,
+    top_db: float = ACOUSTIC_FEATURES.top_db,
 ) -> np.ndarray:
     """Compute power-to-dB STFT spectrogram for one channel.
 
@@ -248,8 +250,8 @@ def compute_log_stft_spectrogram(
 def compute_stft_stack(
     mic_data: np.ndarray,
     *,
-    n_fft: int = 1024,
-    hop_length: int = 512,
+    n_fft: int = ACOUSTIC_FEATURES.n_fft,
+    hop_length: int = ACOUSTIC_FEATURES.hop_length,
 ) -> np.ndarray:
     """Compute stacked log-STFT representations for all mic channels."""
     data = _as_2d_channels(mic_data, name="mic_data")

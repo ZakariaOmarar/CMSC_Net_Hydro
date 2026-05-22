@@ -22,5 +22,5 @@ mixup_alpha: 0.2
 exclude_randomfault: true
 selection_metric: val_macro_f1
 no_class_weights: false
-device: cpu
+device: auto
 seed: 42

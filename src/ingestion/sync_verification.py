@@ -76,6 +76,8 @@ from typing import Literal
 
 import numpy as np
 
+from ..config.architecture import SYNC
+
 
 @dataclass(frozen=True)
 class SyncResult:
@@ -223,7 +225,7 @@ def verify_paired_sync(
     mic_fs: float,
     accel_fs: float,
     *,
-    max_offset_s: float = 0.5,
+    max_offset_s: float = SYNC.max_offset_s,
     target_envelope_fs: float | None = None,
 ) -> SyncResult:
     """Estimate the cross-modal offset between paired acoustic and vibration streams.
@@ -400,10 +402,10 @@ def verify_sync_stability(
     mic_fs: float,
     accel_fs: float,
     *,
-    n_sub_segments: int = 5,
-    max_offset_s: float = 0.5,
-    confidence_floor: float = 1.5,
-    drift_tolerance_s: float = 0.010,
+    n_sub_segments: int = SYNC.n_sub_segments,
+    max_offset_s: float = SYNC.max_offset_s,
+    confidence_floor: float = SYNC.confidence_floor,
+    drift_tolerance_s: float = SYNC.drift_tolerance_s,
     min_sub_segment_seconds: float = 5.0,
 ) -> SyncStabilityResult:
     """Run the sync audit on K disjoint sub-segments of a recording.
@@ -685,7 +687,18 @@ def apply_sync_correction(
         # Vibration leads acoustic → mic lags → drop leading MIC samples.
         n_drop_total_mic_float = float(offset_s) * float(mic_fs)
         n_drop_int = int(np.floor(n_drop_total_mic_float))
-        n_drop_int = min(n_drop_int, mic_data.shape[1] - 2)
+        # Guard against shifts that would consume the whole recording.  This
+        # cannot occur under the four-gate `auto_sync_paired_recording`
+        # pipeline (`max_offset_s` caps the search at 0.5 s by default), but
+        # silent clamping here would mask bugs in any future direct caller.
+        if n_drop_int >= mic_data.shape[1] - 2:
+            raise ValueError(
+                f"sync correction would drop {n_drop_int} leading mic samples "
+                f"from a {mic_data.shape[1]}-sample stream "
+                f"(offset_s={offset_s:.4f} s, mic_fs={mic_fs} Hz); offset "
+                f"exceeds recording duration — verify the audit and the "
+                f"caller's max_offset_s / confidence_floor"
+            )
         frac_mic = n_drop_total_mic_float - n_drop_int
         mic_dropped = mic_data[:, n_drop_int:]
         if use_fractional_shift and frac_mic > 1e-9:
@@ -697,7 +710,14 @@ def apply_sync_correction(
     # offset_s < 0 → acoustic leads vibration → vib lags → drop leading VIB samples.
     n_drop_total_vib_float = abs(float(offset_s)) * float(accel_fs)
     n_drop_int = int(np.floor(n_drop_total_vib_float))
-    n_drop_int = min(n_drop_int, accel_data.shape[1] - 2)
+    if n_drop_int >= accel_data.shape[1] - 2:
+        raise ValueError(
+            f"sync correction would drop {n_drop_int} leading vibration samples "
+            f"from a {accel_data.shape[1]}-sample stream "
+            f"(offset_s={offset_s:.4f} s, accel_fs={accel_fs} Hz); offset "
+            f"exceeds recording duration — verify the audit and the caller's "
+            f"max_offset_s / confidence_floor"
+        )
     frac_vib = n_drop_total_vib_float - n_drop_int
     accel_dropped = accel_data[:, n_drop_int:]
     if use_fractional_shift and frac_vib > 1e-9:
@@ -756,13 +776,13 @@ def auto_sync_paired_recording(
     mic_fs: float,
     accel_fs: float,
     *,
-    max_offset_s: float = 0.5,
-    n_sub_segments: int = 5,
-    confidence_floor: float = 1.5,
-    drift_tolerance_s: float = 0.010,
-    min_offset_to_correct_s: float = 0.001,
-    min_envelope_kurtosis: float = 1.0,
-    use_fractional_shift: bool = True,
+    max_offset_s: float = SYNC.max_offset_s,
+    n_sub_segments: int = SYNC.n_sub_segments,
+    confidence_floor: float = SYNC.confidence_floor,
+    drift_tolerance_s: float = SYNC.drift_tolerance_s,
+    min_offset_to_correct_s: float = SYNC.min_offset_to_correct_s,
+    min_envelope_kurtosis: float = SYNC.min_envelope_kurtosis,
+    use_fractional_shift: bool = SYNC.use_fractional_shift,
 ) -> tuple[np.ndarray, np.ndarray, SyncCorrectionReport]:
     """Verify, gate, and apply cross-modal sync correction on a paired recording.
 

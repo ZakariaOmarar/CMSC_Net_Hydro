@@ -198,7 +198,6 @@ def _smoke_cfg(**overrides) -> V2SSLConfig:
         n_fft=256,
         hop_length=128,
         use_cwt=False,
-        vib_kurtosis_window=5,
         gain_jitter_db=3.0,
         channel_dropout_p=0.1,
         spec_augment_freq_mask=4,

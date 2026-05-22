@@ -14,9 +14,13 @@ runs on D1 (4 mic + 4 vib), D2 (5+5), D3 (9+4), and any future Illwerke array:
     `n_pairs` is consumed by a Set-Transformer pool in the V4 head.
 
 Both functions operate on raw waveforms (NumPy), not on V1/V2 features.
-Speed of sound: 343 m/s (acoustic), 5100 m/s (steel structure-borne) — the
-plan treats steel wave speed as a known constant; joint source-velocity
-estimation is deferred to future work.
+Speed of sound: 343 m/s (acoustic), ~ 2000 m/s (3D-printed plastic
+casing — the rig is plastic, not steel; corrected 2026-05-16).  A
+prior `C_STEEL_MS = 5100` constant was removed (2026-05-20) — it was
+physically wrong for this rig and a back-compat hazard.  Chapter 6
+reports a wave-speed sensitivity sweep (1500-2500 m/s) because plastic
+speed varies with infill, layer adhesion, and surface- vs bulk-mode
+coupling — it is a measurable, not a fixed constant.
 """
 
 from __future__ import annotations
@@ -28,7 +32,9 @@ import numpy as np
 from .localization_head import gcc_phat, srp_phat_3d
 
 C_AIR_MS = 343.0
-C_STEEL_MS = 5100.0  # group velocity of structure-borne waves in steel
+# Default structure-borne wave speed for the 3D-printed plastic rig
+# casing.  See module docstring for the correction history.
+C_PLASTIC_3DP_MS = 2000.0
 
 
 @dataclass(frozen=True)
@@ -208,7 +214,7 @@ def compute_accel_tdoa_tokens(
     accel_xyz: np.ndarray,
     fs: float,
     *,
-    c: float = C_STEEL_MS,
+    c: float = C_PLASTIC_3DP_MS,
     max_delay_seconds: float | None = None,
 ) -> np.ndarray:
     """Per-pair structure-borne TDOA features.
@@ -272,7 +278,7 @@ def compute_accel_tdoa_tokens(
 __all__ = [
     "GridSpec",
     "C_AIR_MS",
-    "C_STEEL_MS",
+    "C_PLASTIC_3DP_MS",
     "compute_srp_phat_volume",
     "compute_burst_aware_srp_phat_volume",
     "compute_accel_tdoa_tokens",

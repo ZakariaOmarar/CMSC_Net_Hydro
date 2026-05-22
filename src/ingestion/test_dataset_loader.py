@@ -1,18 +1,28 @@
-"""Unified loader for the three thesis test datasets (D1, D2, D3) and a future
+"""Unified loader for the thesis test datasets (D1–D5) and a future
 Illwerke raw drop-in.
 
 Provides:
-  - `DatasetSpec` — declarative dataset registration (root, modality counts,
-    position source, label scheme). Loaded from `configs/datasets/{id}.yaml`.
+  - `DatasetSpec` — declarative dataset registration. Mirrors
+    `src/config/dataset_registry.DatasetMetadata` and is loaded from
+    `configs/datasets/{id}.yaml` via `DatasetSpec.from_yaml(...)`.
   - `TestDatasetSegment` — one loaded recording: a `DataSegment` plus per-channel
     3-D positions and parsed labels (mode, operating condition, spatial label).
   - `TestDatasetLoader` — wraps the existing `RecordingScanner` and
     `WavVibrationAdapter`, parameterised per-dataset, plus the `PositionRegistry`.
 
 Constraint #3 (Illwerke ingestion-ready): adding a dataset is a YAML edit.
-No code changes are needed for a fourth dataset that follows the
+No code changes are needed for a new dataset that follows the
 `recorded_<sensor>[_<extra>].wav` + `vibration_<sensor>[_<extra>].csv`
-convention.
+convention AND reuses an existing `label_scheme` / `position_source` pair.
+
+**`speed{N}` is NOT an operating mode.**  The `speed{N}` tokens in D3/D4
+folder names (and the `op_condition` field they populate) are added-noise
+augmentation levels — three SNR settings used during data collection to
+test acoustic robustness.  They are NOT one of {Pump, Standstill, Turbine}.
+Treat speed only as recording-level metadata for noise-robustness ablation
+reporting; never use it to partition the healthy pool by mode.  D5 healthy
+recordings, which carry no `speed{N}` token at all, belong to the same
+cross-dataset healthy group as D3/D4 `speed{1,2,3}`.
 """
 
 from __future__ import annotations
@@ -26,7 +36,7 @@ import numpy as np
 import yaml
 
 from ..data import DataSegment
-from .adapters import WavVibrationAdapter
+from .adapters import WavVibrationAdapter, filter_vibration_csv_paths
 from .positions import PositionRegistry
 from .scanner import RecordingGroup, RecordingScanner
 
@@ -49,34 +59,105 @@ _D4_RF_PARENT_RE = re.compile(
 )
 
 
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
 @dataclass(frozen=True)
 class DatasetSpec:
-    """Declarative configuration for one dataset."""
+    """Declarative configuration for one dataset.
 
-    id: str  # "d1" | "d2" | "d3" | "d4" | "illwerke_raw"
+    Mirrors ``src/config/dataset_registry.DatasetMetadata``.  Use
+    ``DatasetSpec.from_yaml`` (resolves all paths to absolute) or
+    ``DatasetSpec.from_metadata`` (preferred — drives from the registry).
+    """
+
+    id: str
     root: Path
     n_mics: int
     n_vibrations: int
-    accel_target_sr: int  # we DO NOT downsample on the peak path; for raw, we keep the inferred ADC rate
-    position_source: str  # "default" | path to file
-    label_scheme: str  # "d1_mode" | "d2_mode_with_spatial" | "d3_speed_with_hit" | "d4_speed_with_random"
-    vibration_format: str = "peak"  # "peak" (D1/D2/D3) | "raw" (D4 raw-waveform)
+    accel_target_sr: int  # peak path: native cadence; raw path: inferred ADC rate
+    position_source: str  # enum: "default" | "d2_node_position_txt" | "d3_position_json" | "rowii"
+    label_scheme: str
+    position_path: Path | None = None  # required when position_source is path-based
+    vibration_format: str = "auto"  # "auto" | "peak" | "raw"
+    window_scales_seconds: tuple[float, ...] = ()
+    v3_window_seconds: float = 2.0
+    v4_window_seconds: float = 2.0
+    accel_sr_overrides: dict[str, int] = field(default_factory=dict)
+    aliases: tuple[str, ...] = ()
     extra: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_yaml(cls, path: Path) -> "DatasetSpec":
-        with Path(path).open("r", encoding="utf-8") as fh:
+        """Load and resolve all paths to absolute (REPO_ROOT-prefixed)."""
+        path = Path(path)
+        with path.open("r", encoding="utf-8") as fh:
             data = yaml.safe_load(fh)
+
+        def _resolve(p: str | None) -> Path | None:
+            if p in (None, "null", ""):
+                return None
+            p = Path(p)
+            return p if p.is_absolute() else (_REPO_ROOT / p).resolve()
+
+        position_path_raw = data.get("position_path")
+        # Backwards compat: older YAMLs put the path string in `position_source`
+        # itself.  If `position_source` looks like a path and `position_path`
+        # is absent, treat the former as the latter and re-derive the enum.
+        position_source = str(data["position_source"])
+        if position_path_raw is None and position_source not in (
+            "default",
+            "rowii",
+            "d2_node_position_txt",
+            "d3_position_json",
+        ):
+            position_path_raw = position_source
+            if position_source.endswith(".json"):
+                position_source = "d3_position_json"
+            elif position_source.endswith(".txt"):
+                position_source = "d2_node_position_txt"
+
+        window_scales = tuple(float(x) for x in data.get("window_scales_seconds", ()))
+
         return cls(
             id=str(data["id"]),
-            root=Path(data["root"]),
+            root=_resolve(str(data["root"])),
             n_mics=int(data["n_mics"]),
             n_vibrations=int(data["n_vibrations"]),
             accel_target_sr=int(data["accel_target_sr"]),
-            position_source=str(data["position_source"]),
+            position_source=position_source,
+            position_path=_resolve(position_path_raw),
             label_scheme=str(data["label_scheme"]),
-            vibration_format=str(data.get("vibration_format", "peak")),
+            vibration_format=str(data.get("vibration_format", "auto")),
+            window_scales_seconds=window_scales,
+            v3_window_seconds=float(data.get("v3_window_seconds", 2.0)),
+            v4_window_seconds=float(data.get("v4_window_seconds", 2.0)),
+            accel_sr_overrides={
+                str(k): int(v) for k, v in (data.get("accel_sr_overrides") or {}).items()
+            },
+            aliases=tuple(data.get("aliases", []) or []),
             extra=dict(data.get("extra", {})),
+        )
+
+    @classmethod
+    def from_metadata(cls, meta) -> "DatasetSpec":
+        """Build from a ``DatasetMetadata`` returned by the registry."""
+        return cls(
+            id=meta.id,
+            root=meta.root,
+            n_mics=meta.n_mics,
+            n_vibrations=meta.n_vibrations,
+            accel_target_sr=meta.accel_target_sr,
+            position_source=meta.position_source,
+            position_path=meta.position_path,
+            label_scheme=meta.label_scheme,
+            vibration_format=meta.vibration_format,
+            window_scales_seconds=meta.window_scales_seconds,
+            v3_window_seconds=meta.v3_window_seconds,
+            v4_window_seconds=meta.v4_window_seconds,
+            accel_sr_overrides=dict(meta.accel_sr_overrides),
+            aliases=meta.aliases,
+            extra=dict(meta.extra),
         )
 
 
@@ -123,20 +204,30 @@ class TestDatasetSegment:
 
 
 class TestDatasetLoader:
-    """Load all `TestDatasetSegment`s for one dataset spec."""
+    """Load all `TestDatasetSegment`s for one dataset spec.
+
+    Pass ``sync_correct=True`` (default False) to apply the four-gate
+    cross-modal sync correction at load time — produces segments whose
+    mic and vibration streams are aligned to within
+    ``1 / max(mic_sr, accel_sr)`` seconds.  Off by default for parity
+    with the historical V0 baseline runs published in `results/`; turn
+    on for any new training / eval pipeline that wants sync-aligned
+    segments out of the box.
+    """
 
     __test__ = False  # not a pytest test class
 
-    def __init__(self, spec: DatasetSpec) -> None:
+    def __init__(
+        self,
+        spec: DatasetSpec,
+        *,
+        sync_correct: bool = False,
+        sync_correct_kwargs: dict | None = None,
+    ) -> None:
         self._spec = spec
-        if spec.position_source == "default":
-            self._registry = PositionRegistry.for_dataset(spec.id)
-        elif spec.position_source == "rowii":
-            self._registry = PositionRegistry.for_dataset("illwerke")
-        else:
-            self._registry = PositionRegistry.for_dataset(
-                spec.id, path=Path(spec.position_source)
-            )
+        self._registry = PositionRegistry.from_source(
+            spec.position_source, position_path=spec.position_path
+        )
 
         # Per-dataset, allow exactly the configured channel counts.
         self._adapter = WavVibrationAdapter(
@@ -145,6 +236,9 @@ class TestDatasetLoader:
             allowed_mic_counts=(spec.n_mics,),
             accel_target_sr=spec.accel_target_sr,
             vibration_format=spec.vibration_format,
+            accel_sr_overrides=spec.accel_sr_overrides,
+            sync_correct=sync_correct,
+            sync_correct_kwargs=sync_correct_kwargs,
         )
         self._scanner = RecordingScanner(root_dir=spec.root)
 
@@ -214,15 +308,12 @@ class TestDatasetLoader:
         # with duplicate sensor IDs after `raw_` is stripped) while the
         # adapter only loads 4 channels — collapsing the position registry
         # alignment.  Filtering here keeps `vib_ids` row-aligned with the
-        # adapter's `accel_data`.
-        if self._spec.vibration_format == "raw":
-            filtered_vib_files = tuple(
-                p for p in group.vibration_files if p.stem.startswith("vibration_raw_")
-            )
-        else:
-            filtered_vib_files = tuple(
-                p for p in group.vibration_files if not p.stem.startswith("vibration_raw_")
-            )
+        # adapter's `accel_data`.  The partition predicate lives in
+        # `adapters.filter_vibration_csv_paths` to ensure both call sites
+        # always agree on what "raw" vs "peak" means.
+        filtered_vib_files = filter_vibration_csv_paths(
+            group.vibration_files, self._spec.vibration_format
+        )
 
         seg = self._adapter.read_recording_files(
             recording_dir=group.source_dir,
@@ -358,6 +449,20 @@ def _parse_labels(
             return None, m.group("speed"), None, True  # spatial filled by orchestrator
         if _D3_SPEED_RE.match(folder):
             return None, folder, None, False
+        return None, None, None, False
+
+    if scheme == "d5_healthy_or_knock":
+        # D5 layout: flat `healthy/` (no speed/context split) + `knock/(x, y, z)/`
+        # subfolders.  Mode is unknown (same as D3/D4 — campaign protocol
+        # doesn't label which of Pump/Standstill/Turbine was running), so the
+        # K-means+Hungarian pipeline discovers it from c_t at inference time.
+        m_pos = _D4_POS_RE.match(folder)
+        if m_pos is not None:
+            xyz_cm = (float(m_pos.group(1)), float(m_pos.group(2)), float(m_pos.group(3)))
+            xyz_m = (xyz_cm[0] / 100.0, xyz_cm[1] / 100.0, xyz_cm[2] / 100.0)
+            return None, None, xyz_m, True
+        if folder == "healthy" or parent == "healthy":
+            return None, None, None, False
         return None, None, None, False
 
     if scheme == "d4_speed_with_random":

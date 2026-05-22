@@ -18,21 +18,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _spec(name: str) -> DatasetSpec:
-    spec = DatasetSpec.from_yaml(REPO_ROOT / "configs" / "datasets" / f"{name}.yaml")
-    return DatasetSpec(
-        id=spec.id,
-        root=REPO_ROOT / spec.root,
-        n_mics=spec.n_mics,
-        n_vibrations=spec.n_vibrations,
-        accel_target_sr=spec.accel_target_sr,
-        position_source=(
-            REPO_ROOT / spec.position_source
-            if spec.position_source not in ("default", "rowii")
-            else spec.position_source
-        ),
-        label_scheme=spec.label_scheme,
-        extra=spec.extra,
-    )
+    # `DatasetSpec.from_yaml` resolves all paths to absolute — no reconstruction needed.
+    return DatasetSpec.from_yaml(REPO_ROOT / "configs" / "datasets" / f"{name}.yaml")
 
 
 def test_d1_loads_with_synthetic_geometry() -> None:
@@ -89,7 +76,7 @@ def test_d3_loads_with_speed_labels_and_hit() -> None:
 
 
 def test_position_registry_is_consistent_across_lookups() -> None:
-    reg = PositionRegistry.for_dataset("d1")
+    reg = PositionRegistry.from_source("default")
     p1 = reg.lookup_mic("B")
     p2 = reg.lookup_mic("B")
     assert np.allclose(p1, p2)
@@ -100,8 +87,9 @@ def test_position_registry_is_consistent_across_lookups() -> None:
 
 def test_position_registry_d2_mixed_colons() -> None:
     """D2's node_position.txt uses a mix of ASCII and full-width colons."""
-    reg = PositionRegistry.for_dataset(
-        "d2", path=REPO_ROOT / "data" / "second_test_dataset" / "node_position.txt"
+    reg = PositionRegistry.from_source(
+        "d2_node_position_txt",
+        position_path=REPO_ROOT / "data" / "second_test_dataset" / "node_position.txt",
     )
     # Vibration A and microphone D should both parse.
     pos_a = reg.lookup_vibration("A")
@@ -112,8 +100,9 @@ def test_position_registry_d2_mixed_colons() -> None:
 
 
 def test_position_registry_d3_alias_handling() -> None:
-    reg = PositionRegistry.for_dataset(
-        "d3", path=REPO_ROOT / "data" / "third_test_dataset" / "position.json"
+    reg = PositionRegistry.from_source(
+        "d3_position_json",
+        position_path=REPO_ROOT / "data" / "third_test_dataset" / "position.json",
     )
     # File has "Dl"; loader extracts "D_l" from filename — both must resolve.
     p1 = reg.lookup_mic("Dl")

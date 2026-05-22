@@ -9,6 +9,7 @@ from .constants import (
     SENSOR_LAYOUT,
     TURBINE_LEVEL_Z_M,
 )
+from .device import resolve_device
 
 __all__ = [
     "ACCEL_COUNT",
@@ -18,4 +19,5 @@ __all__ = [
     "MIC_SAMPLE_RATE",
     "SENSOR_LAYOUT",
     "TURBINE_LEVEL_Z_M",
+    "resolve_device",
 ]

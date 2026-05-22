@@ -42,7 +42,7 @@ lr: 1.0e-3
 weight_decay: 1.0e-5
 val_ratio: 0.3
 seed: 42
-device: cpu
+device: auto
 
 window_seconds: 2.0
 window_stride_seconds: 1.0

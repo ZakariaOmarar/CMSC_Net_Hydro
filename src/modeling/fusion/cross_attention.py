@@ -53,5 +53,32 @@ class BidirectionalCrossAttention(nn.Module):
         )
         return fused_acoustic, fused_vibration
 
+    def forward_with_attn(
+        self,
+        acoustic_tokens: torch.Tensor,
+        vibration_tokens: torch.Tensor,
+        acoustic_key_padding_mask: torch.Tensor | None = None,
+        vibration_key_padding_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Diagnostic forward — returns the cross-attention weights in both
+        directions alongside the fused token sequences.
+
+        Returns ``(fused_acoustic, fused_vibration, attn_a_from_v, attn_v_from_a)``
+        where each attention tensor has shape ``(B, N_q, N_kv)`` (head-averaged).
+        Used by `src/modeling/eval/fusion_forensics.py` — the regular `forward`
+        path is unchanged and remains the training/inference entry point.
+        """
+        if acoustic_tokens.shape[-1] != vibration_tokens.shape[-1]:
+            raise ValueError(
+                "BidirectionalCrossAttention requires both modalities to share embed_dim"
+            )
+        fused_acoustic, attn_a_from_v = self.a_from_v.forward_with_attn(
+            acoustic_tokens, vibration_tokens, key_padding_mask=vibration_key_padding_mask
+        )
+        fused_vibration, attn_v_from_a = self.v_from_a.forward_with_attn(
+            vibration_tokens, acoustic_tokens, key_padding_mask=acoustic_key_padding_mask
+        )
+        return fused_acoustic, fused_vibration, attn_a_from_v, attn_v_from_a
+
 
 __all__ = ["BidirectionalCrossAttention"]

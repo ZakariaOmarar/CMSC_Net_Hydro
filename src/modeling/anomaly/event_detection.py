@@ -285,6 +285,7 @@ def sliding_window_v3_inference(
     import torch
     import torch.utils.data as tud
 
+    from ...config import resolve_device
     from ..context.v2_ssl import (
         V2SSLConfig,
         _PairedGroupedBatchSampler,
@@ -313,7 +314,7 @@ def sliding_window_v3_inference(
     )
     loader = tud.DataLoader(ds, batch_sampler=sampler, collate_fn=_collate)
 
-    dev = torch.device(device)
+    dev = resolve_device(device)
     x, c, _ = _extract_xc(v2_encoder, loader, dev)
     with torch.no_grad():
         scores = flow.anomaly_score(x.to(dev), c.to(dev)).cpu().numpy().astype(np.float64)

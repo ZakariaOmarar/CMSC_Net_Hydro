@@ -8,7 +8,7 @@ add the V4 anomaly-gated learning-based localization head.
 
 from .v4_features import (
     C_AIR_MS,
-    C_STEEL_MS,
+    C_PLASTIC_3DP_MS,
     GridSpec,
     compute_accel_tdoa_tokens,
     compute_burst_aware_srp_phat_volume,
@@ -39,7 +39,7 @@ from .v4_trainer import (
 __all__ = [
     "AlertBurst",
     "C_AIR_MS",
-    "C_STEEL_MS",
+    "C_PLASTIC_3DP_MS",
     "FiLMResidualHead",
     "GridSpec",
     "HeatmapCross3D",

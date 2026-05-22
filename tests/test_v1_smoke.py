@@ -234,7 +234,6 @@ def test_train_v1_vibration_end_to_end() -> None:
         epochs=2,
         batch_size=8,
         val_ratio=0.5,
-        vib_kurtosis_window=5,
         gain_jitter_db=3.0,
         channel_dropout_p=0.1,
         seed=0,

@@ -21,6 +21,13 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
+from ...config.dataset_registry import REGISTRY
+
+
+def _default_n_datasets() -> int:
+    """Dataset embedding table size = number of canonical ids in the registry."""
+    return len(REGISTRY)
+
 
 class MAB(nn.Module):
     """Multi-head Attention Block: pre-norm transformer block with cross-attention.
@@ -61,6 +68,31 @@ class MAB(nn.Module):
         x = q + attn_out
         x = x + self.ff(self.norm_ff(x))
         return x
+
+    def forward_with_attn(
+        self,
+        q: torch.Tensor,
+        kv: torch.Tensor,
+        key_padding_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Diagnostic forward — returns (output, attention_weights).
+
+        Attention weights are averaged over heads by `MultiheadAttention` when
+        `average_attn_weights=True` (the default).  Shape: ``(B, N_q, N_kv)``.
+        Used only by `src/modeling/eval/fusion_forensics.py`; the regular
+        training forward path uses `need_weights=False` for speed.
+        """
+        q_n = self.norm_q(q)
+        kv_n = self.norm_kv(kv)
+        attn_out, attn_weights = self.attn(
+            q_n, kv_n, kv_n,
+            key_padding_mask=key_padding_mask,
+            need_weights=True,
+            average_attn_weights=True,
+        )
+        x = q + attn_out
+        x = x + self.ff(self.norm_ff(x))
+        return x, attn_weights
 
 
 class PMA(nn.Module):
@@ -106,11 +138,13 @@ class ChannelTokenEnricher(nn.Module):
         feature_dim: int,
         embed_dim: int = 128,
         n_modalities: int = 2,
-        n_datasets: int = 5,
+        n_datasets: int | None = None,
         modality_emb_dim: int = 16,
         dataset_emb_dim: int = 16,
     ) -> None:
         super().__init__()
+        if n_datasets is None:
+            n_datasets = _default_n_datasets()
         self.modality_embed = nn.Embedding(n_modalities, modality_emb_dim)
         self.dataset_embed = nn.Embedding(n_datasets, dataset_emb_dim)
         in_dim = feature_dim + 3 + modality_emb_dim + dataset_emb_dim

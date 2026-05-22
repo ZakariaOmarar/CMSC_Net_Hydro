@@ -7,6 +7,20 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+# NOTE on the `sensor` capture group: `[^_]+` matches a single underscore-free
+# token.  For D3 stereo filenames like `recorded_D_l_Pump.wav` this matches
+# `sensor="D"` and `recording="l_Pump"` — the `D_l` stereo-channel ID is NOT
+# preserved by the scanner.  This is harmless in practice because:
+#   - The scanner only uses `sensor` for flat-layout *recording grouping*, where
+#     the per-recording sensor identity is rebuilt downstream by
+#     `test_dataset_loader._sensor_id` from the full filename.
+#   - All four current campaigns (D1-D4) ship as bundled directories (one
+#     folder per recording with all sensor files inside), so the flat-layout
+#     code path is exercised only by `tests/unit/test_ingestion_dual_layout.py`
+#     with single-token sensor names ("B", "C", "D", "E").
+# If a future campaign uses flat-layout with multi-token sensor names, replace
+# the `sensor` group with a layout-aware split that recognises the trailing
+# mode token (matching `_sensor_id`'s convention).
 _RECORDED_RE = re.compile(
     r"^recorded_(?P<sensor>[^_]+)_(?P<recording>.+)\.wav$", re.IGNORECASE
 )

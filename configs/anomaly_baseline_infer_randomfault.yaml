@@ -5,4 +5,4 @@ window_s: 5.0
 overlap: 0.5
 mode_artifact_path: results/ocsvm/mode/mode_classifier.pt
 mode_consistency_window: 5
-device: cpu
+device: auto

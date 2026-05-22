@@ -20,6 +20,7 @@ import torch
 import torch.nn as nn
 import torch.utils.data as tud
 
+from ...config import resolve_device
 from ...features.audio_spectral import compute_log_mel_spectrogram
 from ...ingestion.test_dataset_loader import (
     DatasetSpec,
@@ -54,14 +55,86 @@ class V0Config:
     healthy_modes: tuple[str, ...] = ("Pump", "Standstill", "Turbine", "Healthy")
     anomaly_modes: tuple[str, ...] = ("RandomFault",)
     seed: int = 42
-    device: str = "cpu"
+    device: str = "auto"
+
+    # R2.4 / 2026-05-16 — when provided, OVERRIDES ``n_mels`` as the LSTM
+    # input feature dimension.  Used by the vibration-only V0 baseline,
+    # which feeds 3-channel ``[amplitude, envelope, kurtosis]`` features
+    # to the same trainer.  ``None`` (default) preserves the acoustic
+    # behaviour: input dim = ``n_mels``.
+    feature_dim: int | None = None
+
+    # Vibration extractor parameters (only consulted when the caller passes
+    # ``extract_vibration_temporal_windows`` as the extract_fn).  These
+    # mirror `compute_vibration_input_stack`'s physical-time knobs; the
+    # channel-2 statistic auto-selects between excess kurtosis (>=31
+    # samples/window) and crest factor based on the segment's
+    # accel_sample_rate.
+    vib_kurtosis_window_seconds: float = 0.10
+    vib_min_kurtosis_samples: int = 31
+    vib_crest_factor_window_seconds: float = 1.0
+    vib_min_crest_factor_samples: int = 4
 
     extra: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def effective_feature_dim(self) -> int:
+        return self.feature_dim if self.feature_dim is not None else self.n_mels
 
 
 # ---------------------------------------------------------------------------
 # Feature extraction → sliding windows
 # ---------------------------------------------------------------------------
+
+
+def extract_vibration_temporal_windows(
+    segment: TestDatasetSegment,
+    cfg: V0Config,
+    *,
+    pool: str = "mean",
+) -> np.ndarray:
+    """V0 vibration-only feature extractor — mirror of `extract_log_mel_windows`.
+
+    Computes the three-channel ``[amplitude, envelope, kurtosis]`` stack
+    via :func:`src.features.vibration_temporal.compute_vibration_input_stack`,
+    pools across accelerometer channels (mean/max), slides windows over the
+    pooled time-series.  Returns ``(n_windows, frames_per_window, 3)``.
+
+    Window cadence is computed at the *accelerometer* sample rate (slower
+    than the acoustic ``mic_sample_rate``) so the window seconds knob means
+    the same wall-clock duration as the acoustic extractor.
+    """
+    from ...features.vibration_temporal import compute_vibration_input_stack
+
+    fs_v = float(segment.segment.accel_sample_rate)
+    if fs_v <= 0:
+        return np.zeros((0, 1, 3), dtype=np.float32)
+    stack = compute_vibration_input_stack(
+        segment.segment.accel_data,
+        sample_rate=fs_v,
+        kurtosis_window_seconds=cfg.vib_kurtosis_window_seconds,
+        min_kurtosis_samples=cfg.vib_min_kurtosis_samples,
+        crest_factor_window_seconds=cfg.vib_crest_factor_window_seconds,
+        min_crest_factor_samples=cfg.vib_min_crest_factor_samples,
+    )  # (n_accel, 3, T_vib)
+    if pool == "mean":
+        pooled = stack.mean(axis=0)  # (3, T_vib)
+    elif pool == "max":
+        pooled = stack.max(axis=0)
+    else:
+        raise ValueError(f"unknown pool {pool!r}")
+
+    frames_per_window = max(1, int(round(cfg.window_seconds * fs_v)))
+    step = max(1, int(round(frames_per_window * (1.0 - cfg.window_overlap))))
+    T_vib = pooled.shape[1]
+    if T_vib < frames_per_window:
+        return np.zeros((0, frames_per_window, 3), dtype=np.float32)
+    windows = []
+    for start in range(0, T_vib - frames_per_window + 1, step):
+        windows.append(pooled[:, start : start + frames_per_window].T)  # (T, 3)
+    if not windows:
+        return np.zeros((0, frames_per_window, 3), dtype=np.float32)
+    return np.stack(windows, axis=0).astype(np.float32)
 
 
 def extract_log_mel_windows(
@@ -79,13 +152,19 @@ def extract_log_mel_windows(
     baseline; the channel-aware fusion arrives in V1+.
     """
     fs = int(segment.segment.mic_sample_rate)
+    # V0 baselines deliberately use `cfg.hop_length=512` (coarse 31.25 Hz
+    # acoustic frame rate) for fast baseline computation.  They do NOT go
+    # through V2's cross-attention, so cross-modal grid alignment (the
+    # registry's per-dataset hop, see `hop_for_dataset` in v2_ssl) does not
+    # apply here.  Keep V0 on its own STFT params.
+    hop = cfg.hop_length
     mels = []
     for ch in range(segment.segment.n_mic_channels):
         m = compute_log_mel_spectrogram(
             segment.segment.mic_data[ch],
             fs=fs,
             n_fft=cfg.n_fft,
-            hop_length=cfg.hop_length,
+            hop_length=hop,
             n_mels=cfg.n_mels,
         )
         mels.append(m)
@@ -98,7 +177,7 @@ def extract_log_mel_windows(
         raise ValueError(f"unknown pool {pool!r}")
     # pooled: (n_mels, n_frames)
 
-    frames_per_window = max(1, int(round(cfg.window_seconds * fs / cfg.hop_length)))
+    frames_per_window = max(1, int(round(cfg.window_seconds * fs / hop)))
     step = max(1, int(round(frames_per_window * (1.0 - cfg.window_overlap))))
     n_frames = pooled.shape[1]
     if n_frames < frames_per_window:
@@ -130,8 +209,9 @@ class LSTMAutoencoderV0(nn.Module):
     def __init__(self, cfg: V0Config) -> None:
         super().__init__()
         self.cfg = cfg
+        in_dim = cfg.effective_feature_dim
         self.encoder = nn.LSTM(
-            input_size=cfg.n_mels,
+            input_size=in_dim,
             hidden_size=cfg.hidden_dim,
             num_layers=cfg.n_layers,
             batch_first=True,
@@ -146,7 +226,7 @@ class LSTMAutoencoderV0(nn.Module):
             batch_first=True,
             dropout=cfg.dropout if cfg.n_layers > 1 else 0.0,
         )
-        self.output = nn.Linear(cfg.hidden_dim, cfg.n_mels)
+        self.output = nn.Linear(cfg.hidden_dim, in_dim)
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         _, (h_n, _) = self.encoder(x)  # h_n: (n_layers, B, hidden)
@@ -183,28 +263,33 @@ class TrainResult:
 
 
 def _gather_healthy_windows(
-    segments: Iterable[TestDatasetSegment], cfg: V0Config
+    segments: Iterable[TestDatasetSegment],
+    cfg: V0Config,
+    extract_fn=extract_log_mel_windows,
 ) -> tuple[np.ndarray, list[str]]:
     """Collect (n_windows, T, F) plus the recording id of each window.
+
+    ``extract_fn`` (added in R2.4): callable ``(segment, cfg) -> ndarray``
+    that yields the per-segment windows.  Default is `extract_log_mel_windows`
+    (V0 acoustic baseline).  Pass `extract_vibration_temporal_windows` for
+    the V0 vibration baseline.
 
     Healthy = `is_anomaly=False` (covers D1/D2 mode folders **and** D3/D4
     speed-bucket recordings whose mode is unrecorded — both contribute
     valid healthy training material for the V0 reference model).
-    The legacy `cfg.healthy_modes` filter is no longer used since it
-    excluded D3/D4 (which now carry `mode_label = None`).
     """
     all_windows: list[np.ndarray] = []
     rec_ids_per_window: list[str] = []
     for s in segments:
         if s.is_anomaly:
             continue
-        w = extract_log_mel_windows(s, cfg)
+        w = extract_fn(s, cfg)
         if w.shape[0] == 0:
             continue
         all_windows.append(w)
         rec_ids_per_window.extend([s.recording_id] * w.shape[0])
     if not all_windows:
-        return np.zeros((0, 0, cfg.n_mels), dtype=np.float32), []
+        return np.zeros((0, 0, cfg.effective_feature_dim), dtype=np.float32), []
     return np.concatenate(all_windows, axis=0), rec_ids_per_window
 
 
@@ -224,15 +309,25 @@ def _split_by_recording(
 
 
 def train_v0_lstm_ae(
-    loader: TestDatasetLoader, cfg: V0Config | None = None
+    loader: TestDatasetLoader,
+    cfg: V0Config | None = None,
+    extract_fn=extract_log_mel_windows,
 ) -> TrainResult:
-    """Train the V0 LSTM-AE on healthy recordings of one dataset."""
+    """Train the V0 LSTM-AE on healthy recordings of one dataset.
+
+    ``extract_fn`` (added in R2.4): per-segment feature extractor.  Default
+    `extract_log_mel_windows` is the V0 acoustic baseline; passing
+    `extract_vibration_temporal_windows` gives the V0 vibration baseline
+    using the same trainer + model.  The model's input dim follows
+    ``cfg.effective_feature_dim`` so the caller must set
+    ``cfg.feature_dim = 3`` when using the vibration extractor.
+    """
     cfg = cfg or V0Config()
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
 
     segments = loader.list_segments()
-    windows, rec_ids = _gather_healthy_windows(segments, cfg)
+    windows, rec_ids = _gather_healthy_windows(segments, cfg, extract_fn=extract_fn)
     if windows.shape[0] == 0:
         raise RuntimeError("no healthy windows found for V0 training")
 
@@ -249,7 +344,7 @@ def train_v0_lstm_ae(
     train_x = (train_x - mean) / std
     val_x = (val_x - mean) / std
 
-    device = torch.device(cfg.device)
+    device = resolve_device(cfg.device)
     model = LSTMAutoencoderV0(cfg).to(device)
     optim = torch.optim.AdamW(
         model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay

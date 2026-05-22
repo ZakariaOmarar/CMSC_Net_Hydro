@@ -47,6 +47,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from ...config import resolve_device
 from ..context.v2_fusion import V2FusionEncoder
 from ..eval import percentile_bootstrap_ci
 from ..localization import (
@@ -270,7 +271,7 @@ def _train_v4_with_explicit_split(
 
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
-    device = torch.device(cfg.device)
+    device = resolve_device(cfg.device)
 
     if not train_samples or not val_samples:
         raise RuntimeError("LOOCV fold: empty train or val samples")

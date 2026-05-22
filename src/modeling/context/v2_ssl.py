@@ -33,7 +33,30 @@ import torch.nn.functional as F
 import torch.utils.data as tud
 from tqdm.auto import tqdm
 
+from ...config import resolve_device
+from ...config.architecture import (
+    ACOUSTIC_CWT,
+    ACOUSTIC_FEATURES,
+    ENCODER,
+    VIBRATION_FEATURES,
+    WINDOWING,
+)
+from ...config.dataset_registry import REGISTRY
 from ...features.audio_spectral import compute_encoder_input_stack, compute_log_mel_spectrogram
+
+
+def _registry_window_scales() -> dict[str, tuple[float, ...]]:
+    """Per-dataset multi-scale window cadence sourced from the registry."""
+    return {m.id: m.window_scales_seconds for m in REGISTRY}
+
+
+# Note: `hop_for_dataset` removed 2026-05-21 after the empirical grid sweep
+# (scripts/analyze_hop_length_full_grid.py + chapter 3 §3.4.2) found that
+# hop_length contributes < 0.005 ROC AUC across the [32, 4096] range once
+# (n_fft, n_mels) are set correctly.  The previous per-dataset hop plumbing
+# was based on a "cross-modal alignment" intuition that the empirical test
+# refuted.  A single global hop_length=2048 (from ACOUSTIC_FEATURES) is now
+# the architectural choice on all datasets.
 from ...features.vibration_temporal import compute_vibration_input_stack
 from ...ingestion.test_dataset_loader import TestDatasetLoader, TestDatasetSegment
 from .cluster_metric import cluster_purity_and_nmi
@@ -47,17 +70,34 @@ from .v2_fusion import V2FusionEncoder
 
 @dataclass(frozen=True)
 class V2SSLConfig:
-    # Window cadence (wall-clock seconds)
-    window_seconds: float = 2.0
-    window_stride_seconds: float = 1.0
+    # Defaults sourced from `src.config.architecture` — change there, not here.
+
+    # Window cadence (wall-clock seconds).  The legacy single-scale knobs
+    # remain authoritative when `window_scales_seconds` is the empty tuple
+    # (byte-equivalent to pre-2026-05-19).
+    window_seconds: float = WINDOWING.window_seconds
+    window_stride_seconds: float = WINDOWING.window_stride_seconds
+
+    # Multi-scale window cadence (see `V1SSLConfig` for the full
+    # justification).  When the per-dataset dict is populated, each batch
+    # is single-dataset × single-scale via the grouped batch sampler's
+    # `(channel_count, n_frames_ac, n_frames_vib)` bucket key.  Both
+    # `n_ac` and `n_vib` are computed from the SAME per-batch scale so
+    # the wall-clock pairing in `_PairedWindowedDataset` is preserved.
+    window_scales_seconds: tuple[float, ...] = ()
+    window_scales_seconds_per_dataset: dict[str, tuple[float, ...]] = field(
+        default_factory=_registry_window_scales
+    )
+    window_scale_strategy: Literal["fixed", "uniform"] = WINDOWING.window_scale_strategy
+    window_stride_ratio: float = WINDOWING.window_stride_ratio
 
     # Encoder dims (must match V1 checkpoints when loaded)
-    feature_dim: int = 128
-    embed_dim: int = 128
-    n_heads: int = 4
-    proj_dim: int = 64
+    feature_dim: int = ENCODER.feature_dim
+    embed_dim: int = ENCODER.embed_dim
+    n_heads: int = ENCODER.n_heads
+    proj_dim: int = ENCODER.proj_dim
 
-    # Training
+    # Training schedule — per-experiment, not centralised.
     epochs: int = 30
     batch_size: int = 32
     lr: float = 1e-3
@@ -66,10 +106,10 @@ class V2SSLConfig:
     val_ratio: float = 0.3
 
     # Acoustic features
-    n_mels: int = 64
-    n_fft: int = 1024
-    hop_length: int = 512
-    cwt_n_scales: int = 64
+    n_mels: int = ACOUSTIC_FEATURES.n_mels
+    n_fft: int = ACOUSTIC_FEATURES.n_fft
+    hop_length: int = ACOUSTIC_FEATURES.hop_length
+    cwt_n_scales: int = ACOUSTIC_CWT.n_scales
     use_cwt: bool = True
     # F4 toggle — see `V1SSLConfig.standardize_acoustic`.  Must match the
     # V1 setting used to pretrain the inherited encoder weights, otherwise
@@ -77,19 +117,30 @@ class V2SSLConfig:
     # was never trained on.  Default False (F4 found not load-bearing).
     standardize_acoustic: bool = False
 
-    # Vibration features
-    vib_kurtosis_window: int = 5
+    # Vibration features — physical-time window with per-dataset
+    # channel-2 statistic (kurtosis vs crest factor); see
+    # `compute_vibration_input_stack` for the justification.
+    vib_kurtosis_window_seconds: float = VIBRATION_FEATURES.kurtosis_window_seconds
+    vib_min_kurtosis_samples: int = VIBRATION_FEATURES.min_kurtosis_samples
+    vib_crest_factor_window_seconds: float = VIBRATION_FEATURES.crest_factor_window_seconds
+    vib_min_crest_factor_samples: int = VIBRATION_FEATURES.min_crest_factor_samples
     # Vibration amplitude + envelope z-score — see
     # `V1SSLConfig.standardize_vibration`.
     standardize_vibration: bool = True
 
-    # Augmentations (feature space)
+    # R1a — Acoustic2DCNN channel-width multiplier; must match the V1 value
+    # used to pretrain the inherited V1-acoustic weights or
+    # `load_v1_weights(strict=True)` will fail.  See
+    # `V1SSLConfig.acoustic_cnn_width_mult`.
+    acoustic_cnn_width_mult: int = ENCODER.acoustic_cnn_width_mult
+
+    # Augmentations (feature space) — per-experiment knobs.
     gain_jitter_db: float = 6.0
     channel_dropout_p: float = 0.2
     spec_augment_freq_mask: int = 6
     spec_augment_time_mask: int = 8
 
-    # Latent Masked Modeling
+    # Latent Masked Modeling — per-experiment knobs.
     lmm_mask_p: float = 0.3
     lmm_weight: float = 1.0
 
@@ -104,36 +155,29 @@ class V2SSLConfig:
     # The legacy `modality_dropout_p` field still exists for back-compat:
     # when both new fields are 0.0 it falls back to the symmetric 50/50
     # coin-flip with that probability.
-    modality_dropout_p: float = 0.0  # legacy fallback (symmetric)
+    # Modality dropout — asymmetric: vibration dropped 50 % to stop the
+    # fusion block from diluting the dominant acoustic mode-discriminator.
+    modality_dropout_p: float = 0.0  # legacy symmetric fallback
     acoustic_dropout_p: float = 0.0
     vibration_dropout_p: float = 0.5
 
-    # Cross-modal alignment (CMA) — NT-Xent between per-modality PMA summaries
-    # of the same window before cross-attention.  Encourages a shared embedding
-    # space for acoustic and vibration so the cross-attention block can extract
-    # joint information without destroying the per-modality signal.
-    cma_weight: float = 0.0  # 0 = disabled (vanilla V2)
+    # Cross-modal alignment (CMA) — NT-Xent between per-modality PMA
+    # summaries.  R1c publication run uses cma_weight = 0.5.
+    cma_weight: float = 0.0
     cma_temperature: float = 0.1
 
     # Context-aggregation mode for c_t — see V2FusionEncoder.ContextMode.
-    #   joint_pma : PMA over [fused_a; fused_v]                    (default V2)
-    #   skip      : MLP([PMA(joint); a_summary; v_summary])        (skip-connection)
-    #   dual_pma  : MLP([PMA_a(fused_a); PMA_v(fused_v)])          (independent PMAs)
     context_mode: str = "joint_pma"
 
-    # Number of learned PMA seed queries in the V2 context pool.  Each
-    # seed produces one summary vector; the seeds are mean-pooled into a
-    # single c_t.  Increasing from 1 → 2 (the default) lets the pool
-    # learn two complementary aspects of the fused-token sequence at no
-    # downstream c_dim cost.  See Set Transformer §3.2 (Lee et al., 2019).
-    num_context_seeds: int = 2
+    # Number of learned PMA seeds in the V2 joint-context pool — the
+    # ARCHITECTURAL choice (Set Transformer §3.2, Lee et al. ICML 2019).
+    num_context_seeds: int = ENCODER.num_context_seeds
 
     # Ablation A1 — drop vibration branch (zero its features at the input)
     drop_vibration: bool = False
 
-    # Labels — healthy operating modes only.  RandomFault is anomaly data and
-    # must not enter SSL training (label-leakage invariant) or the cluster-
-    # purity eval (which uses K=3 against {Pump, Standstill, Turbine}).
+    # Labels — healthy operating modes only.  RandomFault must not enter
+    # SSL training (label-leakage invariant).
     healthy_modes: tuple[str, ...] = (
         "Pump",
         "Standstill",
@@ -143,18 +187,14 @@ class V2SSLConfig:
 
     # System
     seed: int = 42
-    device: str = "cpu"
+    device: str = "auto"
 
     extra: dict = field(default_factory=dict)
 
 
-_DATASET_INDEX = {"d1": 0, "d2": 1, "d3": 2, "d4": 3, "illwerke_raw": 4, "illwerke": 4}
-
-
 def _dataset_idx(dataset_id: str) -> int:
-    if dataset_id not in _DATASET_INDEX:
-        raise KeyError(f"unknown dataset_id {dataset_id!r}")
-    return _DATASET_INDEX[dataset_id]
+    """Registry-driven dataset index for embedding lookups.  See v1_ssl._dataset_idx."""
+    return REGISTRY.index_of(dataset_id)
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +213,7 @@ class _PairedSegment:
     vibration_xyz: np.ndarray  # (n_vib, 3)
     vibration_fs: float
     dataset_idx: int
+    dataset_id: str  # canonical string id, used to resolve per-dataset scales
     mode_label: str
     recording_id: str
     source_dir: str
@@ -181,7 +222,8 @@ class _PairedSegment:
 def _precompute_paired(
     s: TestDatasetSegment, cfg: V2SSLConfig
 ) -> _PairedSegment | None:
-    # Acoustic
+    # Acoustic — hop_length, n_fft, n_mels come from cfg (defaults to
+    # ACOUSTIC_FEATURES per chapter 3 §3.4.2 grid sweep).
     if cfg.use_cwt:
         acoustic_features = compute_encoder_input_stack(
             s.segment.mic_data,
@@ -207,7 +249,11 @@ def _precompute_paired(
 
     vibration_features = compute_vibration_input_stack(
         s.segment.accel_data,
-        kurtosis_window=cfg.vib_kurtosis_window,
+        sample_rate=float(s.segment.accel_sample_rate),
+        kurtosis_window_seconds=cfg.vib_kurtosis_window_seconds,
+        min_kurtosis_samples=cfg.vib_min_kurtosis_samples,
+        crest_factor_window_seconds=cfg.vib_crest_factor_window_seconds,
+        min_crest_factor_samples=cfg.vib_min_crest_factor_samples,
         standardize=cfg.standardize_vibration,
     )
 
@@ -222,6 +268,7 @@ def _precompute_paired(
         vibration_xyz=s.vib_positions.astype(np.float32),
         vibration_fs=float(s.segment.accel_sample_rate),
         dataset_idx=_dataset_idx(s.dataset_id),
+        dataset_id=str(s.dataset_id),
         mode_label=s.mode_label or "Unknown",
         recording_id=s.recording_id,
         source_dir=str(s.source_dir),
@@ -233,13 +280,40 @@ def _precompute_paired(
 # ---------------------------------------------------------------------------
 
 
+def _resolve_paired_segment_scales(
+    cfg: V2SSLConfig, dataset_id: str
+) -> tuple[tuple[float, ...], float]:
+    """Resolve `(scales_in_seconds, stride_ratio)` for one paired segment.
+
+    Per-dataset override → global tuple → legacy single-scale fallback —
+    same precedence as :func:`v1_ssl._resolve_segment_scales`.
+    """
+    per_ds = cfg.window_scales_seconds_per_dataset or {}
+    if dataset_id in per_ds and per_ds[dataset_id]:
+        scales = tuple(float(s) for s in per_ds[dataset_id])
+        return scales, float(cfg.window_stride_ratio)
+    if cfg.window_scales_seconds:
+        scales = tuple(float(s) for s in cfg.window_scales_seconds)
+        return scales, float(cfg.window_stride_ratio)
+    legacy_ratio = (
+        float(cfg.window_stride_seconds) / float(cfg.window_seconds)
+        if cfg.window_seconds > 0
+        else 0.5
+    )
+    return (float(cfg.window_seconds),), legacy_ratio
+
+
 class _PairedWindowedDataset(tud.Dataset):
     """Yields paired acoustic + vibration windows aligned by wall-clock start.
 
     Per-segment frame counts (acoustic + vibration) are computed from the
     segment's own feature rates so a 2-second window over D4 raw vibration
     (~376 Hz) keeps all 752 samples while a 2-second window over D1 peak
-    vibration (4 Hz) keeps all 8.  The grouped batch sampler buckets by
+    vibration (4 Hz) keeps all 8.  When `cfg.window_scales_seconds[_per_dataset]`
+    is set, every (segment, scale) pair materialises its own window list;
+    BOTH `n_ac` AND `n_vib` are computed from the same per-batch scale so
+    the wall-clock pairing (sample 0 of mic ↔ sample 0 of vib) is preserved
+    inside each window.  The grouped batch sampler buckets by
     `(n_mics, n_vib, frames_ac, frames_vib)` so that a single `torch.stack`
     never has to reconcile different sample counts.
     """
@@ -257,19 +331,21 @@ class _PairedWindowedDataset(tud.Dataset):
 
         self._refs = []
         for si, seg in enumerate(segments):
-            n_ac = max(2, int(round(cfg.window_seconds * seg.acoustic_fs)))
-            n_vib = max(2, int(round(cfg.window_seconds * seg.vibration_fs)))
-            stride_ac = max(1, int(round(cfg.window_stride_seconds * seg.acoustic_fs)))
+            scales, stride_ratio = _resolve_paired_segment_scales(cfg, seg.dataset_id)
             T_ac = int(seg.acoustic_features.shape[-1])
             T_vib = int(seg.vibration_features.shape[-1])
-            if T_ac < n_ac or T_vib < n_vib:
-                continue
-            for start_ac in range(0, T_ac - n_ac + 1, stride_ac):
-                t_start = start_ac / max(seg.acoustic_fs, 1e-9)
-                start_vib = int(round(t_start * seg.vibration_fs))
-                if start_vib + n_vib > T_vib:
+            for scale_s in scales:
+                n_ac = max(2, int(round(scale_s * seg.acoustic_fs)))
+                n_vib = max(2, int(round(scale_s * seg.vibration_fs)))
+                stride_ac = max(1, int(round(scale_s * stride_ratio * seg.acoustic_fs)))
+                if T_ac < n_ac or T_vib < n_vib:
                     continue
-                self._refs.append((si, start_ac, start_vib, n_ac, n_vib))
+                for start_ac in range(0, T_ac - n_ac + 1, stride_ac):
+                    t_start = start_ac / max(seg.acoustic_fs, 1e-9)
+                    start_vib = int(round(t_start * seg.vibration_fs))
+                    if start_vib + n_vib > T_vib:
+                        continue
+                    self._refs.append((si, start_ac, start_vib, n_ac, n_vib))
 
     def __len__(self) -> int:
         return len(self._refs)
@@ -531,6 +607,7 @@ def _time_split_paired_segment(
         vibration_xyz=seg.vibration_xyz,
         vibration_fs=seg.vibration_fs,
         dataset_idx=seg.dataset_idx,
+        dataset_id=seg.dataset_id,
         mode_label=seg.mode_label,
         recording_id=f"{seg.recording_id}__train_half",
         source_dir=seg.source_dir,
@@ -543,6 +620,7 @@ def _time_split_paired_segment(
         vibration_xyz=seg.vibration_xyz,
         vibration_fs=seg.vibration_fs,
         dataset_idx=seg.dataset_idx,
+        dataset_id=seg.dataset_id,
         mode_label=seg.mode_label,
         recording_id=f"{seg.recording_id}__val_half",
         source_dir=seg.source_dir,
@@ -666,7 +744,7 @@ def train_v2_fusion(
 
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
-    device = torch.device(cfg.device)
+    device = resolve_device(cfg.device)
 
     segments = _gather_paired_segments(loaders, cfg)
     if not segments:
@@ -695,6 +773,7 @@ def train_v2_fusion(
         n_heads=cfg.n_heads,
         context_mode=cfg.context_mode,
         num_context_seeds=cfg.num_context_seeds,
+        acoustic_cnn_width_mult=cfg.acoustic_cnn_width_mult,
     ).to(device)
     encoder.load_v1_weights(v1_acoustic_state_dict, v1_vibration_state_dict, strict=True)
 

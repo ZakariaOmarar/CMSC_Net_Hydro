@@ -9,9 +9,37 @@
 #   - The synthetic transition stress-test is run separately via the
 #     `transition_fpr` helper on adjacent-mode pairs.
 
-dataset_configs: [configs/datasets/d1.yaml, configs/datasets/d2.yaml, configs/datasets/d3.yaml]
+dataset_configs:
+  - configs/datasets/d1.yaml
+  - configs/datasets/d2.yaml
+  - configs/datasets/d3.yaml
+  # D5 added 2026-05-20: contributes both healthy density-fit data and
+  # held-out knock anomalies (label_scheme: d5_healthy_or_knock).
+  # D5 has no operating-mode label, so it joins D3/D4 in the no-mode tier.
+  - configs/datasets/d5.yaml
 v2_checkpoint: results/v2/fusion_ssl/encoder.pt
 output_dir: results/v3/anomaly_cnf
+
+# Per-stage window override (2026-05-19) — smaller windows tighten V3's
+# transient sensitivity by raising the knock fraction of the per-window
+# summary.  At V2 train scales {0.5, 1.0, 2.0, 4.0} s on D3/D4 the 1.0 s
+# inference window still keeps ≥ 30 post-MaxPool acoustic frames at
+# hop=43 (the ECAPA-recommended floor for stable ASP σ statistics).
+# D1/D2 cannot go below the Vibration1DCNN-kernel minimum (1.25 s);
+# we pick 3.0 s to preserve the legacy 2 s / 1 s stride ratio.
+window_seconds_override:
+  d1: 3.0
+  d2: 3.0
+  d3: 1.0
+  d4: 1.0
+  d5: 1.0   # D5 follows the D3/D4 family (vibration rate ≥ 16 Hz)
+
+# V3 channel-token pool kind for `x_t`.  ``pma2`` is the publication
+# default — see `_XtPool` docstring in `v3_trainer.py` for the full
+# justification.  ``mean`` reproduces the legacy single mean-pool path
+# byte-for-byte for ablation.
+xt_pool: pma2
+xt_pool_num_heads: 4
 
 # CNF dims
 n_layers: 6
@@ -41,4 +69,4 @@ transition_pairs:
 crossfade_seconds: 1.0
 
 seed: 42
-device: cpu
+device: auto

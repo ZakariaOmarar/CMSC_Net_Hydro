@@ -20,5 +20,5 @@ weight_decay: 0.00001
 patience: 10
 cnn_spec_n_fft: 64
 cnn_spec_hop_length: 16
-device: cpu
+device: auto
 seed: 42

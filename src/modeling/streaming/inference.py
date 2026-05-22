@@ -24,7 +24,9 @@ from typing import Iterable
 
 import numpy as np
 import torch
+import torch.nn as nn
 
+from ...config import resolve_device
 from ...features.audio_spectral import compute_encoder_input_stack, compute_log_mel_spectrogram
 from ...features.vibration_temporal import compute_vibration_input_stack
 from ...ingestion.test_dataset_loader import TestDatasetSegment
@@ -104,15 +106,35 @@ class GatedPipeline:
     threshold_percentile: int = 99
     unconditional_anomaly: bool = False  # A2 ablation runtime knob
     unconditional_localization: bool = False  # A3 ablation runtime knob
-    device: torch.device = field(default_factory=lambda: torch.device("cpu"))
+    device: torch.device = field(default_factory=lambda: resolve_device("auto"))
+    # Trained `_XtPool` (PMA-2) from V3 — mirrors `V3Result.xt_pool`.
+    # When None, `x_t` falls back to the legacy `fused.mean(dim=1)` (only
+    # valid if the flow was trained with `xt_pool="mean"`).
+    xt_pool: nn.Module | None = None
+    # Per-stage window override mirroring `V3Config.window_seconds_override`.
+    # When set the streaming window cadence is overridden per-dataset; the
+    # `v2_cfg` is not mutated.  Use a float for "single override for all
+    # datasets" or `dict[dataset_id, float]` for per-dataset values.
+    window_seconds_override: float | dict[str, float] | None = None
 
     def __post_init__(self) -> None:
         self.v2_encoder = self.v2_encoder.to(self.device).eval()
         self.flow = self.flow.to(self.device).eval()
         if self.v4_head is not None:
             self.v4_head = self.v4_head.to(self.device).eval()
+        if self.xt_pool is not None:
+            self.xt_pool = self.xt_pool.to(self.device).eval()
         if self.threshold_percentile not in (95, 99):
             raise ValueError("threshold_percentile must be 95 or 99")
+
+    def _window_seconds_for(self, dataset_id: str) -> float:
+        """Return the effective window length for one dataset (override → cfg)."""
+        ov = self.window_seconds_override
+        if ov is None:
+            return float(self.v2_cfg.window_seconds)
+        if isinstance(ov, dict):
+            return float(ov.get(dataset_id, self.v2_cfg.window_seconds))
+        return float(ov)
 
     # ------------------------------------------------------------------ run
     @torch.no_grad()
@@ -143,11 +165,22 @@ class GatedPipeline:
         mic_fs_raw = int(segment.segment.mic_sample_rate)
         accel_fs_raw = int(segment.segment.accel_sample_rate)
 
-        n_ac = max(2, int(round(cfg.window_seconds * ac_fs)))
-        stride_ac = max(1, int(round(cfg.window_stride_seconds * ac_fs)))
-        n_vib = max(2, int(round(cfg.window_seconds * vib_fs)))
-        n_mic_raw = max(8, int(round(cfg.window_seconds * mic_fs_raw)))
-        n_acc_raw = max(2, int(round(cfg.window_seconds * accel_fs_raw)))
+        # Resolve the per-stage window override: V3 trains at a tighter
+        # transient-scoped window (1.0 s on D3/D4, 3.0 s on D1/D2 in the
+        # publication config); streaming must match for scores to be
+        # comparable with the trained thresholds.  Stride keeps the legacy
+        # ratio ``window_stride_seconds / window_seconds``.
+        win_s = self._window_seconds_for(segment.dataset_id)
+        stride_s = (
+            win_s * (float(cfg.window_stride_seconds) / float(cfg.window_seconds))
+            if cfg.window_seconds > 0
+            else win_s * 0.5
+        )
+        n_ac = max(2, int(round(win_s * ac_fs)))
+        stride_ac = max(1, int(round(stride_s * ac_fs)))
+        n_vib = max(2, int(round(win_s * vib_fs)))
+        n_mic_raw = max(8, int(round(win_s * mic_fs_raw)))
+        n_acc_raw = max(2, int(round(win_s * accel_fs_raw)))
 
         T_ac = ac_feats.shape[-1]
         T_vib = vib_feats.shape[-1]
@@ -195,7 +228,13 @@ class GatedPipeline:
             vib_xyz = torch.from_numpy(segment.vib_positions.astype(np.float32)).unsqueeze(0).to(self.device)
             v2_out = self.v2_encoder(ac_win, ac_xyz, vib_win, vib_xyz, ds_idx, mask_p=0.0)
             fused = torch.cat([v2_out["a_fused"], v2_out["v_fused"]], dim=1)
-            x_t = fused.mean(dim=1)
+            if self.xt_pool is not None:
+                # PMA-2 path — mirrors `V3Result.xt_pool`; reproduces the
+                # exact summary the flow was trained on.
+                x_t = self.xt_pool(fused)
+            else:
+                # Legacy mean-pool fallback (`xt_pool="mean"` at train time).
+                x_t = fused.mean(dim=1)
             c_t = v2_out["context"]
 
             # ── V3: anomaly score + per-cluster gate ─────────────────
@@ -300,7 +339,12 @@ class GatedPipeline:
                 mels.append(np.stack([m, m], axis=0).astype(np.float32))
             ac = np.stack(mels, axis=0)
         vib = compute_vibration_input_stack(
-            segment.segment.accel_data, kurtosis_window=cfg.vib_kurtosis_window
+            segment.segment.accel_data,
+            sample_rate=float(segment.segment.accel_sample_rate),
+            kurtosis_window_seconds=cfg.vib_kurtosis_window_seconds,
+            min_kurtosis_samples=cfg.vib_min_kurtosis_samples,
+            crest_factor_window_seconds=cfg.vib_crest_factor_window_seconds,
+            min_crest_factor_samples=cfg.vib_min_crest_factor_samples,
         )
         return ac.astype(np.float32), vib.astype(np.float32)
 

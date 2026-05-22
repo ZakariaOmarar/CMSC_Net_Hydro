@@ -31,6 +31,8 @@ import torch.nn.functional as F
 import torch.utils.data as tud
 from tqdm.auto import tqdm
 
+from ...config import resolve_device
+from ...config.architecture import V4_LOCALIZATION
 from ...features.audio_spectral import compute_encoder_input_stack, compute_log_mel_spectrogram
 from ...features.vibration_temporal import compute_vibration_input_stack
 from ...ingestion.test_dataset_loader import TestDatasetSegment
@@ -64,27 +66,27 @@ class V4Sample:
     recording_id: str
     source_dir: str
     dataset_id: str  # so V3-gated cohort assembly can dispatch by source campaign
+    # R3.3 / 2026-05-16 — classical accel-TDOA multilateration estimate for
+    # this window, used by ``channel_mode="vibration_only_learned"`` as the
+    # spatial init for the learned residual head (mirror of the acoustic
+    # soft-argmax init).  ``None`` when accel multilateration was not
+    # computed (e.g. < 4 accels, or the precompute path skipped it).
+    multilat_xyz: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
 class V4Config:
     """V4 training config."""
 
-    # Head dims
-    cnn_feature_dim: int = 128
-    tdoa_feature_dim: int = 64
-    hidden_dim: int = 128
-    n_heads_tdoa: int = 2
+    # Head dims — sourced from `V4_LOCALIZATION` in architecture.py.
+    cnn_feature_dim: int = V4_LOCALIZATION.cnn_feature_dim
+    tdoa_feature_dim: int = V4_LOCALIZATION.tdoa_feature_dim
+    hidden_dim: int = V4_LOCALIZATION.hidden_dim
+    n_heads_tdoa: int = V4_LOCALIZATION.n_heads_tdoa
 
     # Heatmap soft-argmax + FiLM-residual head
-    soft_argmax_temperature: float = 1.0
-    # Residual half-range in metres.  Was 0.05 in the second-pass audit;
-    # the 2026-05-11 run showed soft-argmax centre-bias of 10–15 cm on
-    # corner-of-grid positions (e.g. D4 `(-20, 0, 0)`) that the ±5 cm
-    # residual could not correct.  0.20 m lets the head reach any voxel
-    # in the prototype bounding box while the tanh squash + AdamW weight
-    # decay still prefer small residuals when soft-argmax is accurate.
-    residual_scale_m: float = 0.20
+    soft_argmax_temperature: float = V4_LOCALIZATION.soft_argmax_temperature
+    residual_scale_m: float = V4_LOCALIZATION.residual_scale_m
 
     # Conditioning
     scada_dim: int = 0  # 0 → no SCADA slot; V5.1/V5.2 set this.
@@ -97,37 +99,53 @@ class V4Config:
     #     head's soft-argmax starts at the grid centroid for every window
     #     and the localization comes entirely from the FiLM(c)-conditioned
     #     residual on the TDOA tokens.
+    #   - "vibration_only_learned" (R3.3, 2026-05-16): zero the SRP volume
+    #     AND replace the soft-argmax init with the per-sample classical
+    #     accel-TDOA multilateration estimate (V4Sample.multilat_xyz).
+    #     This is the structural "vibration-only learned" RQ3 baseline —
+    #     the head sees a meaningful spatial prior (multilat output)
+    #     instead of the grid-centroid collapse that tdoa_only suffers.
     # This ablation isolates the marginal contribution of the structure-
     # borne accelerometer TDOA pathway from the acoustic SRP pathway —
     # i.e. it answers "which modality is doing the localization work?"
     # at the V4-head input level, complementary to the A1 modality-severing
     # ablation that lives in V2.
-    channel_mode: Literal["both", "srp_only", "tdoa_only"] = "both"
+    channel_mode: Literal[
+        "both", "srp_only", "tdoa_only", "vibration_only_learned"
+    ] = "both"
 
-    # Training
+    # Per-stage window override (2026-05-19) — mirrors
+    # `V3Config.window_seconds_override`.  When set, the V4 trainer
+    # overrides `v2_cfg.window_seconds` for both feature-extraction and
+    # raw-waveform window cadence inside `precompute_v4_samples`.
+    # Publication default: 0.5 s on D3/D4 (4× SNR improvement on SRP-PHAT
+    # cross-correlation peak detection — the knock occupies 50 ms / 500 ms
+    # = 10 % of the integration window vs 2.5 % at 2 s), 1.5 s on D1/D2
+    # (which cannot go below the 5 / 4 Hz Vibration1DCNN kernel constraint).
+    # May be:
+    #   * ``None`` — inherit `v2_cfg.window_seconds` (legacy),
+    #   * a ``float`` — single override applied to every dataset,
+    #   * a ``dict[dataset_id, float]`` — per-dataset override.
+    # Default ``None`` keeps V4 backwards-compatible (inherits v2_cfg
+    # window).  The orchestrator (full_run._v4_cfg) sets the publication
+    # per-dataset dict from `WINDOWING.v4_window_seconds_override`.
+    window_seconds_override: float | dict[str, float] | None = None
+
+    # Training schedule — per-experiment, not centralised.
     epochs: int = 50
     batch_size: int = 16
     lr: float = 1e-3
     weight_decay: float = 1e-5
     val_ratio: float = 0.3
     seed: int = 42
-    device: str = "cpu"
+    device: str = "auto"
 
-    # Loss / training-time augmentation
-    # Targets are in metres but on a ~10 cm prototype the smooth-L1 loss with
-    # default beta=1.0 sits in the quadratic regime where ‖err‖² → 0 fast and
-    # gradients vanish.  Switching the regression problem to centimetres
-    # (multiply pred and target by 100 inside the loop) puts a 1 cm error at
-    # loss ≈ 1.0 — well inside the linear part of smooth-L1 — and recovers
-    # full gradient signal.  This is purely a numerical-conditioning fix and
-    # does not change the inference output (we scale back to metres for MAE).
+    # Loss / training-time augmentation — implementation details.
     train_in_centimetres: bool = True
-    smooth_l1_beta: float = 1.0  # in the post-scale unit (cm if scaling on)
-    # Augmentation — addresses the 6-recording labeled pool.  All three are
-    # zero-mean perturbations applied only at training time:
-    target_pos_noise_m: float = 0.002      # ± 2 mm Gaussian on the ground-truth
+    smooth_l1_beta: float = 1.0
+    target_pos_noise_m: float = 0.002      # ± 2 mm Gaussian on the GT
     srp_volume_noise_std: float = 0.02     # additive Gaussian on the SRP volume
-    srp_volume_dropout_p: float = 0.0      # not used; reserved for mic-dropout aug
+    srp_volume_dropout_p: float = 0.0      # reserved for mic-dropout augmentation
     tdoa_jitter_m: float = 0.001           # ± 1 mm Gaussian on path_diff_m
     augment: bool = True
 
@@ -164,7 +182,12 @@ def _window_v2_features(
             mels.append(np.stack([m, m], axis=0).astype(np.float32))
         ac = np.stack(mels, axis=0)
     vib = compute_vibration_input_stack(
-        segment.segment.accel_data, kurtosis_window=cfg.vib_kurtosis_window
+        segment.segment.accel_data,
+        sample_rate=float(segment.segment.accel_sample_rate),
+        kurtosis_window_seconds=cfg.vib_kurtosis_window_seconds,
+        min_kurtosis_samples=cfg.vib_min_kurtosis_samples,
+        crest_factor_window_seconds=cfg.vib_crest_factor_window_seconds,
+        min_crest_factor_samples=cfg.vib_min_crest_factor_samples,
     )
     return ac.astype(np.float32), vib.astype(np.float32)
 
@@ -177,7 +200,7 @@ def precompute_v4_samples(
     grid: GridSpec,
     spatial_label_overrides: dict[str, tuple[float, float, float]] | None = None,
     scada_lookup: dict[str, np.ndarray] | None = None,
-    window_seconds: float | None = None,
+    window_seconds: float | dict[str, float] | None = None,
     window_stride_seconds: float | None = None,
     burst_aware_srp: bool = False,
     burst_seconds: float = 0.10,
@@ -194,21 +217,46 @@ def precompute_v4_samples(
       (the head is built without one).
     - Window cadence defaults to `v2_cfg.window_seconds` / `window_stride_seconds`
       so V2 features and SRP-PHAT/TDOA front-ends operate on the same window
-      boundaries.
+      boundaries.  ``window_seconds`` may be a ``float`` (applied to every
+      segment), a ``dict[dataset_id, float]`` (per-dataset, mirroring
+      :attr:`V4Config.window_seconds_override`), or None (legacy default).
+      The stride keeps a constant ratio to the window when an override is
+      applied; this is the audio-SSL convention of equal-per-window
+      training-data density across scales.
     """
-    device = torch.device(device)
+    device = resolve_device(device)
     v2_encoder = v2_encoder.to(device).eval()
     for p in v2_encoder.parameters():
         p.requires_grad_(False)
 
-    win_s = window_seconds if window_seconds is not None else v2_cfg.window_seconds
-    stride_s = (
-        window_stride_seconds if window_stride_seconds is not None else v2_cfg.window_stride_seconds
+    def _per_segment_window_s(dataset_id: str) -> float:
+        if window_seconds is None:
+            return float(v2_cfg.window_seconds)
+        if isinstance(window_seconds, dict):
+            return float(window_seconds.get(dataset_id, v2_cfg.window_seconds))
+        return float(window_seconds)
+
+    base_stride_ratio = (
+        float(v2_cfg.window_stride_seconds) / float(v2_cfg.window_seconds)
+        if v2_cfg.window_seconds > 0
+        else 0.5
     )
+    if window_stride_seconds is not None:
+        # Caller pinned an absolute stride; honour it directly (only sensible
+        # when `window_seconds` is also a scalar).
+        legacy_stride = float(window_stride_seconds)
+    else:
+        legacy_stride = None
+
     overrides = spatial_label_overrides or {}
 
     samples: list[V4Sample] = []
     for s in segments:
+        win_s = _per_segment_window_s(s.dataset_id)
+        if legacy_stride is not None:
+            stride_s = legacy_stride
+        else:
+            stride_s = win_s * base_stride_ratio
         spatial = overrides.get(s.recording_id, s.spatial_label)
         if spatial is None:
             continue  # no ground-truth → skip (V4 needs labels)
@@ -294,6 +342,22 @@ def precompute_v4_samples(
             tdoa = compute_accel_tdoa_tokens(
                 acc_seg, s.vib_positions, fs=accel_fs_raw
             )
+            # R3.3 — also run the classical accel-TDOA multilateration so
+            # the `channel_mode="vibration_only_learned"` head has a
+            # spatial init.  Skips when < 4 accels (solver requirement).
+            # Cheap (a few L-BFGS-B calls per window) and unused by other
+            # channel_modes, so the overhead is acceptable across the
+            # entire V4 cohort precompute.
+            multilat_xyz: np.ndarray | None = None
+            if acc_seg.shape[0] >= 4:
+                try:
+                    from .multilateration import accel_tdoa_multilateration_v0
+                    pos, _residual = accel_tdoa_multilateration_v0(
+                        acc_seg, s.vib_positions, fs=accel_fs_raw,
+                    )
+                    multilat_xyz = pos.astype(np.float32)
+                except Exception:  # multilateration is best-effort here
+                    multilat_xyz = None
 
             samples.append(
                 V4Sample(
@@ -307,6 +371,7 @@ def precompute_v4_samples(
                     recording_id=s.recording_id,
                     source_dir=str(s.source_dir),
                     dataset_id=s.dataset_id,
+                    multilat_xyz=multilat_xyz,
                 )
             )
     return samples
@@ -348,10 +413,13 @@ def _stack_tdoa(samples: list[V4Sample]) -> torch.Tensor:
 def _make_batch(
     samples: list[V4Sample],
     *,
-    channel_mode: Literal["both", "srp_only", "tdoa_only"] = "both",
+    channel_mode: Literal[
+        "both", "srp_only", "tdoa_only", "vibration_only_learned"
+    ] = "both",
 ) -> dict:
     volumes = torch.from_numpy(np.stack([s.srp_volume for s in samples], axis=0)).float()
     tdoa = _stack_tdoa(samples).float()
+    external_init_xyz: torch.Tensor | None = None
     if channel_mode == "srp_only":
         # Severing the structure-borne TDOA pathway: zero the token
         # features (path_diff_m + endpoint coords + distance) so the
@@ -367,6 +435,22 @@ def _make_batch(
         # localization signal must come through the FiLM-conditioned
         # residual on (global_feat, tdoa_feat, init_xyz).
         volumes = torch.zeros_like(volumes)
+    elif channel_mode == "vibration_only_learned":
+        # R3.3 — same SRP-severing as tdoa_only, plus replace the
+        # (meaningless) grid-centroid soft-argmax init with the per-
+        # sample classical multilateration estimate.  Requires every
+        # V4Sample to have multilat_xyz populated by precompute.
+        volumes = torch.zeros_like(volumes)
+        if any(s.multilat_xyz is None for s in samples):
+            missing = [s.recording_id for s in samples if s.multilat_xyz is None]
+            raise ValueError(
+                f"channel_mode='vibration_only_learned' requires every V4Sample "
+                f"to have multilat_xyz; {len(missing)} samples missing it "
+                f"(first: {missing[0]!r})"
+            )
+        external_init_xyz = torch.from_numpy(
+            np.stack([s.multilat_xyz for s in samples], axis=0)
+        ).float()
     contexts = torch.from_numpy(np.stack([s.context for s in samples], axis=0)).float()
     targets = torch.from_numpy(np.stack([s.target_xyz for s in samples], axis=0)).float()
     scada = None
@@ -378,6 +462,7 @@ def _make_batch(
         "contexts": contexts,
         "targets": targets,
         "scada": scada,
+        "external_init_xyz": external_init_xyz,
     }
 
 
@@ -433,7 +518,7 @@ def train_v4_localization(
 
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
-    device = torch.device(cfg.device)
+    device = resolve_device(cfg.device)
 
     train_samples, val_samples = _split_samples_by_recording(samples, cfg.val_ratio, cfg.seed)
 
@@ -529,6 +614,7 @@ def train_v4_localization(
                 batch["contexts"],
                 batch["scada"],
                 unconditional=cfg.unconditional,
+                external_init_xyz=batch.get("external_init_xyz"),
             )
             loss = F.smooth_l1_loss(
                 pred * loss_scale, batch["targets"] * loss_scale, beta=cfg.smooth_l1_beta
@@ -553,6 +639,7 @@ def train_v4_localization(
                     batch["contexts"],
                     batch["scada"],
                     unconditional=cfg.unconditional,
+                    external_init_xyz=batch.get("external_init_xyz"),
                 )
                 loss = F.smooth_l1_loss(
                     pred * loss_scale, batch["targets"] * loss_scale, beta=cfg.smooth_l1_beta
@@ -584,6 +671,7 @@ def train_v4_localization(
                 batch["scada"],
                 unconditional=cfg.unconditional,
                 return_components=True,
+                external_init_xyz=batch.get("external_init_xyz"),
             )
             val_preds.append(out["pred"].cpu().numpy())
             val_inits.append(out["init_xyz"].cpu().numpy())

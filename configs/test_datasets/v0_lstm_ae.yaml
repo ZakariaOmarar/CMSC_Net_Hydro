@@ -24,7 +24,7 @@ lr: 1.0e-3
 weight_decay: 1.0e-5
 val_ratio: 0.2
 seed: 42
-device: cpu
+device: auto
 
 # Labels
 healthy_modes: [Pump, Standstill, Turbine, Healthy]

@@ -129,18 +129,8 @@ def test_d2_label_scheme_drops_multi_mode_and_keeps_single() -> None:
 
 
 def test_d4_loader_inventory() -> None:
+    # `DatasetSpec.from_yaml` resolves all paths to absolute — no reconstruction needed.
     spec = DatasetSpec.from_yaml(REPO_ROOT / "configs" / "datasets" / "d4.yaml")
-    spec = DatasetSpec(
-        id=spec.id,
-        root=REPO_ROOT / spec.root,
-        n_mics=spec.n_mics,
-        n_vibrations=spec.n_vibrations,
-        accel_target_sr=spec.accel_target_sr,
-        position_source=str(REPO_ROOT / spec.position_source),
-        label_scheme=spec.label_scheme,
-        vibration_format=spec.vibration_format,
-        extra=spec.extra,
-    )
     L = TestDatasetLoader(spec)
     segments = L.list_segments()
     assert len(segments) >= 8  # 3 healthy + ≥5 RandomFault (one folder has 5 vib channels and is skipped)

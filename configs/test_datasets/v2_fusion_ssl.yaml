@@ -13,9 +13,20 @@ output_dir: results/v2/fusion_ssl
 v1_acoustic_state_dict: results/v1/per_modality_ssl/acoustic.pt
 v1_vibration_state_dict: results/v1/per_modality_ssl/vibration.pt
 
-# Window cadence (wall-clock seconds)
+# Window cadence (wall-clock seconds) — legacy single-scale fallback.
 window_seconds: 2.0
 window_stride_seconds: 1.0
+
+# Multi-scale window cadence (2026-05-19) — see V1 YAML for justification.
+# D3/D4 add finer scales because their vibration rates (16 / 376 Hz) can
+# resolve sub-second windows; D1/D2 (4 Hz vib) cannot go below 1.5 s.
+window_scales_seconds_per_dataset:
+  d1: [1.5, 3.0, 6.0]
+  d2: [1.5, 3.0, 6.0]
+  d3: [0.5, 1.0, 2.0, 4.0]
+  d4: [0.5, 1.0, 2.0, 4.0]
+window_scale_strategy: uniform
+window_stride_ratio: 0.5
 
 # Encoder dims (must match V1 to allow strict weight transfer)
 feature_dim: 128
@@ -31,7 +42,7 @@ weight_decay: 1.0e-5
 temperature: 0.1
 val_ratio: 0.3
 seed: 42
-device: cpu
+device: auto
 
 # Acoustic features (must match V1)
 n_mels: 64
@@ -40,8 +51,13 @@ hop_length: 512
 cwt_n_scales: 64
 use_cwt: true
 
-# Vibration features
-vib_kurtosis_window: 5
+# Vibration features — see `compute_vibration_input_stack` for the
+# per-sample-rate channel-2 statistic selection (kurtosis on D4 raw,
+# crest factor on D1/D2/D3 peak streams).
+vib_kurtosis_window_seconds: 0.10
+vib_min_kurtosis_samples: 31
+vib_crest_factor_window_seconds: 1.0
+vib_min_crest_factor_samples: 4
 
 # Augmentations
 gain_jitter_db: 6.0

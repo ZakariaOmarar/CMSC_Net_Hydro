@@ -31,6 +31,20 @@ import torch.nn.functional as F
 import torch.utils.data as tud
 from tqdm.auto import tqdm
 
+from ...config import resolve_device
+from ...config.architecture import (
+    ACOUSTIC_CWT,
+    ACOUSTIC_FEATURES,
+    ENCODER,
+    VIBRATION_FEATURES,
+    WINDOWING,
+)
+from ...config.dataset_registry import REGISTRY
+
+
+def _registry_window_scales() -> dict[str, tuple[float, ...]]:
+    """Per-dataset multi-scale window cadence sourced from the registry."""
+    return {m.id: m.window_scales_seconds for m in REGISTRY}
 from ...features.audio_spectral import compute_encoder_input_stack
 from ...features.vibration_temporal import compute_vibration_input_stack
 from ...ingestion.test_dataset_loader import (
@@ -48,19 +62,58 @@ from .cluster_metric import cluster_purity_and_nmi
 
 @dataclass(frozen=True)
 class V1SSLConfig:
-    """Hyperparameters for V1 per-modality SSL warmup."""
+    """Hyperparameters for V1 per-modality SSL warmup.
 
-    # Window cadence
-    window_seconds: float = 2.0
-    window_stride_seconds: float = 1.0
+    Every field default below is sourced from
+    :mod:`src.config.architecture` — that file is the single source of
+    truth for thesis-relevant numerical choices.  Do not change defaults
+    here; edit `architecture.py` and let the change propagate.
+    """
 
-    # Encoder dims
-    feature_dim: int = 128
-    embed_dim: int = 128
-    n_heads: int = 4
-    proj_dim: int = 64
+    # Window cadence (legacy single-scale knobs; preserved for back-compat).
+    # When `window_scales_seconds == ()` the dataset falls back to the
+    # legacy single scale `(window_seconds,)` with the explicit
+    # `window_stride_seconds` — byte-equivalent to pre-2026-05-19 behaviour.
+    window_seconds: float = WINDOWING.window_seconds
+    window_stride_seconds: float = WINDOWING.window_stride_seconds
 
-    # Training
+    # Multi-scale window cadence (2026-05-19, full justification in
+    # `docs/chapters/chapter_3_field_data_and_preprocessing.md` §3.4.4):
+    #
+    #   * `window_scales_seconds`: a tuple of per-segment scales applied to
+    #     EVERY dataset.  Empty tuple means "use the legacy single scale".
+    #   * `window_scales_seconds_per_dataset`: a dict
+    #     `{dataset_id: (scale1, scale2, ...)}` that OVERRIDES the global
+    #     tuple per dataset.  This is the publication path because the
+    #     slowest-vibration constraint differs across datasets:
+    #         - D1, D2 at 4 Hz vibration cannot resolve windows below
+    #           5 / 4 = 1.25 s (one Vibration1DCNN kernel of length 5);
+    #         - D3 at 16 Hz vibration can go down to 0.31 s;
+    #         - D4 at 376 Hz raw vibration is effectively unconstrained.
+    #
+    # When `window_scale_strategy="uniform"`, each training batch is
+    # single-dataset × single-scale (enforced by `_GroupedBatchSampler`'s
+    # `(channel_count, n_frames)` bucket key); the scale within a segment's
+    # valid set is sampled uniformly across all its windows by virtue of
+    # the dataset emitting one (start, n_frames) tuple per (segment, scale).
+    # Stride per scale = `scale * window_stride_ratio` (50 % overlap by
+    # default — every frame appears in exactly two windows, the
+    # audio-SSL convention).
+    window_scales_seconds: tuple[float, ...] = ()
+    window_scales_seconds_per_dataset: dict[str, tuple[float, ...]] = field(
+        default_factory=_registry_window_scales
+    )
+    window_scale_strategy: Literal["fixed", "uniform"] = WINDOWING.window_scale_strategy
+    window_stride_ratio: float = WINDOWING.window_stride_ratio
+
+    # Encoder dims — sourced from `ENCODER` in architecture.py.
+    feature_dim: int = ENCODER.feature_dim
+    embed_dim: int = ENCODER.embed_dim
+    n_heads: int = ENCODER.n_heads
+    proj_dim: int = ENCODER.proj_dim
+
+    # Training schedule — tuned per experiment, NOT centralised in
+    # architecture.py.
     epochs: int = 30
     batch_size: int = 32
     lr: float = 1e-3
@@ -68,11 +121,11 @@ class V1SSLConfig:
     temperature: float = 0.1
     val_ratio: float = 0.3
 
-    # Acoustic feature parameters (forwarded to compute_encoder_input_stack)
-    n_mels: int = 64
-    n_fft: int = 1024
-    hop_length: int = 512
-    cwt_n_scales: int = 64
+    # Acoustic feature parameters — sourced from `ACOUSTIC_FEATURES`.
+    n_mels: int = ACOUSTIC_FEATURES.n_mels
+    n_fft: int = ACOUSTIC_FEATURES.n_fft
+    hop_length: int = ACOUSTIC_FEATURES.hop_length
+    cwt_n_scales: int = ACOUSTIC_CWT.n_scales
     use_cwt: bool = True  # smoke-test override: skip CWT to speed up
     # F4 toggle — per-channel z-score of the log-mel + CWT stack before the
     # CNN.  Default False: the 2026-05-14 audit found F4 is NOT load-bearing
@@ -82,15 +135,30 @@ class V1SSLConfig:
     # concern worth revisiting if the SSL objective changes.
     standardize_acoustic: bool = False
 
-    # Vibration feature parameters
-    vib_kurtosis_window: int = 5
+    # Vibration feature parameters — see `compute_vibration_input_stack` for
+    # the full justification.  Channel-2 statistic (kurtosis vs crest factor)
+    # is selected per-dataset from the segment's accel_sample_rate so a
+    # single physical-time knob works across D1/D2 (4 Hz), D3 (16 Hz), and
+    # D4 raw (~376 Hz).
+    vib_kurtosis_window_seconds: float = VIBRATION_FEATURES.kurtosis_window_seconds
+    vib_min_kurtosis_samples: int = VIBRATION_FEATURES.min_kurtosis_samples
+    vib_crest_factor_window_seconds: float = VIBRATION_FEATURES.crest_factor_window_seconds
+    vib_min_crest_factor_samples: int = VIBRATION_FEATURES.min_crest_factor_samples
     # Vibration amplitude + envelope z-score toggle (pre-existing behaviour;
-    # default True).  Rolling kurtosis is always kept raw — see
-    # `compute_vibration_input_stack`; the F5 experiment that z-scored it
-    # showed no benefit and was reverted.
+    # default True).  Channel 2 (impulsiveness) is dimensionless and never
+    # re-standardised — the F5 experiment that z-scored it showed no benefit
+    # and was reverted.
     standardize_vibration: bool = True
 
-    # Augmentations (applied in feature space)
+    # R1a — Acoustic2DCNN channel-width multiplier.  Default 1 reproduces
+    # the published 32/64/128 backbone; set to 2 for the wider 64/128/256
+    # variant.  V1 and V2 must use the same value so that V2 can load
+    # V1 acoustic weights without shape mismatch.  Vibration backbone is
+    # NOT scaled — the R1 experiment changes acoustic only.
+    acoustic_cnn_width_mult: int = ENCODER.acoustic_cnn_width_mult
+
+    # Augmentations (applied in feature space) — per-experiment knobs;
+    # the orchestrator's `_v1_cfg(quick)` overrides to publication values.
     gain_jitter_db: float = 6.0
     channel_dropout_p: float = 0.2
     spec_augment_freq_mask: int = 6
@@ -109,18 +177,19 @@ class V1SSLConfig:
 
     # System
     seed: int = 42
-    device: str = "cpu"
+    device: str = "auto"
 
     extra: dict = field(default_factory=dict)
 
 
-_DATASET_INDEX = {"d1": 0, "d2": 1, "d3": 2, "d4": 3, "illwerke_raw": 4, "illwerke": 4}
-
-
 def _dataset_idx(dataset_id: str) -> int:
-    if dataset_id not in _DATASET_INDEX:
-        raise KeyError(f"unknown dataset_id {dataset_id!r}")
-    return _DATASET_INDEX[dataset_id]
+    """Registry-driven dataset index for embedding lookups.
+
+    The integer index comes from ``DatasetRegistry`` (alphabetical-sorted by
+    canonical id) and is stable across runs.  Aliases (e.g. ``illwerke`` ->
+    ``illwerke_raw``) resolve to the same canonical index.
+    """
+    return REGISTRY.index_of(dataset_id)
 
 
 # ---------------------------------------------------------------------------
@@ -135,6 +204,7 @@ class _PrecomputedSegment:
     features: np.ndarray  # acoustic: (n_mics, 2, F, T_frames) ; vibration: (n_vib, 3, T)
     xyz: np.ndarray  # (N, 3)
     dataset_idx: int
+    dataset_id: str  # canonical string id used to resolve per-dataset window scales
     mode_label: str
     recording_id: str
     source_dir: str
@@ -177,7 +247,11 @@ def _precompute_segment(
     elif modality == "vibration":
         features = compute_vibration_input_stack(
             s.segment.accel_data,
-            kurtosis_window=cfg.vib_kurtosis_window,
+            sample_rate=float(s.segment.accel_sample_rate),
+            kurtosis_window_seconds=cfg.vib_kurtosis_window_seconds,
+            min_kurtosis_samples=cfg.vib_min_kurtosis_samples,
+            crest_factor_window_seconds=cfg.vib_crest_factor_window_seconds,
+            min_crest_factor_samples=cfg.vib_min_crest_factor_samples,
             standardize=cfg.standardize_vibration,
         )
         xyz = s.vib_positions.astype(np.float32)
@@ -192,6 +266,7 @@ def _precompute_segment(
         features=features.astype(np.float32),
         xyz=xyz,
         dataset_idx=_dataset_idx(s.dataset_id),
+        dataset_id=str(s.dataset_id),
         mode_label=s.mode_label or "Unknown",
         recording_id=s.recording_id,
         source_dir=str(s.source_dir),
@@ -204,14 +279,45 @@ def _precompute_segment(
 # ---------------------------------------------------------------------------
 
 
+def _resolve_segment_scales(
+    cfg: V1SSLConfig, dataset_id: str
+) -> tuple[tuple[float, ...], float]:
+    """Return the (scales, stride_ratio) for one segment.
+
+    Priority:
+      1. Per-dataset override in ``cfg.window_scales_seconds_per_dataset``.
+      2. Global ``cfg.window_scales_seconds`` tuple if non-empty.
+      3. Legacy fallback ``(cfg.window_seconds,)`` with stride derived
+         from ``cfg.window_stride_seconds / cfg.window_seconds`` — this
+         is the byte-equivalent path for pre-2026-05-19 configs.
+    """
+    per_ds = cfg.window_scales_seconds_per_dataset or {}
+    if dataset_id in per_ds and per_ds[dataset_id]:
+        scales = tuple(float(s) for s in per_ds[dataset_id])
+        return scales, float(cfg.window_stride_ratio)
+    if cfg.window_scales_seconds:
+        scales = tuple(float(s) for s in cfg.window_scales_seconds)
+        return scales, float(cfg.window_stride_ratio)
+    legacy_ratio = (
+        float(cfg.window_stride_seconds) / float(cfg.window_seconds)
+        if cfg.window_seconds > 0
+        else 0.5
+    )
+    return (float(cfg.window_seconds),), legacy_ratio
+
+
 class _WindowedFeatureDataset(tud.Dataset):
     """Yields (feature_window, xyz, dataset_idx, mode_label) per index.
 
-    Window size in frames is computed *per segment* from its `feature_fs`,
-    so a 2-second window over D4 raw vibration (~376 Hz) keeps all 752
-    samples and a 2-second window over D1 peak vibration (4 Hz) keeps all 8.
-    A grouped batch sampler then ensures windows of identical frame count
-    end up in the same batch, so `torch.stack` never trips.
+    Window size in frames is computed *per segment* from its `feature_fs`
+    AND per scale from `cfg.window_scales_seconds[_per_dataset]`, so a
+    2-second window over D4 raw vibration (~376 Hz) keeps all 752 samples
+    and a 2-second window over D1 peak vibration (4 Hz) keeps all 8.
+
+    When the config defines multiple scales, every (segment, scale) pair
+    materialises its own window list; the grouped batch sampler then
+    buckets by ``(channel_count, n_frames)`` so every batch is
+    single-dataset × single-scale and ``torch.stack`` never trips.
     """
 
     def __init__(
@@ -228,14 +334,18 @@ class _WindowedFeatureDataset(tud.Dataset):
 
         self._refs = []
         for si, seg in enumerate(segments):
-            n_frames = max(2, int(round(cfg.window_seconds * seg.feature_fs)))
-            stride = max(1, int(round(cfg.window_stride_seconds * seg.feature_fs)))
+            scales, stride_ratio = _resolve_segment_scales(cfg, seg.dataset_id)
             T = int(seg.features.shape[-1])
-            if T < n_frames:
-                continue
-            for start in range(0, T - n_frames + 1, stride):
-                # Stash n_frames in the ref so __getitem__ doesn't recompute.
-                self._refs.append((si, start, n_frames))
+            for scale_s in scales:
+                n_frames = max(2, int(round(scale_s * seg.feature_fs)))
+                stride = max(1, int(round(scale_s * stride_ratio * seg.feature_fs)))
+                if T < n_frames:
+                    continue
+                for start in range(0, T - n_frames + 1, stride):
+                    # Stash n_frames in the ref so __getitem__ doesn't recompute.
+                    # The grouped batch sampler buckets by (n_ch, n_frames) so
+                    # each batch is single-scale by construction.
+                    self._refs.append((si, start, n_frames))
 
     def __len__(self) -> int:
         return len(self._refs)
@@ -463,6 +573,7 @@ def _time_split_segment(
         features=train_feats,
         xyz=seg.xyz,
         dataset_idx=seg.dataset_idx,
+        dataset_id=seg.dataset_id,
         mode_label=seg.mode_label,
         recording_id=f"{seg.recording_id}__train_half",
         source_dir=seg.source_dir,
@@ -472,6 +583,7 @@ def _time_split_segment(
         features=val_feats,
         xyz=seg.xyz,
         dataset_idx=seg.dataset_idx,
+        dataset_id=seg.dataset_id,
         mode_label=seg.mode_label,
         recording_id=f"{seg.recording_id}__val_half",
         source_dir=seg.source_dir,
@@ -627,7 +739,7 @@ def train_v1_per_modality(
 
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
-    device = torch.device(cfg.device)
+    device = resolve_device(cfg.device)
 
     segments = _gather_healthy_segments(loaders, modality, cfg)
     if not segments:
@@ -656,6 +768,7 @@ def train_v1_per_modality(
         feature_dim=cfg.feature_dim,
         embed_dim=cfg.embed_dim,
         n_heads=cfg.n_heads,
+        acoustic_cnn_width_mult=cfg.acoustic_cnn_width_mult,
     ).to(device)
     projection = _ProjectionHead(cfg.embed_dim, cfg.proj_dim).to(device)
     optim = torch.optim.AdamW(

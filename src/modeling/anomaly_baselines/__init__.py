@@ -19,6 +19,7 @@ from .lstm_ae import (
     LSTMAutoencoderV0,
     V0Config,
     extract_log_mel_windows,
+    extract_vibration_temporal_windows,
     score_recordings,
     train_v0_lstm_ae,
 )
@@ -45,6 +46,7 @@ __all__ = [
     "evaluate_srp_phat",
     "extract_log_mel_windows",
     "extract_mode_features",
+    "extract_vibration_temporal_windows",
     "predict_modes",
     "predict_srp_phat",
     "score_recordings",
