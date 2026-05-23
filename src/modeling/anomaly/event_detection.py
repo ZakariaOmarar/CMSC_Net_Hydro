@@ -267,6 +267,7 @@ def sliding_window_v3_inference(
     *,
     v2_cfg,
     inference_stride_s: float = 0.25,
+    xt_pool=None,
     device: str = "auto",
 ):
     """Run V3 on a single paired segment at a finer-than-training stride.
@@ -276,6 +277,12 @@ def sliding_window_v3_inference(
     the 2 s window (V3 was trained for it) but slide with a much
     finer stride (e.g. 250 ms), producing one V3 score every 250 ms
     rather than every 1 s.
+
+    ``xt_pool`` MUST be the same learned ``_XtPool`` the flow was trained
+    with (``V3Result.xt_pool``).  Omitting it (None) falls back to the legacy
+    mean-pool, which is INCONSISTENT with a flow trained under ``xt_pool=
+    "pma2"`` and miscalibrates the scores.  Pass ``res.xt_pool`` so inference
+    pooling matches training pooling (2026-05-23 calibration fix).
 
     Returns ``(times_s, scores, contexts)`` aligned over the segment.
 
@@ -315,7 +322,9 @@ def sliding_window_v3_inference(
     loader = tud.DataLoader(ds, batch_sampler=sampler, collate_fn=_collate)
 
     dev = resolve_device(device)
-    x, c, _ = _extract_xc(v2_encoder, loader, dev)
+    # Pass the trained xt_pool so inference pooling matches training pooling.
+    xtp = xt_pool.to(dev) if xt_pool is not None else None
+    x, c, _ = _extract_xc(v2_encoder, loader, dev, xt_pool=xtp, grad=False)
     with torch.no_grad():
         scores = flow.anomaly_score(x.to(dev), c.to(dev)).cpu().numpy().astype(np.float64)
     # Window-centre times: start_ac / acoustic_fs + window_seconds / 2.
@@ -331,9 +340,125 @@ def sliding_window_v3_inference(
     return times, scores, c.numpy().astype(np.float64)
 
 
+def v3_real_anomaly_detection(
+    v2_encoder,
+    flow,
+    thresholds,
+    segments,
+    *,
+    v2_cfg,
+    percentile: int = 95,
+    inference_stride_s: float = 0.25,
+    low_percentile_ratio: float = 0.95,
+    min_duration_s: float = 0.10,
+    xt_pool=None,
+    device: str = "auto",
+) -> dict:
+    """Score V3's temporal detections against weak knock ground-truth (B4).
+
+    For each anomaly recording: derive weak knock intervals from the impulse
+    envelope (``weak_labels.derive_knock_events``), run V3 at a fine stride,
+    threshold per cluster to get predicted alert events, then match predicted
+    events against the GT intervals:
+
+      * GT interval with ≥ 1 overlapping predicted event → true positive.
+      * Predicted event overlapping no GT interval          → false positive.
+      * GT interval with no overlapping predicted event     → false negative.
+
+    Returns precision / recall / F1 over the pooled GT, plus the median
+    onset-timing error (|predicted_start − GT_start|) over matched pairs.
+    This is the missing "is V3 actually detecting the real sparse anomalies?"
+    metric — distinct from synthetic-injection AUC and healthy-FPR.
+
+    `segments` is a list of `TestDatasetSegment` (raw waveforms → weak GT and,
+    via `precompute_paired`, the V3 inference features).
+    """
+    from ...config import resolve_device
+    from .v3_trainer import precompute_paired
+    from .weak_labels import derive_knock_events
+
+    dev = resolve_device(device)
+    # Per-cluster bar: p99 when percentile==99, else p95 (the stored tiers).
+    bar = thresholds.p99 if int(percentile) >= 99 else thresholds.p95
+
+    n_tp = n_fp = n_fn = 0
+    onset_errors: list[float] = []
+    n_recordings_scored = 0
+    n_recordings_no_gt = 0
+
+    for s in segments:
+        gt = derive_knock_events(s)
+        if not gt:
+            n_recordings_no_gt += 1
+            continue
+        paired = precompute_paired(s, v2_cfg)
+        if paired is None:
+            continue
+        try:
+            times, scores, contexts = sliding_window_v3_inference(
+                v2_encoder, flow, paired,
+                v2_cfg=v2_cfg, inference_stride_s=inference_stride_s,
+                xt_pool=xt_pool, device=dev,
+            )
+        except Exception:
+            continue
+        if scores.size == 0:
+            continue
+        # Per-window cluster assignment → per-window high/low thresholds.
+        clusters = thresholds.assign(contexts)
+        per_win_high = np.array([float(bar[int(k)]) for k in clusters], dtype=np.float64)
+        # A single scalar enter/exit pair keeps detect_events simple; use the
+        # median per-window bar (robust to a stray cluster) and a low =
+        # ratio*high hysteresis floor.
+        high = float(np.median(per_win_high))
+        low = float(low_percentile_ratio * high)
+        events = detect_events_from_score_timeline(
+            scores, times, high_threshold=high, low_threshold=low,
+            min_duration_s=min_duration_s, max_gap_windows=0,
+            recording_id=s.recording_id, dataset_id=s.dataset_id,
+            window_seconds=v2_cfg.window_seconds,
+        )
+        pred_intervals = [(e.t_start_s, e.t_end_s, e.peak_t_s) for e in events]
+        n_recordings_scored += 1
+
+        # Match GT → predictions (recall side) and track which predictions hit.
+        matched_pred = [False] * len(pred_intervals)
+        for (gs, ge) in gt:
+            hit = False
+            for j, (ps, pe, ppk) in enumerate(pred_intervals):
+                if ps < ge and gs < pe:  # overlap
+                    hit = True
+                    matched_pred[j] = True
+                    onset_errors.append(abs(ps - gs))
+                    break
+            if hit:
+                n_tp += 1
+            else:
+                n_fn += 1
+        # Predictions that matched no GT interval are false positives.
+        n_fp += sum(1 for m in matched_pred if not m)
+
+    precision = n_tp / (n_tp + n_fp) if (n_tp + n_fp) > 0 else 0.0
+    recall = n_tp / (n_tp + n_fn) if (n_tp + n_fn) > 0 else 0.0
+    f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
+    return {
+        "precision": float(precision),
+        "recall": float(recall),
+        "f1": float(f1),
+        "n_true_positive": int(n_tp),
+        "n_false_positive": int(n_fp),
+        "n_false_negative": int(n_fn),
+        "median_onset_error_s": float(np.median(onset_errors)) if onset_errors else float("nan"),
+        "n_recordings_scored": int(n_recordings_scored),
+        "n_recordings_no_weak_gt": int(n_recordings_no_gt),
+        "percentile": int(percentile),
+    }
+
+
 __all__ = [
     "AnomalyEvent",
     "detect_events_from_score_timeline",
     "sliding_window_v3_inference",
     "summarise_events",
+    "v3_real_anomaly_detection",
 ]

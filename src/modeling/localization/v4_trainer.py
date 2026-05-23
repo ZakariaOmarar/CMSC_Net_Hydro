@@ -72,6 +72,10 @@ class V4Sample:
     # soft-argmax init).  ``None`` when accel multilateration was not
     # computed (e.g. < 4 accels, or the precompute path skipped it).
     multilat_xyz: np.ndarray | None = None
+    # B3 (2026-05-23) — window-centre start time (s) within the recording, so
+    # the V3-gated evaluation can match this sample to V3's detected event
+    # intervals (V4 only "fires" on windows V3 flags anomalous in deployment).
+    window_start_s: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -217,6 +221,7 @@ def precompute_v4_samples(
     window_stride_seconds: float | None = None,
     burst_aware_srp: bool = False,
     burst_seconds: float = 0.10,
+    restrict_to_knock_intervals: bool = True,
     device: torch.device | str = "auto",
 ) -> list[V4Sample]:
     """Walk segments, slice labeled anomaly windows, build `V4Sample`s.
@@ -304,12 +309,35 @@ def precompute_v4_samples(
         if T_ac < n_ac or T_vib < n_vib or T_mic < n_mic_raw or T_acc < n_acc_raw:
             continue
 
+        # B2 (2026-05-23) — sparse-anomaly window restriction.  RandomFault
+        # recordings carry the knock position on EVERY window even though the
+        # knock occupies only a sparse sub-span; training V4 to localise the
+        # knock on healthy windows is label noise.  Derive weak knock
+        # intervals from the impulse envelope and keep only windows that
+        # overlap one.  Empty derivation (no impulse found) → keep all
+        # windows (conservative fallback = prior behaviour).  Continuous-
+        # anomaly recordings (D2 RandomFault, D3 hit, D5 knock) naturally
+        # retain most windows because their bursts cover the span.
+        knock_intervals: list[tuple[float, float]] = []
+        if restrict_to_knock_intervals:
+            try:
+                from ..anomaly.weak_labels import derive_knock_events
+                knock_intervals = derive_knock_events(s, burst_seconds=burst_seconds)
+            except Exception:
+                knock_intervals = []
+
         ds_idx = torch.tensor(
             [_dataset_idx(s.dataset_id)], dtype=torch.long, device=device
         )
 
         for start_ac in range(0, T_ac - n_ac + 1, stride_ac):
             t_start = start_ac / max(ac_fs, 1e-9)
+            # Skip windows that don't overlap a derived knock interval.  Only
+            # active when intervals were found; empty list = keep everything.
+            if knock_intervals:
+                from ..anomaly.weak_labels import window_overlaps_any
+                if not window_overlaps_any(t_start, t_start + win_s, knock_intervals):
+                    continue
             start_vib = int(round(t_start * vib_fs))
             if start_vib + n_vib > T_vib:
                 continue
@@ -385,6 +413,7 @@ def precompute_v4_samples(
                     source_dir=str(s.source_dir),
                     dataset_id=s.dataset_id,
                     multilat_xyz=multilat_xyz,
+                    window_start_s=float(t_start),
                 )
             )
     return samples
@@ -409,6 +438,35 @@ def _split_samples_by_recording(
     train = [s for s in samples if (s.source_dir, s.recording_id) in train_keys]
     val = [s for s in samples if (s.source_dir, s.recording_id) in val_keys]
     return train, val
+
+
+def _position_key(xyz, ndigits: int = 3) -> tuple[float, float, float]:
+    """Round a target position to a hashable cm-grid key for spatial splits."""
+    a = np.asarray(xyz, dtype=np.float64).ravel()
+    return (round(float(a[0]), ndigits), round(float(a[1]), ndigits), round(float(a[2]), ndigits))
+
+
+def split_samples_by_position(
+    samples: list[V4Sample],
+    holdout_positions: list[tuple[float, float, float]],
+    *,
+    ndigits: int = 3,
+) -> tuple[list[V4Sample], list[V4Sample]]:
+    """Split V4 samples into (train, holdout) by TARGET POSITION.
+
+    The held-out positions never appear in training, so the holdout MAE
+    measures true "localise an unseen position" generalisation — the correct
+    metric for localization, unlike the random-window split which leaks a
+    position's other windows into training.
+
+    ``holdout_positions`` are matched on the rounded cm grid (``ndigits``),
+    so callers can pass positions in metres exactly as parsed from the folder
+    names (e.g. ``(0.22, 0.0, 0.0)`` for the ``(22, 0, 0)`` cm folder).
+    """
+    hold_keys = {_position_key(p, ndigits) for p in holdout_positions}
+    train = [s for s in samples if _position_key(s.target_xyz, ndigits) not in hold_keys]
+    holdout = [s for s in samples if _position_key(s.target_xyz, ndigits) in hold_keys]
+    return train, holdout
 
 
 def _stack_tdoa(samples: list[V4Sample]) -> torch.Tensor:
@@ -520,15 +578,22 @@ def train_v4_localization(
     cfg: V4Config | None = None,
     *,
     grid: GridSpec,
+    explicit_split: tuple[list[V4Sample], list[V4Sample]] | None = None,
 ) -> V4Result:
     """Train the V4 head supervised on labeled anomaly windows.
 
     `grid` must match the `GridSpec` used at sample-precompute time —
     the head's soft-argmax operates on its voxel centres, so a mismatch
     silently corrupts the regression targets.
+
+    `explicit_split` — when provided as ``(train_samples, val_samples)``,
+    bypasses the internal random recording-split.  Used by the spatial-
+    holdout evaluation (train on most positions, validate on the held-out
+    positions) so the reported MAE measures localise-an-unseen-position
+    generalisation rather than within-position interpolation.
     """
     cfg = cfg or V4Config()
-    if not samples:
+    if not samples and explicit_split is None:
         raise RuntimeError("V4: no labeled anomaly samples")
 
     torch.manual_seed(cfg.seed)
@@ -536,9 +601,17 @@ def train_v4_localization(
     device = resolve_device(cfg.device)
     print(f"V4: device={describe_device(device)}")
 
-    train_samples, val_samples = _split_samples_by_recording(samples, cfg.val_ratio, cfg.seed)
+    if explicit_split is not None:
+        train_samples, val_samples = explicit_split
+        if not train_samples or not val_samples:
+            raise RuntimeError(
+                f"V4 explicit_split needs non-empty train+val; got "
+                f"{len(train_samples)} train / {len(val_samples)} val"
+            )
+    else:
+        train_samples, val_samples = _split_samples_by_recording(samples, cfg.val_ratio, cfg.seed)
 
-    c_dim = int(samples[0].context.shape[0])
+    c_dim = int(train_samples[0].context.shape[0])
     s_dim = cfg.scada_dim
     grid_coords = _grid_coords_from_spec(grid)
     head = V4LocalizationHead(

@@ -403,6 +403,80 @@ def _v4_cfg(quick: bool, scada_dim: int = 0, unconditional: bool = False) -> V4C
 
 
 # ---------------------------------------------------------------------------
+# V4 spatial holdout — positions the user pinned as the localization
+# generalisation test (folder coords in cm → metres).  Held out of V4
+# training so the reported MAE measures localise-an-unseen-position, not
+# within-position interpolation.  See plan `i-would-like-you-distributed-pizza`.
+# ---------------------------------------------------------------------------
+
+V4_HOLDOUT_POSITIONS_M: list[tuple[float, float, float]] = [
+    (0.22, 0.0, 0.0),     # D5 knock (22, 0, 0)
+    (0.03, -0.03, 0.08),  # D5 knock (3, -3, 8)
+    (0.06, -0.15, 0.0),   # D5 knock (6, -15, 0)
+    (0.02, 0.04, 0.08),   # D4 RandomFault_knock (2, 4, 8)
+    (0.0, -0.20, 0.0),    # D4 RandomFault_knock (0, -20, 0)
+]
+
+
+def _v3_event_intervals_for_recordings(
+    holdout_samples,
+    loaders_by_id: dict,
+    v2_encoder,
+    v3,
+    v2_cfg,
+    v3_cfg,
+) -> dict:
+    """Return {recording_id: [(t_start_s, t_end_s), ...]} of V3-detected events.
+
+    Runs V3 (the trained fusion flow + thresholds) at a fine stride on each
+    held-out recording and extracts alert events.  Used to GATE the V4
+    holdout: V4 only "fires" on windows V3 flags anomalous in deployment, so
+    the gated MAE is the deployment-faithful localization number.
+    """
+    from ..anomaly.event_detection import (
+        detect_events_from_score_timeline,
+        sliding_window_v3_inference,
+    )
+    from ..anomaly.v3_trainer import precompute_paired
+
+    bar = v3.thresholds.p99 if int(v3_cfg.threshold_percentile) >= 99 else v3.thresholds.p95
+    # Map each holdout sample's (dataset_id, recording_id) back to a segment.
+    wanted: dict[str, str] = {s.recording_id: s.dataset_id for s in holdout_samples}
+    out: dict[str, list[tuple[float, float]]] = {}
+    for dsid in sorted(set(wanted.values())):
+        loader = loaders_by_id.get(dsid)
+        if loader is None:
+            continue
+        for s in loader.list_segments():
+            if s.recording_id not in wanted or wanted[s.recording_id] != dsid:
+                continue
+            paired = precompute_paired(s, v2_cfg)
+            if paired is None:
+                continue
+            try:
+                times, scores, contexts = sliding_window_v3_inference(
+                    v2_encoder, v3.flow, paired,
+                    v2_cfg=v2_cfg, inference_stride_s=0.25,
+                    xt_pool=getattr(v3, "xt_pool", None), device=v3_cfg.device,
+                )
+            except Exception:
+                continue
+            if scores.size == 0:
+                continue
+            clusters = v3.thresholds.assign(contexts)
+            high = float(np.median([float(bar[int(k)]) for k in clusters]))
+            low = float(0.95 * high)
+            evs = detect_events_from_score_timeline(
+                scores, times, high_threshold=high, low_threshold=low,
+                min_duration_s=0.10, max_gap_windows=0,
+                recording_id=s.recording_id, dataset_id=dsid,
+                window_seconds=v2_cfg.window_seconds,
+            )
+            out[s.recording_id] = [(e.t_start_s, e.t_end_s) for e in evs]
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Spatial-label derivation for D3 hits
 # ---------------------------------------------------------------------------
 
@@ -1197,6 +1271,7 @@ def main(quick: bool = False) -> dict:
                         times_s, scores, contexts = sliding_window_v3_inference(
                             v2.encoder, v3.flow, seg,
                             v2_cfg=v2_cfg, inference_stride_s=0.25,
+                            xt_pool=v3.xt_pool,
                             device=resolve_device(v3_cfg.device),
                         )
                     except Exception as inner:
@@ -1225,6 +1300,34 @@ def main(quick: bool = False) -> dict:
         except Exception as e:
             log(f"V3 sliding-window events skipped: {type(e).__name__}: {e}")
 
+        # B4 (2026-05-23) — real-anomaly detection vs weak knock GT.  Scores
+        # V3's detected events against impulse-derived knock intervals on the
+        # sparse-anomaly cohorts (precision / recall / F1 / onset-timing).
+        # This is the prerequisite metric the user flagged: V4 can't be
+        # trusted until V3 detects the real anomalies well.
+        try:
+            from ..anomaly.event_detection import v3_real_anomaly_detection
+            rf_segments = []
+            for loader, dsid in ((D4, "d4"), (D2, "d2"), (D5, "d5")):
+                if loader is None:
+                    continue
+                rf_segments += [s for s in loader.list_segments() if s.is_anomaly]
+            real_det = v3_real_anomaly_detection(
+                v2.encoder, v3.flow, v3.thresholds, rf_segments,
+                v2_cfg=v2_cfg, percentile=v3_cfg.threshold_percentile,
+                inference_stride_s=0.25, xt_pool=v3.xt_pool, device=v3_cfg.device,
+            )
+            v3_depth["real_anomaly_detection"] = real_det
+            metrics["stages"]["v3_real_anomaly"] = real_det
+            log(f"V3 real-anomaly: P={real_det['precision']:.3f} "
+                f"R={real_det['recall']:.3f} F1={real_det['f1']:.3f} "
+                f"onset_err={real_det['median_onset_error_s']:.3f}s "
+                f"(scored {real_det['n_recordings_scored']} recs, "
+                f"{real_det['n_recordings_no_weak_gt']} had no weak GT)")
+        except Exception as e:
+            log(f"V3 real-anomaly detection skipped: {type(e).__name__}: {e}")
+            metrics["stages"]["v3_real_anomaly"] = {"skipped": f"{type(e).__name__}: {e}"}
+
         metrics["stages"]["v3_fusion_depth"] = v3_depth
     _stage_done("stage_4_v3_depth")
 
@@ -1240,14 +1343,28 @@ def main(quick: bool = False) -> dict:
     d4_labeled = [
         s for s in D4.list_segments() if s.is_anomaly and s.spatial_label is not None
     ]
-    log(f"Labelled segments: D2={len(d2_labeled)} D3={len(d3_labeled)} D4={len(d4_labeled)}")
+    # B1 (2026-05-23) — D5 knock recordings carry parsed positions
+    # (`d5_healthy_or_knock` scheme → spatial_label set, is_anomaly=True) and
+    # `d5.yaml` explicitly lists them as V4 localisation labels, but the
+    # cohort builder previously concatenated only D2/D3/D4 and silently
+    # dropped D5.  Including D5 roughly doubles the position inventory.
+    d5_labeled = [
+        s for s in D5.list_segments() if s.is_anomaly and s.spatial_label is not None
+    ] if D5 is not None else []
+    n_positions = len({
+        tuple(np.round(s.spatial_label, 3)) for s in
+        (d2_labeled + d3_labeled + d4_labeled + d5_labeled)
+        if s.spatial_label is not None
+    })
+    log(f"Labelled segments: D2={len(d2_labeled)} D3={len(d3_labeled)} "
+        f"D4={len(d4_labeled)} D5={len(d5_labeled)} | distinct positions={n_positions}")
 
     grid = GridSpec(lo=(-0.22, -0.22, -0.02), hi=(0.40, 0.42, 0.30), n=(32, 32, 16))
 
     log("Precomputing V4 samples (burst-aware SRP-PHAT + accel TDOA + V2 c_t) ...")
     t0 = time.time()
     v4_samples = precompute_v4_samples(
-        v2.encoder, d2_labeled + d3_labeled + d4_labeled,
+        v2.encoder, d2_labeled + d3_labeled + d4_labeled + d5_labeled,
         v2_cfg=v2_cfg, grid=grid,
         spatial_label_overrides=overrides,
         burst_aware_srp=True, burst_seconds=0.10,
@@ -1310,6 +1427,99 @@ def main(quick: bool = False) -> dict:
     metrics["stages"]["v0_multilateration"] = _run_v0_multilateration(
         [D2, D3, D4], overrides, log
     )
+
+    # ============================================== Stage 5b — spatial holdout
+    # Train fusion V4 on all positions EXCEPT the user-pinned held-out set,
+    # then report holdout MAE (localise-an-unseen-position), the V3-GATED
+    # holdout MAE (deployment-faithful: V4 only fires on V3-flagged windows),
+    # and V0 multilateration on the same held-out samples.  Gated by
+    # `gated_v4_eval` (CLI --ungated disables the gating column).
+    log("=== Stage 5b — V4 spatial-holdout + V3-gated eval ===")
+    try:
+        from ..localization import split_samples_by_position
+        train_pos, holdout_pos = split_samples_by_position(
+            v4_samples, V4_HOLDOUT_POSITIONS_M,
+        )
+        n_hold_pos = len({tuple(np.round(s.target_xyz, 3)) for s in holdout_pos})
+        log(f"  spatial split: {len(train_pos)} train / {len(holdout_pos)} holdout "
+            f"samples across {n_hold_pos} held-out positions")
+        if len(train_pos) >= 4 and len(holdout_pos) >= 1:
+            sh: dict = {"n_train_samples": len(train_pos),
+                        "n_holdout_samples": len(holdout_pos),
+                        "n_holdout_positions": n_hold_pos,
+                        "holdout_positions_m": [list(p) for p in V4_HOLDOUT_POSITIONS_M]}
+            res_sh = train_v4_localization(
+                v4_samples, cfg=replace(v4_cfg, channel_mode="both"), grid=grid,
+                explicit_split=(train_pos, holdout_pos),
+            )
+            sh["holdout_mae_ungated_m"] = float(res_sh.val_mae_3d)
+            sh["holdout_p95_ungated_m"] = float(res_sh.val_p95_3d)
+            sh["holdout_train_val_gap_m"] = float(abs(
+                (res_sh.val_loss_history[-1] if res_sh.val_loss_history else float("nan"))
+                - (res_sh.train_loss_history[-1] if res_sh.train_loss_history else float("nan"))
+            ))
+            log(f"  holdout MAE (ungated) = {res_sh.val_mae_3d:.4f} m")
+
+            # V3-gated holdout: keep holdout predictions whose window overlaps
+            # a V3-detected event in their recording.
+            gated_v4_eval = True
+            if gated_v4_eval and "fusion" in v3_results:
+                try:
+                    intervals = _v3_event_intervals_for_recordings(
+                        holdout_pos, LOADERS_BY_ID, v2.encoder,
+                        v3_results["fusion"], v2_cfg, v3_cfg,
+                    )
+                    from ..anomaly.weak_labels import window_overlaps_any
+                    win_s = float(v2_cfg.window_seconds)
+                    # res_sh.val_* are aligned to holdout_pos order (explicit split
+                    # preserves order within val).  Recompute per-sample error.
+                    keep_mask = []
+                    for s in holdout_pos:
+                        ivs = intervals.get(s.recording_id, [])
+                        keep_mask.append(
+                            bool(ivs) and window_overlaps_any(
+                                s.window_start_s, s.window_start_s + win_s, ivs)
+                        )
+                    keep = np.asarray(keep_mask, dtype=bool)
+                    if keep.shape[0] == res_sh.val_predictions.shape[0] and keep.any():
+                        err = np.linalg.norm(
+                            res_sh.val_predictions[keep] - res_sh.val_targets[keep], axis=-1)
+                        sh["holdout_mae_v3gated_m"] = float(np.mean(err))
+                        sh["n_holdout_gated"] = int(keep.sum())
+                        log(f"  holdout MAE (V3-gated) = {np.mean(err):.4f} m "
+                            f"on {int(keep.sum())}/{keep.shape[0]} V3-flagged windows")
+                    else:
+                        sh["holdout_mae_v3gated_m"] = None
+                        sh["n_holdout_gated"] = int(keep.sum()) if keep.size else 0
+                        log("  V3-gated holdout: no windows flagged (or shape mismatch)")
+                except Exception as e:
+                    log(f"  V3-gated holdout skipped: {type(e).__name__}: {e}")
+                    sh["holdout_mae_v3gated_m"] = None
+
+            # V0 multilateration on the same held-out samples (recording-level).
+            try:
+                hold_recs = {s.recording_id for s in holdout_pos}
+                v0_errs: list[float] = []
+                for dsid, payload in metrics["stages"]["v0_multilateration"].items():
+                    for rec in payload.get("per_recording", []):
+                        if rec.get("recording_id") in hold_recs and "error_m" in rec:
+                            v0_errs.append(float(rec["error_m"]))
+                sh["holdout_v0_multilat_mae_m"] = float(np.mean(v0_errs)) if v0_errs else None
+                sh["n_holdout_v0"] = len(v0_errs)
+                if v0_errs and "holdout_mae_v3gated_m" in sh and sh["holdout_mae_v3gated_m"] is not None:
+                    sh["delta_v4gated_minus_v0_m"] = sh["holdout_mae_v3gated_m"] - float(np.mean(v0_errs))
+                    log(f"  V0 multilat on holdout = {np.mean(v0_errs):.4f} m | "
+                        f"Δ(V4gated − V0) = {sh['delta_v4gated_minus_v0_m']:+.4f} m")
+            except Exception as e:
+                log(f"  V0-on-holdout skipped: {type(e).__name__}: {e}")
+            metrics["stages"]["v4_spatial_holdout"] = sh
+        else:
+            log("  spatial-holdout SKIPPED — insufficient train/holdout samples")
+            metrics["stages"]["v4_spatial_holdout"] = {
+                "skipped": f"train={len(train_pos)} holdout={len(holdout_pos)}"}
+    except Exception as e:
+        log(f"Stage 5b spatial-holdout skipped: {type(e).__name__}: {e}")
+        metrics["stages"]["v4_spatial_holdout"] = {"skipped_reason": f"{type(e).__name__}: {e}"}
 
     _stage_done("stage_5_v4_four_paradigms")
 

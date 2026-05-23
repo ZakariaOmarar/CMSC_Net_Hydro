@@ -66,8 +66,11 @@ def _load_runs(
             if entry.get("run_dir"):
                 run_dirs.append(Path(entry["run_dir"]))
     else:
-        run_dirs = sorted(RUNS_DIR.glob("*__ablation_*")) + sorted(
-            RUNS_DIR.glob("*__v4aug_*")
+        run_dirs = (
+            sorted(RUNS_DIR.glob("*__ablation_*"))
+            + sorted(RUNS_DIR.glob("*__v4aug_*"))
+            + sorted(RUNS_DIR.glob("*__v3deep_*"))
+            + sorted(RUNS_DIR.glob("*__v4deep_*"))
         )
 
     rows: list[dict] = []
@@ -282,6 +285,54 @@ def _multi_seed(rows: list[dict]) -> str:
     return "\n".join(out) + "\n"
 
 
+def _table_v3_deep(rows: list[dict]) -> str:
+    """Deep V3 sweep — real-anomaly detection vs weak knock GT + NLL gap."""
+    deep = [r for r in rows if isinstance(r["metrics"].get("paradigms"), dict)]
+    out = ["## Table 5 — Deep V3 sweep (real-anomaly detection, gap-guarded)", ""]
+    if not deep:
+        out.append("_(no v3deep cells loaded)_\n")
+        return "\n".join(out)
+    cols = ["cell", "seed", "real_P", "real_R", "real_F1", "onset_err_s",
+            "syn_AUC@5", "val_NLL", "NLL_gap", "es_epoch"]
+    out += ["| " + " | ".join(cols) + " |", "|" + "|".join(["---"] * len(cols)) + "|"]
+    for r in deep:
+        fus = (r["metrics"].get("paradigms") or {}).get("fusion") or {}
+        ra = fus.get("real_anomaly") or {}
+        auc = fus.get("synthetic_auc") or {}
+        auc5 = auc.get("5.0", auc.get(5.0)) if isinstance(auc, dict) else None
+        out.append("| " + " | ".join([
+            r["cell"], str(r["cfg"].get("seed", "?")),
+            _fmt(ra.get("precision")), _fmt(ra.get("recall")), _fmt(ra.get("f1")),
+            _fmt(ra.get("median_onset_error_s")), _fmt(auc5),
+            _fmt(fus.get("val_nll_final")), _fmt(fus.get("nll_gap")),
+            _fmt(fus.get("early_stopped_epoch"), prec=0),
+        ]) + " |")
+    return "\n".join(out) + "\n"
+
+
+def _table_v4_deep(rows: list[dict]) -> str:
+    """Deep V4 sweep — spatial-holdout MAE, V3-gated, vs V0, + gap."""
+    deep = [r for r in rows if "holdout_mae_ungated_m" in r["metrics"]]
+    out = ["## Table 6 — Deep V4 sweep (spatial holdout, V3-gated, gap-guarded)", ""]
+    if not deep:
+        out.append("_(no v4deep cells loaded)_\n")
+        return "\n".join(out)
+    cols = ["cell", "seed", "holdout_MAE_gated", "holdout_MAE_ungated",
+            "n_gated", "train_val_gap_m", "es_epoch"]
+    out += ["| " + " | ".join(cols) + " |", "|" + "|".join(["---"] * len(cols)) + "|"]
+    for r in deep:
+        m = r["metrics"]
+        out.append("| " + " | ".join([
+            r["cell"], str(r["cfg"].get("seed", "?")),
+            _fmt(m.get("holdout_mae_v3gated_m")),
+            _fmt(m.get("holdout_mae_ungated_m")),
+            _fmt(m.get("n_holdout_gated"), prec=0),
+            _fmt(m.get("train_val_gap_m")),
+            _fmt(m.get("early_stopped_epoch"), prec=0),
+        ]) + " |")
+    return "\n".join(out) + "\n"
+
+
 def _guidance(rows: list[dict]) -> str:
     return (
         "## Selection guidance\n\n"
@@ -323,6 +374,8 @@ def main() -> None:
         _table_deep_vs_simple(rows),
         _axis_grouping(rows),
         _multi_seed(rows),
+        _table_v3_deep(rows),
+        _table_v4_deep(rows),
         _guidance(rows),
     ]
     # When scoped to a campaign, write the report INSIDE the campaign dir so
