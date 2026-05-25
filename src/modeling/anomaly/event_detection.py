@@ -411,7 +411,15 @@ def v3_real_anomaly_detection(
         # median per-window bar (robust to a stray cluster) and a low =
         # ratio*high hysteresis floor.
         high = float(np.median(per_win_high))
-        low = float(low_percentile_ratio * high)
+        # Hysteresis exit threshold must satisfy low <= high.  V3 anomaly
+        # scores are NEGATIVE log-likelihoods, so the per-cluster bar `high`
+        # is typically negative (e.g. -240).  `ratio * high` with ratio<1
+        # makes a negative number LARGER (less negative), inverting low>high
+        # and tripping detect_events' guard.  Build the exit bar as a
+        # downward offset from `high` instead, then clamp.
+        low = high - abs(high) * (1.0 - low_percentile_ratio)
+        if low > high:
+            low = high
         events = detect_events_from_score_timeline(
             scores, times, high_threshold=high, low_threshold=low,
             min_duration_s=min_duration_s, max_gap_windows=0,

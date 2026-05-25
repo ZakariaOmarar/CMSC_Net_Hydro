@@ -159,6 +159,10 @@ def main() -> None:
                         "load it (skips the expensive SRP-PHAT precompute); else "
                         "precompute and write it.  The campaign driver passes one "
                         "shared path so all cells precompute exactly ONCE.")
+    p.add_argument("--all-channel-modes", action="store_true",
+                   help="Train the cell at all 4 channel modes (acoustic SRP / "
+                        "tdoa / vibration-only-learned / fusion) for the per-modality "
+                        "localization breakdown.  Default: fusion ('both') only.")
     args = p.parse_args()
 
     encoder_run = Path(args.encoder_run)
@@ -239,31 +243,28 @@ def main() -> None:
 
     loaders_by_id = loaders or {}  # _v3_event_intervals_for_recordings keys by dataset_id
 
-    for cell_id in cells:
-        cfg = replace(_apply_cell(cell_id, base_v4), seed=args.seed, channel_mode="both")
-        ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_dir = REPO_ROOT / "results" / "runs" / f"{ts}__v4deep_{cell_id}_s{args.seed}"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        log_path = out_dir / "run_log.txt"
-        _log(f"cell={cell_id} hd={cfg.head_dropout_p} wd={cfg.weight_decay} "
-             f"cnn={cfg.cnn_feature_dim} hidden={cfg.hidden_dim} rs={cfg.residual_scale_m}", log_path)
-        (out_dir / "cell_config.json").write_text(json.dumps({
-            "cell": cell_id, "seed": args.seed, "encoder_run": str(encoder_run),
-            "v3_run": args.v3_run, "v4_cfg": asdict(cfg),
-        }, indent=2, default=str))
-
-        t0 = time.time()
+    # Precompute V3-gated keep-mask ONCE per holdout cohort (mode-independent —
+    # gating depends on V3 + window times, not on the V4 channel mode).
+    gate_keep = None
+    if v3_holder is not None:
         try:
-            res = train_v4_localization(v4_samples, cfg=cfg, grid=grid,
-                                        explicit_split=(train_pos, holdout_pos))
+            from src.modeling.anomaly.weak_labels import window_overlaps_any
+            intervals = _v3_event_intervals_for_recordings(
+                holdout_pos, loaders_by_id, encoder, v3_holder, v2_cfg, v3_cfg)
+            win_s = float(v2_cfg.window_seconds)
+            gate_keep = np.array([
+                bool(intervals.get(s.recording_id))
+                and window_overlaps_any(s.window_start_s, s.window_start_s + win_s,
+                                        intervals.get(s.recording_id, []))
+                for s in holdout_pos], dtype=bool)
         except Exception as e:
-            _log(f"  V4 FAILED: {type(e).__name__}: {e}", log_path)
-            (out_dir / "metrics.json").write_text(json.dumps(
-                {"cell": cell_id, "seed": args.seed, "error": f"{type(e).__name__}: {e}"}, indent=2))
-            continue
-        dt = time.time() - t0
-        m: dict = {
-            "cell": cell_id, "seed": args.seed,
+            print(f"  V3 gating precompute skipped: {type(e).__name__}: {e}")
+
+    def _train_eval(cfg, log_path) -> dict:
+        res = train_v4_localization(v4_samples, cfg=cfg, grid=grid,
+                                    explicit_split=(train_pos, holdout_pos))
+        d: dict = {
+            "channel_mode": cfg.channel_mode,
             "holdout_mae_ungated_m": float(res.val_mae_3d),
             "holdout_p95_ungated_m": float(res.val_p95_3d),
             "train_val_gap_m": float(abs(
@@ -272,34 +273,55 @@ def main() -> None:
             "early_stopped_epoch": res.early_stopped_epoch,
             "n_holdout": int(res.val_predictions.shape[0]),
         }
-        # V3-gated holdout MAE.
-        if v3_holder is not None:
+        if gate_keep is not None and gate_keep.shape[0] == res.val_predictions.shape[0] and gate_keep.any():
+            err = np.linalg.norm(
+                res.val_predictions[gate_keep] - res.val_targets[gate_keep], axis=-1)
+            d["holdout_mae_v3gated_m"] = float(np.mean(err))
+            d["n_holdout_gated"] = int(gate_keep.sum())
+        else:
+            d["holdout_mae_v3gated_m"] = None
+            d["n_holdout_gated"] = int(gate_keep.sum()) if gate_keep is not None else 0
+        return d, res
+
+    modes = (["srp_only", "tdoa_only", "vibration_only_learned", "both"]
+             if args.all_channel_modes else ["both"])
+
+    for cell_id in cells:
+        ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_dir = REPO_ROOT / "results" / "runs" / f"{ts}__v4deep_{cell_id}_s{args.seed}"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        log_path = out_dir / "run_log.txt"
+        base_cfg = _apply_cell(cell_id, base_v4)
+        (out_dir / "cell_config.json").write_text(json.dumps({
+            "cell": cell_id, "seed": args.seed, "encoder_run": str(encoder_run),
+            "v3_run": args.v3_run, "v4_cfg": asdict(replace(base_cfg, seed=args.seed)),
+        }, indent=2, default=str))
+
+        m: dict = {"cell": cell_id, "seed": args.seed}
+        per_mode: dict = {}
+        for mode in modes:
+            cfg = replace(base_cfg, seed=args.seed, channel_mode=mode)
+            t0 = time.time()
             try:
-                from src.modeling.anomaly.weak_labels import window_overlaps_any
-                intervals = _v3_event_intervals_for_recordings(
-                    holdout_pos, loaders_by_id, encoder, v3_holder, v2_cfg, v3_cfg)
-                win_s = float(v2_cfg.window_seconds)
-                keep = np.array([
-                    bool(intervals.get(s.recording_id))
-                    and window_overlaps_any(s.window_start_s, s.window_start_s + win_s,
-                                            intervals.get(s.recording_id, []))
-                    for s in holdout_pos], dtype=bool)
-                if keep.shape[0] == res.val_predictions.shape[0] and keep.any():
-                    err = np.linalg.norm(
-                        res.val_predictions[keep] - res.val_targets[keep], axis=-1)
-                    m["holdout_mae_v3gated_m"] = float(np.mean(err))
-                    m["n_holdout_gated"] = int(keep.sum())
-                else:
-                    m["holdout_mae_v3gated_m"] = None
-                    m["n_holdout_gated"] = int(keep.sum()) if keep.size else 0
+                d, res = _train_eval(cfg, log_path)
             except Exception as e:
-                _log(f"  gating skipped: {type(e).__name__}: {e}", log_path)
-                m["holdout_mae_v3gated_m"] = None
-        gated = m.get("holdout_mae_v3gated_m")
-        _log(f"  V4 {dt:.0f}s — holdout MAE ungated={res.val_mae_3d:.4f}m "
-             f"gated={gated if gated is None else round(gated,4)}m gap={m['train_val_gap_m']:.4f} "
-             f"es_epoch={res.early_stopped_epoch}", log_path)
-        torch.save(res.head.state_dict(), out_dir / "head.pt")
+                _log(f"  V4[{mode}] FAILED: {type(e).__name__}: {e}", log_path)
+                per_mode[mode] = {"error": f"{type(e).__name__}: {e}"}
+                continue
+            per_mode[mode] = d
+            gated = d.get("holdout_mae_v3gated_m")
+            _log(f"  V4[{mode}] {time.time()-t0:.0f}s — holdout MAE "
+                 f"ungated={d['holdout_mae_ungated_m']:.4f}m "
+                 f"gated={gated if gated is None else round(gated,4)}m "
+                 f"gap={d['train_val_gap_m']:.4f} es={d['early_stopped_epoch']}", log_path)
+            if mode == "both":
+                torch.save(res.head.state_dict(), out_dir / "head.pt")
+        # Hoist the fusion ('both') metrics to the top level so the campaign's
+        # selection helper (which reads holdout_mae_v3gated_m) works unchanged.
+        if "both" in per_mode and "error" not in per_mode["both"]:
+            m.update({k: v for k, v in per_mode["both"].items() if k != "channel_mode"})
+        if args.all_channel_modes:
+            m["channel_modes"] = per_mode
         (out_dir / "metrics.json").write_text(json.dumps(m, indent=2, default=str))
         print(f"Wrote {out_dir}/metrics.json")
 

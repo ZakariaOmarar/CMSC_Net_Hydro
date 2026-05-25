@@ -465,7 +465,11 @@ def _v3_event_intervals_for_recordings(
                 continue
             clusters = v3.thresholds.assign(contexts)
             high = float(np.median([float(bar[int(k)]) for k in clusters]))
-            low = float(0.95 * high)
+            # low <= high required; V3 scores are negative NLLs so 0.95*high
+            # would invert (see event_detection.v3_real_anomaly_detection).
+            low = high - abs(high) * 0.05
+            if low > high:
+                low = high
             evs = detect_events_from_score_timeline(
                 scores, times, high_threshold=high, low_threshold=low,
                 min_duration_s=0.10, max_gap_windows=0,

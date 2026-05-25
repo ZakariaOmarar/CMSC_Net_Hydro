@@ -259,7 +259,8 @@ def main() -> None:
                 continue
             status = _launch(
                 [sys.executable, "-m", "scripts.v3_deep_sweep",
-                 "--encoder-run", str(encoder_run), "--cell", v3_winner, "--seed", str(seed)],
+                 "--encoder-run", str(encoder_run), "--cell", v3_winner,
+                 "--all-paradigms", "--seed", str(seed)],
                 _TIMEOUT_V3_S, log)
             state.setdefault("cells", {})[key] = {
                 "status": status, "run_dir": str(_find_run_dir("v3deep", v3_winner, seed))}
@@ -275,6 +276,7 @@ def main() -> None:
                 [sys.executable, "-m", "scripts.v4_deep_sweep",
                  "--encoder-run", str(encoder_run), "--v3-run", str(v3_winner_dir),
                  "--samples-cache", str(samples_cache),
+                 "--all-channel-modes",
                  "--cell", v4_winner, "--seed", str(seed)],
                 _TIMEOUT_V4_S, log)
             state.setdefault("cells", {})[key] = {

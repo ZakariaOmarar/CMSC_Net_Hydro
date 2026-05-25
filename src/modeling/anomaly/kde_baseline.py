@@ -1,26 +1,32 @@
-"""V0-style anomaly baseline — per-cluster KDE on V2 c_t vectors.
+"""V0-style anomaly baseline — per-cluster diagonal Gaussian on V2 c_t buckets.
 
-A simple, strong baseline the V3 conditional flow must beat to earn its
-complexity.  The audit (2026-05-22, see plan `i-would-like-you-distributed-pizza`)
+A simple, stable density baseline the V3 conditional flow must beat to earn
+its complexity.  The audit (2026-05-22, see plan `i-would-like-you-distributed-pizza`)
 flagged that no such baseline existed: V3's val NLL was reported without
 reference to what a non-deep density estimator achieves on the same
 `(x = mean_pool(fused), c = PMA-pooled c_t)` pairs.
+
+NOTE (2026-05-23): the original implementation used `scipy.stats.gaussian_kde`,
+which is numerically indefensible at this dimensionality (x is 64-128 D with
+O(hundreds) healthy points → near-singular bandwidth → logpdf returned ±10³
+garbage; the deep-campaign comparison was meaningless).  Replaced with a
+per-cluster **diagonal Gaussian** (mean + per-dim variance with a floor),
+the standard stable simple-density baseline that is well-defined in any
+dimension.  The function name is kept for call-site stability.
 
 Design:
   1. K-means(`n_clusters`) on the V3 healthy training-cohort `c_t` vectors —
      same `n_clusters` (default 3) as `PerClusterThresholds` so the buckets
      line up with V3's threshold structure.
-  2. Per-cluster `scipy.stats.gaussian_kde` fit on the bucketed `x_for_v3`
-     vectors (V3's pre-flow input — mean-pool of fused tokens; *not* the
-     PMA-pooled c_t).  Scott's rule for the bandwidth (the SciPy default);
-     no per-cluster tuning to keep the comparison apples-to-apples.
-  3. Score = `-kde.logpdf(x).mean()` per window — the same orientation as
-     V3's `anomaly_score = -log p(x|c)`, so lower NLL is "more in-distribution"
-     in both models.
+  2. Per-cluster diagonal Gaussian fit on the bucketed `x_for_v3` vectors
+     (V3's pre-flow input).  Clusters with < 2 points fall back to the pooled
+     Gaussian over all `x_train`.
+  3. Score = mean per-window NLL ``0.5 Σ_d[(x-μ)²/σ² + log(2π σ²)]`` — same
+     orientation as V3's ``-log p(x|c)`` (lower = more in-distribution).
 
 Reported metric: mean held-out NLL on the same `val_eval` cohort V3 uses.
-A V3 vs KDE delta close to zero means V3 has not extracted information
-beyond what a fixed-kernel density estimator already captures.
+A V3-vs-baseline delta near zero means V3 has not extracted information
+beyond a simple per-cluster Gaussian.
 """
 
 from __future__ import annotations
@@ -28,7 +34,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.stats import gaussian_kde
 from sklearn.cluster import KMeans
 
 
@@ -73,21 +78,35 @@ def fit_and_score_kde_on_ct(
     d_val = np.linalg.norm(c_val[:, None, :] - centroids[None, :, :], axis=-1)
     val_labels = d_val.argmin(axis=1)
 
-    # Pooled fallback KDE for clusters too small to fit individually.
-    pooled_kde = gaussian_kde(x_train.T) if x_train.shape[0] >= 2 else None
+    # Per-cluster DIAGONAL GAUSSIAN density (not gaussian_kde).
+    #
+    # The original gaussian_kde baseline was numerically indefensible here:
+    # x lives in 64-128 dims with O(hundreds) healthy points, so the KDE
+    # bandwidth matrix is near-singular and logpdf returned ±10³ garbage
+    # (observed in the 2026-05-23 deep campaign — the comparison was
+    # meaningless). A per-cluster diagonal Gaussian — fit mean μ and
+    # per-dimension variance σ² with a variance floor — is the standard
+    # stable "simple density" baseline and is well-defined in any dimension.
+    # NLL(x) = 0.5 Σ_d [ (x_d-μ_d)²/σ_d² + log(2π σ_d²) ].
+    LOG_2PI = float(np.log(2.0 * np.pi))
+    var_floor = 1e-6 * float(np.var(x_train) + 1e-12)
 
-    per_cluster_kde: dict[int, gaussian_kde] = {}
+    def _fit_gauss(rows: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        mu = rows.mean(axis=0)
+        var = rows.var(axis=0) + var_floor
+        return mu, var
+
+    def _nll(x: np.ndarray, mu: np.ndarray, var: np.ndarray) -> np.ndarray:
+        return 0.5 * (((x - mu) ** 2) / var + np.log(2.0 * np.pi * var)).sum(axis=1)
+
+    pooled = _fit_gauss(x_train) if x_train.shape[0] >= 2 else None
+    per_cluster: dict[int, tuple[np.ndarray, np.ndarray]] = {}
     n_train_per: list[int] = []
     for k in range(n_clusters_eff):
         mask = train_labels == k
         n_train_per.append(int(mask.sum()))
         if mask.sum() >= 2:
-            try:
-                per_cluster_kde[k] = gaussian_kde(x_train[mask].T)
-            except Exception:
-                # Singular covariance, identical samples, etc.  Fall through
-                # to pooled.
-                pass
+            per_cluster[k] = _fit_gauss(x_train[mask])
 
     n_val_per: list[int] = []
     nll_per_cluster: dict[int, float] = {}
@@ -97,14 +116,15 @@ def fit_and_score_kde_on_ct(
         n_val_per.append(int(mask.sum()))
         if not mask.any():
             continue
-        kde = per_cluster_kde.get(k, pooled_kde)
-        if kde is None:
+        params = per_cluster.get(k, pooled)
+        if params is None:
             nll_accum[mask] = float("nan")
             nll_per_cluster[k] = float("nan")
             continue
-        log_p = kde.logpdf(x_val[mask].T)
-        nll_accum[mask] = -log_p
-        nll_per_cluster[k] = float(np.mean(-log_p))
+        mu, var = params
+        per_win = _nll(x_val[mask], mu, var)
+        nll_accum[mask] = per_win
+        nll_per_cluster[k] = float(np.mean(per_win))
 
     finite = np.isfinite(nll_accum)
     val_nll_mean = float(np.mean(nll_accum[finite])) if finite.any() else float("nan")

@@ -142,6 +142,18 @@ _LMM_WEIGHT_LEVELS: dict[str, float] = {
     "lw3": 3.0,
 }
 
+# Acoustic-improvement axes (vibration is a settled dead-end for fusion, so the
+# representation lever is the acoustic pathway).  These two knobs were NEVER
+# swept by the breadth campaign:
+#   * acoustic_cnn_width_mult — R1a tested 2× and reverted it because the wider
+#     CNN over-fit; now that early-stop + weight-decay + dropout control
+#     overfitting, a wider acoustic backbone is worth re-testing.
+#   * cwt_n_scales — CWT frequency resolution; finer scales sharpen the
+#     100/117 Hz ROW II tone-pair separation (architecture.py CWT docstring).
+# Both must match across V1 and V2 (V1→V2 weight transfer enforces parity).
+_ACOUSTIC_WIDTH_LEVELS: dict[str, int] = {"w1": 1, "w2": 2}
+_CWT_SCALE_LEVELS: dict[str, int] = {"cwt16": 16, "cwt32": 32, "cwt64": 64}
+
 
 def _apply_p2_cell(
     cell_id: str,
@@ -237,6 +249,30 @@ def _apply_p7b_cell(
     return v1_cfg, v2_cfg
 
 
+def _apply_pa_cell(
+    cell_id: str,
+    v1_cfg: V1SSLConfig,
+    v2_cfg: V2SSLConfig,
+) -> tuple[V1SSLConfig, V2SSLConfig]:
+    """Acoustic cell: ``pa_w{N}_cwt{M}`` → acoustic_cnn_width_mult × cwt_n_scales.
+
+    Standalone (no base cell): builds on the orchestrator defaults, which are
+    the post-baseline_v2 settings (early-stop + wd=1e-4 + dropout).  Width +
+    CWT scales are set on BOTH V1 and V2 so the V1→V2 weight transfer matches.
+    """
+    parts = cell_id.split("_")
+    if len(parts) != 3 or parts[0] != "pa":
+        raise ValueError(f"malformed pa cell id: {cell_id!r}")
+    w_key, cwt_key = parts[1], parts[2]
+    if w_key not in _ACOUSTIC_WIDTH_LEVELS or cwt_key not in _CWT_SCALE_LEVELS:
+        raise ValueError(f"unknown axis level in {cell_id!r}")
+    width = _ACOUSTIC_WIDTH_LEVELS[w_key]
+    cwt = _CWT_SCALE_LEVELS[cwt_key]
+    v1_cfg = replace(v1_cfg, acoustic_cnn_width_mult=width, cwt_n_scales=cwt, use_cwt=True)
+    v2_cfg = replace(v2_cfg, acoustic_cnn_width_mult=width, cwt_n_scales=cwt, use_cwt=True)
+    return v1_cfg, v2_cfg
+
+
 def apply_cell(
     cell_id: str,
     base_cell: str | None,
@@ -250,6 +286,9 @@ def apply_cell(
         return v1_cfg, v2_cfg, v3_cfg, v4_cfg
     if cell_id.startswith("p2_"):
         v1_cfg, v2_cfg = _apply_p2_cell(cell_id, v1_cfg, v2_cfg)
+        return v1_cfg, v2_cfg, v3_cfg, v4_cfg
+    if cell_id.startswith("pa_"):
+        v1_cfg, v2_cfg = _apply_pa_cell(cell_id, v1_cfg, v2_cfg)
         return v1_cfg, v2_cfg, v3_cfg, v4_cfg
     # Phase 3 / 7a / 7b all require a Phase 2 base to overlay.  The base cell
     # supplies the aug × vibration_dropout setting that won Phase 2 selection.

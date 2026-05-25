@@ -142,6 +142,23 @@ def _evaluate(res, v2_encoder, anom_loaders, anom_segments, v2_cfg, v3_cfg) -> d
             out["synthetic_auc"] = auc.snr_db_to_auc
     except Exception as e:
         out["synthetic_auc"] = {"skipped": f"{type(e).__name__}: {e}"}
+    # V3-vs-simple: per-cluster diagonal-Gaussian baseline on the SAME x/c the
+    # flow trained on.  Δ = V3_val_NLL − baseline_val_NLL; Δ<0 ⇒ V3 beats the
+    # simple density (earns its complexity).  Thesis "deep-vs-simple" number.
+    try:
+        from src.modeling.anomaly.kde_baseline import fit_and_score_kde_on_ct
+        if (res.train_x is not None and res.train_contexts is not None
+                and res.val_x is not None and res.val_contexts is not None):
+            base = fit_and_score_kde_on_ct(
+                res.train_x, res.train_contexts, res.val_x, res.val_contexts,
+                n_clusters=v3_cfg.n_threshold_clusters, seed=v3_cfg.seed,
+            )
+            out["simple_baseline_val_nll"] = base.val_nll_mean
+            out["v3_minus_simple_nll"] = val_nll - base.val_nll_mean
+            out["v3_beats_simple"] = bool(val_nll < base.val_nll_mean)
+    except Exception as e:
+        out["simple_baseline_val_nll"] = None
+        out["v3_minus_simple_error"] = f"{type(e).__name__}: {e}"
     return out
 
 

@@ -54,17 +54,29 @@ def _load_runs(
     included in the campaign scope too.
     """
     if campaign_dir is not None:
-        state_path = campaign_dir / "state.json"
-        if not state_path.exists():
-            return []
-        state = json.loads(state_path.read_text())
+        # Collect run dirs from this campaign's state.json AND, if it is a
+        # master thesis campaign, the delegated deep campaign it points to
+        # (deep_campaign_dir) — so one --campaign-dir gives a unified report.
         run_dirs: list[Path] = []
-        baseline = state.get("baseline_v2") or {}
-        if baseline.get("run_dir"):
-            run_dirs.append(Path(baseline["run_dir"]))
-        for _key, entry in (state.get("cells") or {}).items():
-            if entry.get("run_dir"):
-                run_dirs.append(Path(entry["run_dir"]))
+
+        def _collect(cdir: Path) -> None:
+            sp = cdir / "state.json"
+            if not sp.exists():
+                return
+            st = json.loads(sp.read_text())
+            base = st.get("baseline_v2") or {}
+            if base.get("run_dir"):
+                run_dirs.append(Path(base["run_dir"]))
+            for _k, entry in (st.get("cells") or {}).items():
+                if entry.get("run_dir"):
+                    run_dirs.append(Path(entry["run_dir"]))
+            deep = st.get("deep_campaign_dir")
+            if deep:
+                _collect(RUNS_DIR / deep)
+
+        _collect(campaign_dir)
+        if not run_dirs:
+            return []
     else:
         run_dirs = (
             sorted(RUNS_DIR.glob("*__ablation_*"))
@@ -333,6 +345,92 @@ def _table_v4_deep(rows: list[dict]) -> str:
     return "\n".join(out) + "\n"
 
 
+def _table_acoustic(rows: list[dict]) -> str:
+    """Acoustic-improvement sweep — width_mult × cwt_n_scales grid."""
+    aco = [r for r in rows if r["cell"].startswith("pa_")]
+    out = ["## Table 7 — Acoustic-improvement sweep (V2 NMI / V1-acoustic NMI)", ""]
+    if not aco:
+        out.append("_(no acoustic pa_* cells loaded)_\n")
+        return "\n".join(out)
+    out.append("| width \\ cwt_scales | 16 | 32 (baseline) | 64 |")
+    out.append("|---|---|---|---|")
+    for w_lvl, w_label in (("w1", "1× (baseline)"), ("w2", "2× (R1a, re-tested)")):
+        cells = ["| " + w_label]
+        for c_lvl in ("cwt16", "cwt32", "cwt64"):
+            cid = f"pa_{w_lvl}_{c_lvl}"
+            matched = [r for r in aco if r["cell"] == cid]
+            if not matched:
+                cells.append("—")
+                continue
+            st = matched[0]["metrics"].get("stages", {})
+            v2 = st.get("v2", {})
+            v1a = st.get("v1_acoustic", {})
+            cells.append(f"V2={_fmt(v2.get('rq1_nmi'))} / V1ac={_fmt(v1a.get('sanity_nmi'))}")
+        out.append(" | ".join(cells) + " |")
+    return "\n".join(out) + "\n"
+
+
+def _table_v3_paradigms(rows: list[dict]) -> str:
+    """Per-modality V3 anomaly (acoustic / vibration / fusion) — from verdict
+    cells run with --all-paradigms (metrics.paradigms has all three)."""
+    para_rows = [
+        r for r in rows
+        if isinstance(r["metrics"].get("paradigms"), dict)
+        and len(r["metrics"]["paradigms"]) >= 2
+    ]
+    out = ["## Table 8 — V3 three paradigms (real-anomaly F1 per modality)", ""]
+    if not para_rows:
+        out.append("_(no multi-paradigm V3 cells; run the V3 winner with --all-paradigms)_\n")
+        return "\n".join(out)
+    cols = ["cell", "seed", "acoustic_F1", "vibration_F1", "fusion_F1",
+            "acoustic_NLL", "vibration_NLL", "fusion_NLL"]
+    out += ["| " + " | ".join(cols) + " |", "|" + "|".join(["---"] * len(cols)) + "|"]
+    for r in para_rows:
+        pa = r["metrics"]["paradigms"]
+
+        def _f1(name):
+            ra = (pa.get(name) or {}).get("real_anomaly") or {}
+            return _fmt(ra.get("f1"))
+
+        def _nll(name):
+            return _fmt((pa.get(name) or {}).get("val_nll_final"))
+
+        out.append("| " + " | ".join([
+            r["cell"], str(r["cfg"].get("seed", "?")),
+            _f1("acoustic"), _f1("vibration"), _f1("fusion"),
+            _nll("acoustic"), _nll("vibration"), _nll("fusion"),
+        ]) + " |")
+    return "\n".join(out) + "\n"
+
+
+def _table_v4_channel_modes(rows: list[dict]) -> str:
+    """Per-modality V4 localization (srp / tdoa / vibration / fusion) — from
+    verdict cells run with --all-channel-modes (metrics.channel_modes)."""
+    cm_rows = [r for r in rows if isinstance(r["metrics"].get("channel_modes"), dict)]
+    out = ["## Table 9 — V4 four paradigms (holdout V3-gated MAE per channel mode)", ""]
+    if not cm_rows:
+        out.append("_(no multi-channel V4 cells; run the V4 winner with --all-channel-modes)_\n")
+        return "\n".join(out)
+    cols = ["cell", "seed", "srp_only", "tdoa_only", "vibration_only", "fusion(both)"]
+    out += ["| " + " | ".join(cols) + " |", "|" + "|".join(["---"] * len(cols)) + "|"]
+    for r in cm_rows:
+        cm = r["metrics"]["channel_modes"]
+
+        def _mae(mode):
+            d = cm.get(mode) or {}
+            v = d.get("holdout_mae_v3gated_m")
+            if v is None:
+                v = d.get("holdout_mae_ungated_m")
+            return _fmt(v)
+
+        out.append("| " + " | ".join([
+            r["cell"], str(r["cfg"].get("seed", "?")),
+            _mae("srp_only"), _mae("tdoa_only"),
+            _mae("vibration_only_learned"), _mae("both"),
+        ]) + " |")
+    return "\n".join(out) + "\n"
+
+
 def _guidance(rows: list[dict]) -> str:
     return (
         "## Selection guidance\n\n"
@@ -376,6 +474,9 @@ def main() -> None:
         _multi_seed(rows),
         _table_v3_deep(rows),
         _table_v4_deep(rows),
+        _table_acoustic(rows),
+        _table_v3_paradigms(rows),
+        _table_v4_channel_modes(rows),
         _guidance(rows),
     ]
     # When scoped to a campaign, write the report INSIDE the campaign dir so
