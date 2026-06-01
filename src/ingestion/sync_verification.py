@@ -72,7 +72,6 @@ and seismic-acoustic event localisation (Diehl et al. 2009).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
 
 import numpy as np
 

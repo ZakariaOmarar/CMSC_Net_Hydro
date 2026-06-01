@@ -29,7 +29,6 @@ from src.modeling.context.v2_ssl import (
     _PairedWindowedDataset,
     _collate,
     _gather_paired_segments,
-    _split_segments_by_recording,
 )
 from src.modeling.orchestration.full_run import _resolved_loader, _v2_cfg
 

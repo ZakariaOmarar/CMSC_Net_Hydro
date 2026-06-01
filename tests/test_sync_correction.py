@@ -21,7 +21,6 @@ import numpy as np
 
 from src.ingestion.sync_verification import (
     SyncCorrectionReport,
-    SyncResult,
     SyncStabilityResult,
     apply_sync_correction,
     auto_sync_paired_recording,

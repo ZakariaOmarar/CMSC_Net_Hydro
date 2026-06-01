@@ -6,7 +6,6 @@ import pytest
 
 from src.config.dataset_registry import (
     REGISTRY,
-    DatasetMetadata,
     DatasetRegistry,
     _VALID_POSITION_SOURCES,
 )

@@ -1,9 +1,8 @@
 """Standalone V0 baselines for the test_dataset pipeline.
 
-Distinct from `src.modeling.baselines`, which operates on pre-computed (z, c)
-latents from the existing CNF pipeline.  V0 baselines here read raw audio from
-the `TestDatasetLoader` and compute features on the fly, so each V0 number
-compares apples-to-apples against subsequent iterations.
+These baselines read raw audio from the `TestDatasetLoader` and compute
+features on the fly, so each V0 number compares apples-to-apples against the
+subsequent iterations.
 
 Two baselines, one per research question:
   - `lstm_ae`     — V0 anomaly baseline on log-mel windows (RQ2 reference).

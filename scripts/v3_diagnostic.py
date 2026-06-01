@@ -31,7 +31,7 @@ import torch
 from src.modeling.anomaly.cnf_head import ConditionalRealNVP
 from src.modeling.anomaly.threshold import PerClusterThresholds
 from src.modeling.context.v2_fusion import V2FusionEncoder
-from src.modeling.context.v2_ssl import V2SSLConfig, _gather_paired_segments
+from src.modeling.context.v2_ssl import _gather_paired_segments
 from src.modeling.localization.v4_features import GridSpec
 from src.modeling.localization.v4_trainer import precompute_v4_samples
 from src.modeling.orchestration.full_run import (
@@ -124,15 +124,9 @@ def main() -> dict:
     # dummy spatial label — we never use it).  This keeps every cohort's
     # (x, c) extraction on a single code path.
     print("Precomputing (x, c) for all cohorts ...")
-    healthy_overrides = {s.recording_id: (0.0, 0.0, 0.0) for s in healthy_segs[:0]}  # unused
-    # For healthy we score the SSL pool directly.  precompute_v4_samples
-    # requires spatial_label or override; supply zeros for healthy as a
-    # filler since we only read the score, not the target.
-    fake_overrides = {s.recording_id: (0.0, 0.0, 0.0) for s in healthy_segs}
     # Filter healthy to those that look like valid V4 inputs (need raw
     # waveforms long enough for one window).  precompute_v4_samples does
     # this internally — we just pass the segments through.
-    from src.ingestion.test_dataset_loader import TestDatasetSegment
 
     def _to_segments(paired_segs):
         # The public precompute_v4_samples wants `TestDatasetSegment`s; the

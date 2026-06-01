@@ -24,7 +24,6 @@ from __future__ import annotations
 import json
 import sys
 import time
-from itertools import product
 from pathlib import Path
 
 import numpy as np
@@ -240,7 +239,7 @@ def main() -> int:
     log(f"hop_length grid: {HOP_GRID}")
     log(f"n_mels grid    : {N_MELS_GRID}")
     log(f"Total valid combos: {len(combos)}")
-    log(f"Datasets       : d1, d2, d3, d4, d5")
+    log("Datasets       : d1, d2, d3, d4, d5")
     log(f"Anomaly clips/ds (max): {MAX_KNOCK_RECORDINGS_PER_DS}")
     log("")
 

@@ -38,7 +38,7 @@ for it.  Long-form justifications live in:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal
 
 # Re-export the ROW II / sensor-array physical constants from

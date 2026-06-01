@@ -35,7 +35,6 @@ import argparse
 import datetime as _dt
 import json
 import time
-from dataclasses import asdict
 from pathlib import Path
 
 import torch
@@ -297,7 +296,7 @@ def main() -> None:
     log("=" * 60)
     log(f"VARIANT {args.variant!r} HEADLINE: "
         f"probe both={both:.3f}, acoustic_only={ac_only:.3f}, Δ={delta_nmi:+.3f}")
-    log(f"  (Phase-B success bar: Δ ≥ +0.030; V1-acoustic ceiling preserved)")
+    log("  (Phase-B success bar: Δ ≥ +0.030; V1-acoustic ceiling preserved)")
 
     metrics["headline"] = {
         "probe_both_nmi": both,

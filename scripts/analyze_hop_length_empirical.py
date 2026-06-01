@@ -32,7 +32,6 @@ import numpy as np
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from src.config.dataset_registry import REGISTRY
 from src.features.audio_spectral import compute_log_mel_spectrogram
 from src.ingestion.test_dataset_loader import DatasetSpec, TestDatasetLoader
 

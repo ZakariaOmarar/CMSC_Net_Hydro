@@ -54,7 +54,6 @@ from ..localization import (
     GridSpec,
     V4Config,
     precompute_v4_samples,
-    train_v4_localization,
 )
 from .full_run import (
     REPO_ROOT,

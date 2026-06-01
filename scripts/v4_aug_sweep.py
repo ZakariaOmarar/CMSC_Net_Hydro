@@ -39,7 +39,7 @@ from pathlib import Path
 import torch
 
 from src.modeling.context.v2_fusion import V2FusionEncoder
-from src.modeling.localization import GridSpec, V4Sample, precompute_v4_samples, train_v4_localization
+from src.modeling.localization import GridSpec, precompute_v4_samples, train_v4_localization
 from src.modeling.orchestration.full_run import (
     REPO_ROOT,
     _d3_spatial_overrides,

@@ -10,7 +10,7 @@ Both are stored as Gantner UDBF .dat files, one sub-folder per day (YYYYMMDD).
 from __future__ import annotations
 
 import warnings
-from datetime import date, datetime, timedelta
+from datetime import date
 from pathlib import Path
 from typing import NamedTuple, Sequence
 

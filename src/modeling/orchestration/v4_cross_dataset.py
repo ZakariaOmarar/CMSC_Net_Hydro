@@ -39,7 +39,6 @@ from ..context.v2_fusion import V2FusionEncoder
 from ..eval import percentile_bootstrap_ci
 from ..localization import (
     GridSpec,
-    V4Config,
     precompute_v4_samples,
     split_samples_by_dataset,
     train_v4_localization,

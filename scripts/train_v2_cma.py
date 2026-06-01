@@ -22,7 +22,7 @@ from pathlib import Path
 import torch
 
 from src.modeling.context.v2_ssl import V2SSLConfig, train_v2_fusion
-from src.modeling.orchestration.full_run import _resolved_loader, _v1_cfg, _v2_cfg
+from src.modeling.orchestration.full_run import _resolved_loader, _v2_cfg
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]

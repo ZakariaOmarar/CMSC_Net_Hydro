@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-import torch
 
 from src.modeling.context.v1_ssl import (
     V1SSLConfig,

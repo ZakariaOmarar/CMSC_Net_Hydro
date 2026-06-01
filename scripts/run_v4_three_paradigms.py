@@ -65,7 +65,6 @@ from src.modeling.localization.v4_trainer import (
 from src.modeling.orchestration.full_run import (
     _d3_spatial_overrides,
     _resolved_loader,
-    _v1_cfg,
     _v2_cfg,
     _v4_cfg,
 )
@@ -178,12 +177,11 @@ def main() -> None:
     log(f"src_run = {src_run}")
     log(f"out_dir = {out_dir}")
 
-    v1_cfg = _v1_cfg(args.quick)
     v2_cfg = _v2_cfg(args.quick)
     v4_cfg = _v4_cfg(args.quick)
 
     log("Loading loaders ...")
-    D1 = _resolved_loader("d1.yaml"); D2 = _resolved_loader("d2.yaml")
+    D2 = _resolved_loader("d2.yaml")
     D3 = _resolved_loader("d3.yaml"); D4 = _resolved_loader("d4.yaml")
 
     log("Loading V2 encoder ...")

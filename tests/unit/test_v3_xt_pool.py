@@ -27,7 +27,6 @@ xt-pool paths (legacy ``mean`` vs publication ``pma2``):
 
 from __future__ import annotations
 
-import numpy as np
 import pytest
 import torch
 

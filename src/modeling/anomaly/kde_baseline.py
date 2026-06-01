@@ -87,7 +87,6 @@ def fit_and_score_kde_on_ct(
     # per-dimension variance σ² with a variance floor — is the standard
     # stable "simple density" baseline and is well-defined in any dimension.
     # NLL(x) = 0.5 Σ_d [ (x_d-μ_d)²/σ_d² + log(2π σ_d²) ].
-    LOG_2PI = float(np.log(2.0 * np.pi))
     var_floor = 1e-6 * float(np.var(x_train) + 1e-12)
 
     def _fit_gauss(rows: np.ndarray) -> tuple[np.ndarray, np.ndarray]:

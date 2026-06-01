@@ -22,7 +22,6 @@ Each test pins one invariant of `AttentiveStatsPool{1,2}d`:
 
 from __future__ import annotations
 
-import numpy as np
 import pytest
 import torch
 

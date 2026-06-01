@@ -130,7 +130,7 @@ def main() -> None:
     ratio = r_b["n_frames"] / r_a["n_frames"]
     bytes_a = r_a["n_frames"] * r_a["mel_shape"][0] * 4 * 9  # 9 mics, float32
     bytes_b = r_b["n_frames"] * r_b["mel_shape"][0] * 4 * 9
-    print(f"== Cost ratio (per 2 s window, 9 mics, float32 log-mel only):")
+    print("== Cost ratio (per 2 s window, 9 mics, float32 log-mel only):")
     print(f"   frames:  {r_a['n_frames']} -> {r_b['n_frames']}  ({ratio:.1f}x more)")
     print(f"   memory:  {bytes_a/1024:.1f} KB -> {bytes_b/1024:.1f} KB  ({ratio:.1f}x more)")
 

@@ -357,7 +357,7 @@ def main() -> None:
         with log_path.open("a", encoding="utf-8") as fh:
             fh.write(line + "\n")
 
-    log(f"Ablation: hop_length on V3-fusion AUROC")
+    log("Ablation: hop_length on V3-fusion AUROC")
     log(f"out_dir   = {out_root}")
     log(f"conditions= {conditions}")
     log(f"seeds     = {seeds}")

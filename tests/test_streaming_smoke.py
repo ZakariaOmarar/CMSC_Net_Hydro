@@ -23,7 +23,6 @@ from src.ingestion.test_dataset_loader import (
     TestDatasetSegment,
 )
 from src.modeling.anomaly import (
-    PerClusterThresholds,
     train_v3_cnf,
 )
 from src.modeling.context.v2_fusion import V2FusionEncoder
@@ -31,7 +30,6 @@ from src.modeling.context.v2_ssl import V2SSLConfig
 from src.modeling.localization import (
     GridSpec,
     V4Config,
-    V4LocalizationHead,
     precompute_v4_samples,
     train_v4_localization,
 )

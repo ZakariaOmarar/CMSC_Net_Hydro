@@ -8,7 +8,6 @@ publication architecture has drifted from its documented design.
 
 from __future__ import annotations
 
-import pytest
 
 from src.config.architecture import (
     ACOUSTIC_CWT,

@@ -37,7 +37,6 @@ import json
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Iterable
 
 import numpy as np
 import torch

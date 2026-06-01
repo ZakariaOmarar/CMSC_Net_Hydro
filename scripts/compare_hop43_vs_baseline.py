@@ -54,8 +54,8 @@ def row(label, base_val, new_val, prec=3, note=""):
 
 def section(title):
     print(f"\n### {title}")
-    print(f"| metric                                 | hop=512    | hop=43     |     delta     | note")
-    print(f"|----------------------------------------|------------|------------|-----------|------")
+    print("| metric                                 | hop=512    | hop=43     |     delta     | note")
+    print("|----------------------------------------|------------|------------|-----------|------")
 
 
 def main() -> None:
@@ -66,7 +66,7 @@ def main() -> None:
     B = json.load(BASE.open())
     N = json.load(NEW.open())
 
-    print(f"# hop=43 vs hop=512 baseline — full pipeline comparison\n")
+    print("# hop=43 vs hop=512 baseline — full pipeline comparison\n")
     print(f"Baseline: {BASE}")
     print(f"hop=43:   {NEW}\n")
 

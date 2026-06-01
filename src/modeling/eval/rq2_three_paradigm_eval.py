@@ -50,7 +50,6 @@ import torch.utils.data as tud
 from ...ingestion.test_dataset_loader import (
     DatasetSpec,
     TestDatasetLoader,
-    TestDatasetSegment,
 )
 from ..anomaly.cnf_head import ConditionalRealNVP
 from ..anomaly.threshold import PerClusterThresholds
@@ -63,15 +62,13 @@ from ..context.v2_fusion import V2FusionEncoder
 from ..context.v2_ssl import (
     V2SSLConfig,
     _collate,
-    _gather_paired_segments,
     _PairedGroupedBatchSampler,
     _PairedSegment,
     _PairedWindowedDataset,
     _precompute_paired,
 )
 from ..encoders.per_modality import PerModalityEncoder
-from ..orchestration.full_run import _v1_cfg, _v2_cfg, _v3_cfg
-from .statistics import paired_bootstrap_test
+from ..orchestration.full_run import _v1_cfg, _v2_cfg
 
 
 REPO = Path(__file__).resolve().parents[3]
@@ -306,7 +303,6 @@ def main() -> None:
 
     v1_cfg = _v1_cfg(False)
     v2_cfg = _v2_cfg(False)
-    v3_cfg = _v3_cfg(False)
     embed = int(v1_cfg.embed_dim)
 
     # Build + load encoders.

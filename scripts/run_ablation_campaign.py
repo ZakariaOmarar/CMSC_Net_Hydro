@@ -160,7 +160,7 @@ def _launch_ablation_cell(
 def _launch_baseline_v2(seed: int, log: CampaignLog) -> tuple[str, Path | None]:
     """Phase 1: run the orchestrator's full_run module directly."""
     cmd = [sys.executable, "-m", "src.modeling.orchestration.full_run"]
-    log(f"  launching baseline_v2 (full pipeline, seed=42 — orchestrator default)")
+    log("  launching baseline_v2 (full pipeline, seed=42 — orchestrator default)")
     t0 = time.time()
     try:
         rc = subprocess.run(cmd, cwd=str(REPO), timeout=_TIMEOUT_FULL_PIPELINE_S, check=False)

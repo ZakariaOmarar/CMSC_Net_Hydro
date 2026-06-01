@@ -7,7 +7,6 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-import torch
 
 from src.ingestion.test_dataset_loader import (
     DatasetSpec,

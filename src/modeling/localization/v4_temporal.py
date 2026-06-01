@@ -20,7 +20,7 @@ checkpoints.  No re-training is required.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Literal
+from typing import Literal
 
 import numpy as np
 

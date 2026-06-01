@@ -26,9 +26,7 @@ from typing import Literal
 
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-import torch.utils.data as tud
 from tqdm.auto import tqdm
 
 from ...config import describe_device, resolve_device

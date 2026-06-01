@@ -40,20 +40,18 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Iterable
 
 import numpy as np
 import torch
 import torch.utils.data as tud
 
-from ...ingestion.test_dataset_loader import DatasetSpec, TestDatasetLoader, TestDatasetSegment
+from ...ingestion.test_dataset_loader import DatasetSpec, TestDatasetLoader
 from ..anomaly.cnf_head import ConditionalRealNVP
 from ..anomaly.threshold import PerClusterThresholds
 from ..context.v2_fusion import V2FusionEncoder
 from ..context.v2_ssl import (
     V2SSLConfig,
     _collate,
-    _gather_paired_segments,
     _PairedGroupedBatchSampler,
     _PairedSegment,
     _PairedWindowedDataset,
