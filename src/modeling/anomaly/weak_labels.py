@@ -7,19 +7,19 @@ without any manual annotation. This module turns that impulse structure into
 **weak temporal labels**: a list of ``(t_start_s, t_end_s)`` anomaly intervals
 per recording.
 
-Two consumers (see plan ``i-would-like-you-distributed-pizza``):
-  * **B2** — the V4 sample assembly keeps only windows overlapping a derived
-    interval, dropping the healthy stretches that currently inherit the
+Two consumers:
+  * V4 sample assembly keeps only windows overlapping a derived interval,
+    dropping the healthy stretches that would otherwise inherit the
     recording's knock position (label noise).
-  * **B4** — ``v3_real_anomaly_detection`` (in ``event_detection.py``) scores
-    V3's detected events against these intervals → precision / recall / F1 /
+  * ``v3_real_anomaly_detection`` (in ``event_detection.py``) scores V3's
+    detected events against these intervals → precision / recall / F1 /
     onset-timing error.
 
 The detector generalises ``localization.v4_features.find_burst_window`` (which
 returns only the single highest-energy burst) to **multiple** bursts via
-iterative peak-picking with suppression, so it covers both regimes the user
-described: sparse recordings (few intervals) and densely-anomalous recordings
-(many intervals that merge into broad spans).
+iterative peak-picking with suppression, so it covers both regimes: sparse
+recordings (few intervals) and densely-anomalous recordings (many intervals
+that merge into broad spans).
 """
 
 from __future__ import annotations

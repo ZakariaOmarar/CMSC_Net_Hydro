@@ -10,7 +10,7 @@ Provides:
   - `TestDatasetLoader` — wraps the existing `RecordingScanner` and
     `WavVibrationAdapter`, parameterised per-dataset, plus the `PositionRegistry`.
 
-Constraint #3 (Illwerke ingestion-ready): adding a dataset is a YAML edit.
+Design requirement (Illwerke ingestion-ready): adding a dataset is a YAML edit.
 No code changes are needed for a new dataset that follows the
 `recorded_<sensor>[_<extra>].wav` + `vibration_<sensor>[_<extra>].csv`
 convention AND reuses an existing `label_scheme` / `position_source` pair.
@@ -165,9 +165,9 @@ class DatasetSpec:
 class TestDatasetSegment:
     """A loaded recording with sensor positions and parsed labels.
 
-    Conceptual model (clarified by the user, 2026-05):
+    Conceptual model:
       - `mode_label` is the operating mode, one of {"Pump", "Standstill",
-        "Turbine"} when the campaign annotated it (D1 + D2 mode folders, plus
+        "Turbine"} when the folder layout annotates it (D1 + D2 mode folders, plus
         D2 single-mode RandomFault folders).  D3 / D4 recordings have a real
         mode but the campaign did not record which one — `mode_label=None`
         marks them as "discoverable but unknown".  The `speed{N}` token in
@@ -377,7 +377,7 @@ def _parse_d2_context_to_mode(context: str) -> str | None:
     """Parse a D2 RandomFault `_<context>` token → single mode label, or None.
 
     `<context>` is one of `turbine`, `pump`, `standstill`, or a multi-mode
-    combination like `turbine_pump`.  The user's campaign protocol injects
+    combination like `turbine_pump`.  The data-collection protocol injects
     multi-mode anomalies in folders whose context contains *more than one*
     of the three mode tokens; those recordings are dropped from training
     (they conflate two operating regimes in a single recording-level label).
@@ -397,10 +397,10 @@ def _parse_labels(
 ) -> tuple[str | None, str | None, tuple[float, float, float] | None, bool]:
     """Return `(mode, op_condition, spatial_label_m, is_anomaly)`.
 
-    `mode` is one of {"Pump", "Standstill", "Turbine"} when the campaign
-    explicitly labels it, otherwise None.  `is_anomaly` is True iff the
-    recording lives inside a RandomFault / hit folder.  D3 / D4 healthy
-    speed buckets carry `mode=None` because the user's protocol does not
+    `mode` is one of {"Pump", "Standstill", "Turbine"} when the folder
+    layout explicitly labels it, otherwise None.  `is_anomaly` is True iff
+    the recording lives inside a RandomFault / hit folder.  D3 / D4 healthy
+    speed buckets carry `mode=None` because the collection protocol does not
     record which of the three modes the unit was in (only the fan-noise
     level).  The pipeline discovers the mode via K-means on `c_t` at
     inference time.

@@ -44,14 +44,16 @@ def compute_log_mel_spectrogram(
     Args:
         signal: 1-D mono microphone waveform.
         fs: Sample rate in Hz.
-        n_fft: STFT window length (samples).  Default 1024 → 64 ms at 16 kHz.
-        hop_length: STFT hop length (samples).  Default 512 → 32 ms stride,
-            matching the publication-run configs in
-            `configs/test_datasets/v1_per_modality_ssl.yaml` and
-            `src/modeling/orchestration/full_run.py`.
-        n_mels: Number of mel filterbank bands.  Default 64 (publication
-            value in the V1/V2 YAMLs; `full_run.py` overrides to 48 for the
-            CPU-budget runs).
+        n_fft: STFT window length (samples).  These are the bare function
+            defaults; the pipeline passes the empirically-selected values from
+            `src.config.architecture.ACOUSTIC_FEATURES` (n_fft=4096) — see
+            chapter 3 §3.4.2 and `scripts/analyze_hop_length_full_grid.py`.
+        hop_length: STFT hop length (samples).  Pipeline value comes from
+            `ACOUSTIC_FEATURES.hop_length` (2048); the grid sweep showed the
+            downstream tasks are insensitive to hop once n_fft and n_mels are
+            fixed.
+        n_mels: Number of mel filterbank bands.  Pipeline value is
+            `ACOUSTIC_FEATURES.n_mels` (96).
         fmin: Lower mel-band edge in Hz.  Default 20 Hz rejects microphone
             self-noise roll-off and AC line hum.
         fmax: Upper mel-band edge in Hz; None ⇒ Nyquist.

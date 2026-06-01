@@ -5,7 +5,7 @@ latents from the existing CNF pipeline.  V0 baselines here read raw audio from
 the `TestDatasetLoader` and compute features on the fly, so each V0 number
 compares apples-to-apples against subsequent iterations.
 
-Two baselines per the plan's "one per RQ" rule:
+Two baselines, one per research question:
   - `lstm_ae`     — V0 anomaly baseline on log-mel windows (RQ2 reference).
   - `mode_lgbm`   — V0 supervised mode classifier on hand-engineered features
                     (RQ1 upper-bound reference; the only place mode labels are

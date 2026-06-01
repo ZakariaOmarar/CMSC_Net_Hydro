@@ -40,6 +40,8 @@ from src.ingestion.test_dataset_loader import DatasetSpec, TestDatasetLoader
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+pytestmark = pytest.mark.requires_data
+
 
 def _write_wav_int16(path: Path, sr: int = 16_000, duration_s: float = 1.0) -> None:
     n = int(sr * duration_s)

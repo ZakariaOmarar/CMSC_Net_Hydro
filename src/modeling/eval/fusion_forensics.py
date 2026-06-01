@@ -13,7 +13,7 @@ Four measurements, all on the saved V2 encoder (no retrain):
      `BidirectionalCrossAttention`.  If acoustic tokens have 5–10×
      the norm of vibration tokens the dot-product attention weights
      are dominated by acoustic regardless of which modality carries
-     mode-discriminative information.  Mechanism #4 in the plan.
+     mode-discriminative information.  (Mechanism #4 below.)
 
   2. **Attention-weight concentration** — Shannon entropy of the
      per-head-averaged attention weights for each cross-attention
@@ -498,8 +498,8 @@ def _verdict(
     measurements 1–5) and return a one-line verdict plus a bullet list of
     recommended Phase-B interventions in priority order.
 
-    The decision rules are intentionally simple and explicit so the user can
-    audit them in the report.
+    The decision rules are intentionally simple and explicit so they can be
+    audited directly in the report.
     """
     bullets: list[str] = []
     # Mechanism #1: residual shortcut / ignore vibration.

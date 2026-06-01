@@ -5,7 +5,7 @@ Why this exists
 
 The 2026-05-13 full-run cross-modal sync stage refused to correct any D4
 recording (9 / 9 gated out as ``low_conf`` with mean confidence 1.03 and
-median offset +192 ms).  The user-stated acquisition prior is that D4
+median offset +192 ms).  The documented acquisition prior is that D4
 shares the D1/D2/D3 hardware trigger, in which case the +192 ms is an
 *artefact of the raw 376 Hz vibration decoder*, not a true misalignment.
 

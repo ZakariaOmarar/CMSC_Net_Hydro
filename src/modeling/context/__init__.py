@@ -2,8 +2,8 @@
 
 V1 / V2 share two pieces of machinery:
   - `cluster_metric`: K-means(k=4) + Hungarian-match against folder labels →
-    cluster purity + NMI.  Pure evaluation, never used at training time, per
-    the plan's label-leakage invariant.
+    cluster purity + NMI.  Pure evaluation, never used at training time, to
+    preserve the label-leakage invariant.
   - `v1_ssl`:         per-modality SimCLR-style contrastive trainer.  V2 will
     add a cross-attention block + Latent Masked Modeling on top of V1's
     weights.

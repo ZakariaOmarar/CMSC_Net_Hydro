@@ -193,12 +193,12 @@ def _v1_cfg(quick: bool) -> V1SSLConfig:
         # documented in chapter 3 §3.4.2 and reproduced by
         # `scripts/analyze_hop_length_full_grid.py`.
         cwt_n_scales=32,
-        # CWT scalogram re-enabled for the publication run.  The plan's
-        # smart-decisions table treats CWT as primary for non-stationary
-        # mode-transition energy; it was disabled in the prior run only
-        # for a CPU runtime budget.  Re-enabling it is the simplest single
-        # unimodal lift available given V1-acoustic already leads at 0.727
-        # purity on log-mel-only.  Wall-clock impact: V1 / V2 epoch ~ 1.7×.
+        # CWT scalogram re-enabled for the publication run.  CWT is the
+        # primary representation for non-stationary mode-transition energy;
+        # it was disabled in the prior run only for a CPU runtime budget.
+        # Re-enabling it is the simplest single unimodal lift available given
+        # V1-acoustic already leads at 0.727 purity on log-mel-only.
+        # Wall-clock impact: V1 / V2 epoch ~ 1.7×.
         use_cwt=True,
         # Multi-scale window cadence — sourced from the dataset registry
         # (configs/datasets/d*.yaml). Change there, not here.
@@ -403,10 +403,10 @@ def _v4_cfg(quick: bool, scada_dim: int = 0, unconditional: bool = False) -> V4C
 
 
 # ---------------------------------------------------------------------------
-# V4 spatial holdout — positions the user pinned as the localization
-# generalisation test (folder coords in cm → metres).  Held out of V4
-# training so the reported MAE measures localise-an-unseen-position, not
-# within-position interpolation.  See plan `i-would-like-you-distributed-pizza`.
+# V4 spatial holdout — positions reserved as the localization generalisation
+# test (folder coords in cm → metres).  Held out of V4 training so the
+# reported MAE measures localise-an-unseen-position, not within-position
+# interpolation.
 # ---------------------------------------------------------------------------
 
 V4_HOLDOUT_POSITIONS_M: list[tuple[float, float, float]] = [
@@ -1304,11 +1304,11 @@ def main(quick: bool = False) -> dict:
         except Exception as e:
             log(f"V3 sliding-window events skipped: {type(e).__name__}: {e}")
 
-        # B4 (2026-05-23) — real-anomaly detection vs weak knock GT.  Scores
-        # V3's detected events against impulse-derived knock intervals on the
-        # sparse-anomaly cohorts (precision / recall / F1 / onset-timing).
-        # This is the prerequisite metric the user flagged: V4 can't be
-        # trusted until V3 detects the real anomalies well.
+        # Real-anomaly detection vs weak knock GT.  Scores V3's detected
+        # events against impulse-derived knock intervals on the sparse-anomaly
+        # cohorts (precision / recall / F1 / onset-timing).  This is a
+        # prerequisite metric: V4 cannot be trusted until V3 detects the real
+        # anomalies well.
         try:
             from ..anomaly.event_detection import v3_real_anomaly_detection
             rf_segments = []
@@ -1433,7 +1433,7 @@ def main(quick: bool = False) -> dict:
     )
 
     # ============================================== Stage 5b — spatial holdout
-    # Train fusion V4 on all positions EXCEPT the user-pinned held-out set,
+    # Train fusion V4 on all positions EXCEPT the reserved held-out set,
     # then report holdout MAE (localise-an-unseen-position), the V3-GATED
     # holdout MAE (deployment-faithful: V4 only fires on V3-flagged windows),
     # and V0 multilateration on the same held-out samples.  Gated by
@@ -1621,8 +1621,7 @@ def main(quick: bool = False) -> dict:
     # headline metric vs the closed-form / classical baseline already
     # computed elsewhere in this pipeline.  A near-zero or negative Δ on
     # any row means the deep model has not earned its complexity for that
-    # stage on the current cohort.  See the plan
-    # (`i-would-like-you-distributed-pizza`) for the framing rationale.
+    # stage on the current cohort.
     log("\n=== Deep-vs-simple summary ===")
     deep_vs_simple: dict = {}
 

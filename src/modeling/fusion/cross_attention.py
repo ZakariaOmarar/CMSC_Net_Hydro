@@ -5,8 +5,8 @@ vibration), and produces fused versions where each modality has attended over
 the other.  Implementation is two `MAB` cross-attention passes — one per
 direction — sharing no weights.
 
-Per the plan's smart-decisions table, this is **one block**.  Twins-Transformer
-dual-branch and multi-scale spatiotemporal cross-attention are deferred.
+By design this is **one block**.  Twins-Transformer dual-branch and
+multi-scale spatiotemporal cross-attention are deferred.
 """
 
 from __future__ import annotations

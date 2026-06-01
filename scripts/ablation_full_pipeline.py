@@ -1,9 +1,8 @@
 """Ablation runner — full-pipeline cell sweep with overfitting-first axes.
 
-One cell = one parameter combination from the plan
-(`i-would-like-you-distributed-pizza`).  All cells run against the
-baseline_v2 infrastructure (early-stop + weight_decay=1e-4 + head/CNF
-dropout 0.1 — committed in `full_run.py`'s per-stage builders).
+One cell = one parameter combination from the ablation grid.  All cells run
+against the baseline_v2 infrastructure (early-stop + weight_decay=1e-4 +
+head/CNF dropout 0.1 — committed in `full_run.py`'s per-stage builders).
 
 Phases map to runtime flags, not separate cell IDs:
   - Phase 2 / 3 (V1+V2-only triage, ~30 min GPU each):

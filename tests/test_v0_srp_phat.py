@@ -29,6 +29,8 @@ from src.modeling.anomaly_baselines.srp_phat_baseline import (
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
+pytestmark = pytest.mark.requires_data
+
 
 def _resolved_spec(name: str) -> DatasetSpec:
     spec = DatasetSpec.from_yaml(REPO_ROOT / "configs" / "datasets" / f"{name}.yaml")

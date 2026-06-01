@@ -15,7 +15,7 @@ Cells (each cell = one V2 training run from V1 init, 6 epochs on D1+D2):
     joint_pma + cma=1.0   (results/full_run/v2_cma/cma_w1_0.pt — 0.599)
 
 Run:
-    python -m src.modeling.orchestration.v2_sweep
+    python -m scripts.v2_sweep
 """
 
 from __future__ import annotations
@@ -27,11 +27,11 @@ from pathlib import Path
 
 import torch
 
-from ...modeling.context.v2_ssl import V2SSLConfig, train_v2_fusion
-from ...modeling.orchestration.full_run import _resolved_loader, _v2_cfg
+from src.modeling.context.v2_ssl import V2SSLConfig, train_v2_fusion
+from src.modeling.orchestration.full_run import _resolved_loader, _v2_cfg
 
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def main() -> dict:

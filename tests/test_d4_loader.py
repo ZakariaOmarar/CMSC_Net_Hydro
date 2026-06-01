@@ -30,10 +30,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 D4_ROOT = REPO_ROOT / "data" / "fourth_test_dataset"
 
 
-pytestmark = pytest.mark.skipif(
-    not D4_ROOT.exists(),
-    reason="D4 dataset not present in this checkout",
-)
+pytestmark = [
+    pytest.mark.requires_data,
+    pytest.mark.skipif(
+        not D4_ROOT.exists(),
+        reason="D4 dataset not present in this checkout",
+    ),
+]
 
 
 # ---------------------------------------------------------------------------

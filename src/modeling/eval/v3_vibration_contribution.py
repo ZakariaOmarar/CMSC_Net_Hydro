@@ -1,10 +1,10 @@
-"""Phase-D — measure vibration's actual contribution to V3 anomaly detection.
+"""Measure vibration's actual contribution to V3 anomaly detection.
 
-The user's stated requirement (2026-05-16): vibration MUST be really helpful
-for anomaly detection (RQ2) and localisation (RQ3).  RQ3 is already settled
-adversely by the V4 A5 ablation CI overlap (srp_only 0.172 [0.163, 0.181] vs
-full 0.168 [0.157, 0.179] — adding accelerometer-TDOA to acoustic SRP-PHAT
-provides no statistically significant lift).
+A central thesis question is whether vibration meaningfully helps anomaly
+detection (RQ2) and localisation (RQ3).  RQ3 is already settled adversely by
+the V4 A5 ablation CI overlap (srp_only 0.172 [0.163, 0.181] vs full 0.168
+[0.157, 0.179] — adding accelerometer-TDOA to acoustic SRP-PHAT provides no
+statistically significant lift).
 
 This module answers the same question for RQ2: **how much of V3's anomaly
 discrimination is actually driven by vibration?**  Three saved-weights

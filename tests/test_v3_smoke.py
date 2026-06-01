@@ -38,6 +38,8 @@ from src.modeling.context.v2_ssl import V2SSLConfig
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
+pytestmark = pytest.mark.requires_data
+
 
 # ---------------------------------------------------------------------------
 # Helpers

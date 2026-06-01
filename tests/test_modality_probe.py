@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import torch
 
 from src.data import DataSegment
@@ -25,6 +26,8 @@ from src.modeling.context.v2_ssl import V2SSLConfig, _precompute_paired
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+pytestmark = pytest.mark.requires_data
 
 
 def _resolved_d1_spec() -> DatasetSpec:

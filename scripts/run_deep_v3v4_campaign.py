@@ -1,6 +1,6 @@
 """One-command deep V3-first → V4 campaign driver.
 
-Sequences the V3-first deep campaign (plan ``i-would-like-you-distributed-pizza``):
+Sequences the V3-first deep campaign:
 
   Phase 1 — deep V3 sweep (frozen encoder) → pick best V3 by gap-guarded
             real-anomaly F1.

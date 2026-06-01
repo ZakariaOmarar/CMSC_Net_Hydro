@@ -20,6 +20,8 @@ from src.ingestion.test_dataset_loader import DatasetSpec, TestDatasetLoader
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
+pytestmark = pytest.mark.requires_data
+
 
 def _spec(name: str) -> DatasetSpec:
     # `DatasetSpec.from_yaml` resolves all paths to absolute — no reconstruction needed.

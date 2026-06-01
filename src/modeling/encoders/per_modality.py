@@ -1,7 +1,8 @@
 """Per-modality encoder: plain CNN backbone + Set-Transformer pool.
 
-Two backbones, both deliberately plain per the plan's smart-decisions table
-(no CBAM, no BiLSTM, no Twins-Transformer):
+Two backbones, both deliberately plain (no CBAM, no BiLSTM, no
+Twins-Transformer) so that the contribution is the fusion and conditioning,
+not backbone tuning:
 
   - `Acoustic2DCNN`: 2-D CNN on `(2, F, T)` log-mel + CWT input from
     `src/features/audio_spectral.py`.

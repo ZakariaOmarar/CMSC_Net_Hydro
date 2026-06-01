@@ -6,7 +6,7 @@ training — no V1/V2 retraining per cell, ~5-10× cheaper than the full
 pipeline) and selects by the **real-anomaly F1** (the B4 metric, vs weak
 knock GT) under a **train/val NLL-gap guardrail**.
 
-Selection objective (the Senior-ML correction — gap is a guardrail, NOT the
+Selection objective (the train/val gap is a guardrail, NOT the optimisation
 target): maximize ``real_anomaly_f1`` (+ synthetic-AUC@+5dB as tie-break),
 **subject to** ``|val_nll − train_nll| ≤ gap_guardrail``. A cell that shrinks
 the gap by tanking F1 is rejected.

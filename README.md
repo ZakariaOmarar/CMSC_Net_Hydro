@@ -1,9 +1,14 @@
 # CMSC_Net_Hydro
 
 Multimodal acoustic + vibration anomaly detection and source localization for
-multi-mode reversible Francis pump-turbines.  Master's thesis codebase
-implementing the V0 → V5 pipeline described in
-[`.claude/plans/because-i-have-not-replicated-acorn.md`](.claude/plans/because-i-have-not-replicated-acorn.md).
+reversible Francis pump-turbines. This is the implementation accompanying a
+Master's thesis; it realizes the chained **V0 → V5** label-free pipeline.
+
+Experiments run on a **3D-printed circular scale rig** modelled after the
+Rodundwerk II (ROW II) machine — the reference sensor geometry in
+[`src/config/constants.py`](src/config/constants.py) is ROW II's, and the same
+ingestion contract accepts the full-scale recordings when they are delivered
+(see the `illwerke_raw` stub config).
 
 ## Thesis claim
 
@@ -16,20 +21,7 @@ The chained system (mode → anomaly → gated-localization) is the contribution
 Chapter 6 reports four severing ablations against the chained system, not a
 bake-off of published architectures.
 
-## Datasets in scope
-
-| Dataset | Sensors | Folder labels | Spatial labels | Role |
-|---|---|---|---|---|
-| `data/first_test_dataset` | 4 mics + 4 vibration | Pump / Standstill / Turbine / RandomFault | none (synthetic geometry) | RQ1 + RQ2 |
-| `data/second_test_dataset` | 5 mics + 5 vibration (`node_position.txt`) | …same + `pos_(x,y,z)_*` subfolders | YES, 5 positions | RQ1 + RQ2 + RQ3 |
-| `data/third_test_dataset` | 9 mics (stereo pairs) + 4 accel (`position.json`) | speed1 / speed2 / speed3 + `hit_between_Fl_Gr_speed1` | YES, 1 hit | RQ2 (speed shift) + RQ3 + RQ4a |
-| `data/illwerke_raw_stub` | future: 9 mics + 4 accel | TBD | TBD | drop-in via config when delivered |
-
-Adding a new dataset is a YAML edit at `configs/datasets/<id>.yaml` — see
-[`docs/ideal_prototype_dataset.md`](docs/ideal_prototype_dataset.md) for the
-full collection spec.
-
-## Architecture (target end-state)
+## Architecture
 
 ```
    WAV / vibration  →  per-modality CNN encoders + Set-Transformer pool
@@ -52,90 +44,122 @@ full collection spec.
                                     (x, y, z)            ── only on alert windows
 ```
 
-## Iteration ladder (current state)
+| Iter | What it delivers |
+|---|---|
+| **V0**  | Reference baselines: LSTM-AE on log-mel (RQ2), LightGBM on hand-engineered features (RQ1 upper bound), classical SRP-PHAT (RQ3). |
+| **V1**  | Per-modality SSL warmup (contrastive) + cluster-purity sanity gate. Label-free; V2 inherits its weights. |
+| **V2**  | Bidirectional cross-attention fusion + multimodal SSL (contrastive + Latent Masked Modeling); inherits V1. |
+| **V3**  | Conditional Normalizing Flow anomaly head + per-cluster percentile thresholds + synthetic-transition stress test + A2 ablation. |
+| **V4**  | Anomaly-gated Cross3D localization head + accel-TDOA + FiLM conditioning + A3 ablation. |
+| **V5**  | RQ4a noise-robustness conditioning + RQ4b Illwerke SCADA channel-mining analysis. |
+| **streaming** | Gated runtime emitting `(mode, anomaly_score, alert_flag, (x,y,z) | None)` per window. |
 
-| Iter | What it delivers | Status |
-|---|---|---|
-| **V0**  | Reference baselines: LSTM-AE on log-mel (RQ2), LightGBM on hand-engineered features (RQ1 upper-bound), classical SRP-PHAT (RQ3) | LSTM-AE done · LightGBM done (smoke pending) · SRP-PHAT entry point pending |
-| **V1**  | Per-modality SSL warmup (contrastive only) + cluster-purity sanity gate. Label-free. V2 inherits weights. | done (smoke); full-run pending |
-| **V2**  | Bidirectional cross-attention fusion + multimodal SSL (contrastive + Latent Masked Modeling), inherits V1 weights | done (smoke); full-run pending |
-| **V3**  | Conditional Normalizing Flow anomaly head + per-cluster percentile thresholds + synthetic transition stress-test + A2 ablation | done (smoke); full-run pending |
-| **V4**  | Anomaly-gated Cross3D localization head + accel-TDOA + FiLM conditioning + A3 ablation | done (smoke); full-run pending |
-| **V5**  | RQ4a D3 speed conditioning + RQ4b Illwerke Allg_M1 MI ranking | done (smoke); full-run pending |
-| **streaming** | Gated runtime pipeline emitting `(mode, anomaly_score, alert_flag, (x,y,z) | None)` per window | done (smoke); D2-concat demo pending |
+Every stage is implemented and covered by the smoke tests. The end-to-end run
+is driven by [`src/modeling/orchestration/full_run.py`](src/modeling/orchestration/full_run.py).
+
+## Datasets
+
+All datasets were captured on the 3D-printed prototype rig. Each is registered
+by a single YAML under [`configs/datasets/`](configs/datasets) and loaded
+through the `DatasetRegistry`.
+
+| ID | Folder | Sensors | Labels | Spatial GT | Role |
+|----|--------|---------|--------|:---:|------|
+| `d1` | `data/first_test_dataset`  | 4 mics + 4 vib (peak) | Pump / Standstill / Turbine / RandomFault | — | RQ1, RQ2 |
+| `d2` | `data/second_test_dataset` | 5 mics + 5 vib (peak) | …same + `pos_(x,y,z)_*` | ✔ (5 pos) | RQ1, RQ2, RQ3 |
+| `d3` | `data/third_test_dataset`  | 9 mics + 4 accel (peak) | `speed{1,2,3}` + `hit_between_Fl_Gr_speed1` | ✔ (1 hit) | RQ2, RQ3, RQ4a |
+| `d4` | `data/fourth_test_dataset` | 9 mics + 4 accel (**raw ≈376 Hz**) | `speed{1,2,3}` + `RandomFault_knock_*` `(x,y,z)` | ✔ (7 pos) | RQ1–RQ4a |
+| `d5` | `data/fifth_test_dataset`  | 9 mics + 4 accel (raw ≈446 Hz) | `healthy/` + `knock/(x,y,z)` | ✔ (6 pos) | V3, V4, inference |
+| `illwerke_raw` | `data/illwerke_raw` *(future)* | 9 mics + 4 accel | TBD | TBD | drop-in via config when delivered |
+
+> **`speed{1,2,3}` are healthy recordings with three levels of added acoustic
+> noise — an augmentation/domain-shift knob, not an operating mode.** They are
+> pooled as healthy across datasets and must never be used as a mode label.
+
+Adding a dataset is a single YAML edit; see the schema and inline comments in
+[`configs/datasets/d1.yaml`](configs/datasets/d1.yaml). For a sensor that needs
+its vibration sampling rate derived from raw timestamps, use
+[`scripts/derive_dataset_sampling_rate.py`](scripts/derive_dataset_sampling_rate.py).
+
+The recordings themselves are not redistributed with this repository.
+
+## Configuration — where settings actually live
+
+Two layers, by design:
+
+1. **Per-dataset facts** (sensor counts, sampling rates, position source, label
+   scheme, window scales) live in [`configs/datasets/*.yaml`](configs/datasets)
+   and are the canonical source of truth, loaded via `DatasetSpec.from_yaml`
+   and `src/config/dataset_registry.py`.
+2. **Per-stage model hyperparameters** (V1–V5 trainer settings) live in the
+   Python builders `_v1_cfg`, `_v2_cfg`, `_v3_cfg`, `_v4_cfg`, … in
+   [`full_run.py`](src/modeling/orchestration/full_run.py). These are the single
+   source shared by the orchestrator and every driver under `scripts/`; change
+   them there, not at the caller.
+
+Architecture-wide constants (the empirically-selected acoustic features
+`n_fft=4096, hop=2048, n_mels=96`; sync windows) live in
+[`src/config/architecture.py`](src/config/architecture.py).
 
 ## Layout
 
 ```
 src/
-├── config/               physical constants (sensor geometry, speeds)
-├── data/                 DataSegment universal data contract
-├── ingestion/
-│   ├── loader.py / adapters.py / scanner.py   generic WAV+CSV reader
-│   ├── positions.py                           per-dataset 3-D position registry
-│   ├── test_dataset_loader.py                 unified loader (D1/D2/D3/illwerke)
-│   ├── illwerke_loader.py / udbf_reader.py    Allg_M1 SCADA mining (V5.2)
-├── features/
-│   ├── audio_spectral.py                      log-mel + CWT V1 encoder input
-│   ├── vibration_temporal.py                  amplitude + envelope + kurtosis
-│   └── acoustic_representations.py            CWT / MFCC / STFT primitives
+├── config/         physical constants (ROW II geometry), architecture config, dataset registry, device
+├── data/           DataSegment — the immutable universal data contract
+├── exceptions.py   project-wide exception hierarchy
+├── ingestion/      generic WAV+CSV reader, per-dataset loader, positions, sync verification/correction
+├── features/       log-mel + CWT (acoustic) and amplitude/envelope/kurtosis (vibration) encoder inputs
 └── modeling/
-    ├── localization/
-    │   ├── localization_head.py               GCC-PHAT, SRP-PHAT, ROW II reference geometry
-    │   ├── v4_features.py                     SRP-PHAT volume + accel-TDOA tokens (channel-agnostic)
-    │   ├── v4_loc_head.py                     Cross3DCNN + TDOASetEncoder + FiLM(c) head
-    │   └── v4_trainer.py                      V4 supervised trainer + sample precompute
-    ├── encoders/
-    │   ├── set_transformer.py                 MAB / PMA / ChannelTokenEnricher
-    │   └── per_modality.py                    Acoustic2DCNN + Vibration1DCNN + PerModalityEncoder
-    ├── fusion/cross_attention.py              V2 bidirectional cross-attention block
-    ├── context/
-    │   ├── cluster_metric.py                  K-means + Hungarian cluster purity
-    │   ├── v1_ssl.py                          V1 per-modality SimCLR trainer
-    │   ├── v2_fusion.py                       V2FusionEncoder (PerModality × 2 + cross-attn + PMA)
-    │   └── v2_ssl.py                          V2 contrastive + Latent Masked Modeling trainer
-    ├── anomaly/
-    │   ├── cnf_head.py                        V3 RealNVP CNF + FiLM coupling
-    │   ├── threshold.py                       per-cluster percentile thresholds
-    │   └── v3_trainer.py                      frozen-encoder CNF trainer + transition stress-test
-    ├── scada/
-    │   ├── d3_speed.py                        V5.1 D3 speed → one-hot SCADA tensor
-    │   └── channel_mining.py                  V5.2 Allg_M1 MI ranking + physical family
-    ├── streaming/inference.py                 Gated V2→V3→V4 runtime + cost/quality study
-    └── anomaly_baselines/
-        ├── lstm_ae.py                         V0 LSTM-AE on log-mel
-        └── mode_lgbm.py                       V0 LightGBM mode classifier
+    ├── encoders/        per-modality CNNs, Set-Transformer (MAB/PMA), pooling
+    ├── fusion/          V2 bidirectional cross-attention block
+    ├── context/         V1/V2 SSL trainers, V2 fusion encoder, cluster-purity metric, modality probe
+    ├── anomaly/         V3 RealNVP CNF + FiLM, per-cluster thresholds, event detection, synthetic eval
+    ├── localization/    GCC-/SRP-PHAT, multilateration, V4 features + Cross3D head + trainer + temporal
+    ├── scada/           V5.1 speed conditioning, V5.2 Illwerke MI channel mining
+    ├── streaming/       gated V2→V3→V4 runtime + cost/quality study
+    ├── eval/            RQ2/RQ3 paradigm evals, fusion forensics, bootstrap statistics
+    ├── anomaly_baselines/  V0 LSTM-AE, LightGBM mode classifier, SRP-PHAT baseline
+    └── orchestration/   full_run (end-to-end), multi_seed, archive, V4 cross-validation drivers
 
-configs/
-├── datasets/{d1, d2, d3, illwerke_raw_stub}.yaml      per-dataset registration
-└── test_datasets/
-    ├── v0_lstm_ae.yaml                                V0 LSTM-AE config
-    ├── v1_per_modality_ssl.yaml                       V1 per-modality SSL warmup
-    └── v2_fusion_ssl.yaml                             V2 multimodal SSL fusion
-
-results/illwerke/    frozen Illwerke 5-layer pipeline outputs (V5.2 inputs)
-docs/                Thesis.md + ideal_prototype_dataset.md
-tests/               smoke tests
+configs/datasets/   per-dataset registration YAMLs (d1–d5 + illwerke_raw stub) — the only configs code loads
+scripts/            runnable experiment drivers (campaigns, sweeps, diagnostics) — see scripts/README.md
+tests/              pytest suite (tests/unit/ = focused unit tests; tests/ = smoke tests; ~178 run without data, ~102 marked requires_data)
+docs/, results/     thesis text and run artifacts — NOT version-controlled (see .gitignore)
 ```
 
-## Run the smoke tests
+## Setup
 
 ```bash
-# V0 baselines
-python -m pytest tests/test_v0_lstm_ae.py tests/test_v0_mode_lgbm.py tests/test_v0_srp_phat.py -v
-# V1 per-modality SSL warmup
-python -m pytest tests/test_v1_smoke.py -v
-# V2 multimodal fusion SSL
-python -m pytest tests/test_v2_smoke.py -v
-# Full suite
-python -m pytest tests/ -q
+python -m venv .venv && .venv/Scripts/activate      # Windows; or `source .venv/bin/activate`
+pip install -r requirements-lock.txt                 # exact pinned reproduction environment
+pip install -e ".[dev,dl]"                           # editable install + dev/DL extras
 ```
+
+`requirements-lock.txt` is the frozen environment that produced the reported
+results (Python 3.11.9, numpy 2.x); `pyproject.toml` carries the looser
+supported ranges for day-to-day development.
+
+## Tests
+
+```bash
+# Synthetic-only — needs no recordings, runs anywhere:
+python -m pytest -m "not requires_data" -q
+
+# Full suite — data-dependent tests auto-skip when data/ is absent:
+python -m pytest -q
+```
+
+Tests that exercise the real recordings are marked `@pytest.mark.requires_data`
+and skip cleanly on a checkout without a `data/` directory (see
+[`tests/conftest.py`](tests/conftest.py)).
 
 ## Notes on the previous repo state
 
-A prior iteration of this repo implemented an Illwerke-specific 5-layer
-physics pipeline + Plotly.js dashboard.  That code is preserved in commit
-`51b77db` (`git checkout 51b77db -- <path>` to recover any file) and was
-removed when the thesis architecture pivoted to the V0–V5 chained label-free
-system above.  The Illwerke chapter results in `results/illwerke/` are kept
-intact as frozen evidence and feed the V5.2 SCADA-mining analysis.
+A prior iteration implemented an Illwerke-specific 5-layer physics pipeline +
+Plotly.js dashboard. That code is preserved in commit `51b77db`
+(`git checkout 51b77db -- <path>` to recover any file) and was removed when the
+thesis architecture pivoted to the V0–V5 chained label-free system above. The
+frozen Illwerke pipeline outputs under `results/illwerke/` feed the V5.2
+SCADA-mining analysis; like all of `results/`, they are kept locally and are
+not tracked in git.

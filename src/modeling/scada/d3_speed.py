@@ -1,7 +1,7 @@
 """V5.1 — D3 speed conditioning for the V4 localization head.
 
-Per the plan: re-run V4 on D3 with `s_t` set to {none, one-hot speed, c_t-only}.
-This module produces the **one-hot speed** SCADA tensor that V4 consumes via
+Supports the RQ4a study: re-run V4 on D3 with `s_t` set to {none, one-hot
+speed, c_t-only}.  This module produces the **one-hot speed** SCADA tensor that V4 consumes via
 its `scada_dim` slot.  D3's three speed buckets (`speed1` / `speed2` /
 `speed3`) come straight from the loader's `op_condition` field (label scheme
 `d3_speed_with_hit`).  D1/D2 segments don't have a meaningful speed bucket —

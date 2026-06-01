@@ -65,9 +65,9 @@ class AttentiveStatsPool2d(nn.Module):
         # Two-layer attention MLP: C → C/r → 1, broadcast over C.
         # The single attention map is shared across channels (single-head
         # ASP per Okabe et al. 2018).  Channel-wise ECAPA-style ASP would
-        # replace the final Linear's output dim with C; we opted for the
-        # lighter single-head variant on the basis of the user's Phase-3
-        # decision.
+        # replace the final Linear's output dim with C; the lighter
+        # single-head variant is used here as the ablations did not show a
+        # benefit from the heavier channel-wise form.
         self.attn = nn.Sequential(
             nn.Conv1d(channels, bottleneck, kernel_size=1),
             nn.Tanh(),

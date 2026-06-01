@@ -1,8 +1,0 @@
-artifact_path: results/ocsvm/anomaly/anomaly_model.pkl
-latent_root: artifacts/latents/001_All_RandomFault.npz
-output_path: results/ocsvm/anomaly/infer_randomfault.json
-window_s: 5.0
-overlap: 0.5
-mode_artifact_path: results/ocsvm/mode/mode_classifier.pt
-mode_consistency_window: 5
-device: auto

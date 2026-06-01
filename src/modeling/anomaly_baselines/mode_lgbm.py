@@ -16,8 +16,8 @@ Per-window features:
 
 Training:
   - 4-class: {Pump, Standstill, Turbine, RandomFault} on D1+D2 folder labels.
-  - Held-out *recordings* (not held-out windows) per the user-set sanity-gate
-    contract.  No window-level leakage.
+  - Held-out *recordings* (not held-out windows), matching the sanity-gate
+    protocol.  No window-level leakage.
 """
 
 from __future__ import annotations

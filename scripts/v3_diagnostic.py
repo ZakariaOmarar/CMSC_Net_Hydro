@@ -17,7 +17,7 @@ uninterpretable, but `alert_rate_per_recording` is a clean signal of
 "how anomaly-like is this recording in V3's eyes."
 
 Run:
-    python -m src.modeling.orchestration.v3_diagnostic
+    python -m scripts.v3_diagnostic
 """
 
 from __future__ import annotations
@@ -28,20 +28,20 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from ...modeling.anomaly.cnf_head import ConditionalRealNVP
-from ...modeling.anomaly.threshold import PerClusterThresholds
-from ...modeling.context.v2_fusion import V2FusionEncoder
-from ...modeling.context.v2_ssl import V2SSLConfig, _gather_paired_segments
-from ...modeling.localization.v4_features import GridSpec
-from ...modeling.localization.v4_trainer import precompute_v4_samples
-from ...modeling.orchestration.full_run import (
+from src.modeling.anomaly.cnf_head import ConditionalRealNVP
+from src.modeling.anomaly.threshold import PerClusterThresholds
+from src.modeling.context.v2_fusion import V2FusionEncoder
+from src.modeling.context.v2_ssl import V2SSLConfig, _gather_paired_segments
+from src.modeling.localization.v4_features import GridSpec
+from src.modeling.localization.v4_trainer import precompute_v4_samples
+from src.modeling.orchestration.full_run import (
     _resolved_loader,
     _v2_cfg,
     _d3_spatial_overrides,
 )
 
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT = Path(__file__).resolve().parents[1]
 RESULTS = REPO_ROOT / "results" / "full_run"
 
 
@@ -132,7 +132,7 @@ def main() -> dict:
     # Filter healthy to those that look like valid V4 inputs (need raw
     # waveforms long enough for one window).  precompute_v4_samples does
     # this internally — we just pass the segments through.
-    from ...ingestion.test_dataset_loader import TestDatasetSegment
+    from src.ingestion.test_dataset_loader import TestDatasetSegment
 
     def _to_segments(paired_segs):
         # The public precompute_v4_samples wants `TestDatasetSegment`s; the

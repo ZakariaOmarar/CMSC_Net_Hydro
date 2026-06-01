@@ -24,6 +24,8 @@ from src.modeling.anomaly_baselines.lstm_ae import (
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
+pytestmark = pytest.mark.requires_data
+
 
 def _resolved_d1_spec() -> DatasetSpec:
     spec = DatasetSpec.from_yaml(REPO_ROOT / "configs" / "datasets" / "d1.yaml")
@@ -162,8 +164,8 @@ def test_recording_split_is_held_out_by_recording() -> None:
     result = train_v0_lstm_ae(loader, cfg)
     train_ids = set(result.healthy_train_recordings)
     val_ids = set(result.healthy_val_recordings)
-    # No recording appears in both splits — this is the cross-recording gate
-    # the user explicitly asked for.
+    # No recording appears in both splits — enforces the cross-recording
+    # train/val separation that prevents window-level leakage.
     assert train_ids.isdisjoint(val_ids)
     assert len(train_ids) >= 1
     assert len(val_ids) >= 1

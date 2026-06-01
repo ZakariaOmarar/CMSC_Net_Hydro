@@ -1,8 +1,8 @@
 """Probe V2's internal representations to locate the purity-drop in the
 acoustic↔vibration fusion path.
 
-Investigates the user's hypothesis: V1 vibration alone (purity 0.667) beats
-V2 fusion (0.627), so the cross-attention block must be losing the
+Investigates the hypothesis that, since V1 vibration alone (purity 0.667)
+beats V2 fusion (0.627), the cross-attention block must be losing the
 vibration signal somewhere between input and `c_t`.
 
 For each held-out window we extract a ladder of representations:
@@ -22,7 +22,7 @@ For each held-out window we extract a ladder of representations:
 Each row is K-means(k=4) → Hungarian-matched to mode labels → cluster purity.
 
 Run with:
-    python -m src.modeling.orchestration.probe_v2
+    python -m scripts.probe_v2
 """
 
 from __future__ import annotations
@@ -33,11 +33,11 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from ...config import resolve_device
-from ...modeling.context.cluster_metric import cluster_purity_and_nmi
-from ...modeling.context.v1_ssl import V1SSLConfig
-from ...modeling.context.v2_fusion import V2FusionEncoder
-from ...modeling.context.v2_ssl import (
+from src.config import resolve_device
+from src.modeling.context.cluster_metric import cluster_purity_and_nmi
+from src.modeling.context.v1_ssl import V1SSLConfig
+from src.modeling.context.v2_fusion import V2FusionEncoder
+from src.modeling.context.v2_ssl import (
     V2SSLConfig,
     _PairedGroupedBatchSampler,
     _PairedWindowedDataset,
@@ -45,11 +45,11 @@ from ...modeling.context.v2_ssl import (
     _gather_paired_segments,
     _split_segments_by_recording,
 )
-from ...modeling.encoders import PerModalityEncoder
-from ...modeling.orchestration.full_run import _resolved_loader, _v2_cfg
+from src.modeling.encoders import PerModalityEncoder
+from src.modeling.orchestration.full_run import _resolved_loader, _v2_cfg
 
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT = Path(__file__).resolve().parents[1]
 RESULTS = REPO_ROOT / "results" / "full_run"
 
 

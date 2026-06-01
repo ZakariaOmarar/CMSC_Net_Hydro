@@ -49,6 +49,8 @@ from src.modeling.localization.v4_trainer import _grid_coords_from_spec
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
+pytestmark = pytest.mark.requires_data
+
 
 def _resolved_d1_spec() -> DatasetSpec:
     spec = DatasetSpec.from_yaml(REPO_ROOT / "configs" / "datasets" / "d1.yaml")

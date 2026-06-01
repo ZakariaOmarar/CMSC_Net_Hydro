@@ -9,7 +9,7 @@ exclusively from Pump / Standstill / Turbine recordings, runs K-means(k=3)
 on `c_t`, Hungarian-matches to those three labels, and reports purity.
 
 Run:
-    python -m src.modeling.orchestration.reeval_k3
+    python -m scripts.reeval_k3
 """
 
 from __future__ import annotations
@@ -21,9 +21,9 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from ...modeling.context.cluster_metric import cluster_purity_and_nmi
-from ...modeling.context.v2_fusion import V2FusionEncoder
-from ...modeling.context.v2_ssl import (
+from src.modeling.context.cluster_metric import cluster_purity_and_nmi
+from src.modeling.context.v2_fusion import V2FusionEncoder
+from src.modeling.context.v2_ssl import (
     V2SSLConfig,
     _PairedGroupedBatchSampler,
     _PairedWindowedDataset,
@@ -31,10 +31,10 @@ from ...modeling.context.v2_ssl import (
     _gather_paired_segments,
     _split_segments_by_recording,
 )
-from ...modeling.orchestration.full_run import _resolved_loader, _v2_cfg
+from src.modeling.orchestration.full_run import _resolved_loader, _v2_cfg
 
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT = Path(__file__).resolve().parents[1]
 RESULTS = REPO_ROOT / "results" / "full_run"
 HEALTHY_MODES_K3 = ("Pump", "Standstill", "Turbine")
 
@@ -124,7 +124,7 @@ def main() -> dict:
     print("\n[V1 standalone references]")
     for v1_name in ("acoustic", "vibration"):
         sd = torch.load(RESULTS / "v1" / f"{v1_name}.pt", map_location="cpu")
-        from ...modeling.encoders import PerModalityEncoder
+        from src.modeling.encoders import PerModalityEncoder
         enc = PerModalityEncoder(
             modality=v1_name,
             feature_dim=cfg_clean.feature_dim,

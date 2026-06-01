@@ -1,6 +1,6 @@
 """V5 SCADA injection — D3 speed conditioning + Illwerke MI ranking.
 
-Two pieces, kept separate per the plan:
+Two pieces, kept deliberately separate:
   - `d3_speed`        : V5.1 — D3 speed bucket → one-hot SCADA tensor for the
                         V4 head's `s_t` slot.
   - `channel_mining`  : V5.2 — mutual-information ranking of Allg_M1 channels

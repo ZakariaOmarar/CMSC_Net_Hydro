@@ -1,14 +1,13 @@
 """One-command end-to-end ablation campaign driver.
 
-Sequences all 57 cells of the plan
-(`i-would-like-you-distributed-pizza`) — Phase 1 baseline → Phase 2 sweep
-→ Phases 3 / 7a / 7b sweeps (each conditioned on Phase 2 winner) →
-Phase 4 top-5 promotion to full pipeline → Phase 5 multi-seed verdict →
-Phase 6 V4-only augmentation → conditional Phase 8 follow-up if Phase 1
-gates fail.
+Sequences all 57 cells of the ablation campaign — Phase 1 baseline →
+Phase 2 sweep → Phases 3 / 7a / 7b sweeps (each conditioned on Phase 2
+winner) → Phase 4 top-5 promotion to full pipeline → Phase 5 multi-seed
+verdict → Phase 6 V4-only augmentation → conditional Phase 8 follow-up if
+Phase 1 gates fail.
 
-Single GPU; sequential cells.  No parallelism within the campaign; the
-plan caps total wall-clock at ``--budget-hours``.
+Single GPU; sequential cells.  No parallelism within the campaign, which
+caps total wall-clock at ``--budget-hours``.
 
 State is persisted to ``results/runs/campaign_<ts>/state.json`` after
 every cell — re-running the driver with the same ``--resume <campaign_ts>``

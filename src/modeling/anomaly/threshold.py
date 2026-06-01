@@ -1,9 +1,9 @@
 """V3 alert mechanism — per-cluster percentile thresholds.
 
-The plan's smart-decisions table replaces CANDE-CP's reconstruction-AE *score*
-with the CNF log-likelihood, but **keeps** CANDE-CP's per-bucket percentile
-thresholding logic — re-bound from ground-truth mode label to V2's predicted
-K-means cluster of `c_t`.  This preserves the label-leakage invariant: only
+This design replaces CANDE-CP's reconstruction-AE *score* with the CNF
+log-likelihood, but **keeps** CANDE-CP's per-bucket percentile thresholding
+logic — re-bound from ground-truth mode label to V2's predicted K-means
+cluster of `c_t`.  This preserves the label-leakage invariant: only
 cluster IDs (label-free) feed into threshold fitting; mode labels appear only
 in Chapter 6's per-mode FPR breakdown, never at fit time.
 
@@ -280,9 +280,9 @@ def per_cluster_alert_breakdown(
 
     The orchestrator's V3 cohort-validation block reports an aggregate
     alert rate per cohort (healthy hold-out, D2 RF, D3 hit, D4 RF).
-    For the **per-mode FPR breakdown** the plan §V3 calls for, we
-    additionally split each cohort's windows by which K-means cluster
-    of `c_t` they were assigned to.  This answers:
+    For the **per-mode FPR breakdown** (Chapter 6), each cohort's windows
+    are additionally split by which K-means cluster of `c_t` they were
+    assigned to.  This answers:
 
       * "Does the healthy hold-out alert rate hit the 5 % target *in
         every cluster*, or only in the cluster K-means chose as

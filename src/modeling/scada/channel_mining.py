@@ -1,11 +1,11 @@
 """V5.2 — Illwerke SCADA mutual-information ranking.
 
-Per the plan: take the existing 5-layer pipeline anomaly events
+Take the existing 5-layer pipeline anomaly events
 (`results/illwerke/pipeline/anomaly_events.json`) as the binary target;
 compute mutual information between each Allg_M1 channel time series and the
 target on a shared 1 Hz grid; rank top-K channels and tag each by physical
-family.  No injection on D2/D3 (the plan explicitly forbids fabricated
-SCADA stand-ins).
+family.  No injection on D2/D3 — fabricated SCADA stand-ins are deliberately
+avoided.
 
 The thesis narrative for RQ4 is then:
 

@@ -1,7 +1,6 @@
 """Gated streaming-inference pipeline — V2 → V3 → (gated) V4.
 
-Per the plan's architecture diagram and constraint #4 (streaming flow):
-the runtime emits per window:
+Realises the streaming-flow contract — the runtime emits per window:
 
     (t, mode_label, anomaly_score, alert_flag, (x, y, z) | None)
 

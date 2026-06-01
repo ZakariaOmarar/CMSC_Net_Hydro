@@ -13,7 +13,7 @@ Three components:
 
 Permutation-invariance over the channel set is what makes the same trained
 model handle D1 (4+4), D2 (5+5), D3 (9+4), and a future Illwerke array — the
-non-negotiable constraint #1 from the plan.
+core channel-agnosticism requirement of this work.
 """
 
 from __future__ import annotations
@@ -103,9 +103,8 @@ class PMA(nn.Module):
     summary we use `num_seeds=1`, which makes PMA a learned weighted average
     over the channel-token sequence.
 
-    The plan mandates PMA over a naive temporal mean (supervisor note): the
-    learned seeds let the network discover which frames + channels carry the
-    most context.
+    PMA is preferred over a naive temporal mean: the learned seeds let the
+    network discover which frames + channels carry the most context.
     """
 
     def __init__(self, dim: int, num_seeds: int = 1, num_heads: int = 4, dropout: float = 0.0) -> None:

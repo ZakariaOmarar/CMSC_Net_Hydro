@@ -1,6 +1,6 @@
 """Cluster-evaluation metrics for the V1 / V2 sanity gate.
 
-The plan's RQ1 sanity gate (V1) and headline metric (V2) report three
+The RQ1 sanity gate (V1) and headline metric (V2) report three
 measures, each with different behaviour when ``n_clusters`` differs from
 ``n_labels`` — the typical case when K-means is forced to K = 3 (the
 mode hypothesis) but the held-out validation set contains only some

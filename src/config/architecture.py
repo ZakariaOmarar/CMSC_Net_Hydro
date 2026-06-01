@@ -1,7 +1,6 @@
 """Single source of truth for the **architecture-defining** numerical choices.
 
-Scoped deliberately to constants a senior ML engineer would centralise —
-the ones that:
+Scoped deliberately to the constants worth centralising — the ones that:
 
   * Encode a thesis-level design decision (e.g. ASP pool, multi-scale
     window dict, per-stage overrides, CWT-band).

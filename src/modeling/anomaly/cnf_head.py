@@ -1,10 +1,10 @@
 """V3 anomaly head — RealNVP Conditional Normalizing Flow with FiLM conditioning.
 
-Architecture choice (per the plan's smart-decisions table): RealNVP affine
-coupling on a fixed-dim latent, FiLM-conditioned on the V2 context vector
-`c_t`.  Glow's learnable 1×1 inv-conv is deferred — RealNVP is sufficient on
-small data and gives an exact log-likelihood, which is exactly the streaming
-runtime's required `anomaly_score = -log p(x|c)`.
+Architecture choice: RealNVP affine coupling on a fixed-dim latent,
+FiLM-conditioned on the V2 context vector `c_t`.  Glow's learnable 1×1
+inv-conv is deferred — RealNVP is sufficient on small data and gives an exact
+log-likelihood, which is exactly the streaming runtime's required
+`anomaly_score = -log p(x|c)`.
 
 Layout:
   - `FiLMMLP`         : MLP with FiLM(c) modulation between hidden layers

@@ -4,7 +4,7 @@ Trains the acoustic OR vibration encoder independently on healthy windows of
 D1+D2.  No labels touch the training loop.  Mode labels appear only at the
 sanity-gate evaluation step (cluster purity, computed by `cluster_metric`).
 
-Design choices (per the plan's smart-decisions table):
+Design choices:
   - Per-modality SimCLR contrastive (acoustic and vibration trained
     separately).  No cross-modal anything yet — that arrives in V2.
   - NT-Xent loss between two augmented views of each anchor window.

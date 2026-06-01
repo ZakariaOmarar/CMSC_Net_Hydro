@@ -1,9 +1,8 @@
 """V0-style anomaly baseline — per-cluster diagonal Gaussian on V2 c_t buckets.
 
 A simple, stable density baseline the V3 conditional flow must beat to earn
-its complexity.  The audit (2026-05-22, see plan `i-would-like-you-distributed-pizza`)
-flagged that no such baseline existed: V3's val NLL was reported without
-reference to what a non-deep density estimator achieves on the same
+its complexity.  Without it, V3's val NLL would be reported without reference
+to what a non-deep density estimator achieves on the same
 `(x = mean_pool(fused), c = PMA-pooled c_t)` pairs.
 
 NOTE (2026-05-23): the original implementation used `scipy.stats.gaussian_kde`,
