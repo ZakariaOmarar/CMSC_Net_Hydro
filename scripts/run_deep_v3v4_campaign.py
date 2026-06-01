@@ -51,6 +51,13 @@ VERDICT_SEEDS = (1337, 2024, 7, 99)
 
 _TIMEOUT_V3_S = 60 * 60
 _TIMEOUT_V4_S = 40 * 60
+# Phase 4 LOPO-CV trains V4 once per labelled position (~23 folds) on the
+# winner cell, so the budget scales linearly with folds × channel modes.
+# 4 modes × 23 folds × ~10 min/fold ≈ 15 h; bound generously.
+_TIMEOUT_LOPO_S = 16 * 3600
+# Phase 5 cross-dataset transfer: train + eval once per direction × per
+# channel mode.  2 directions × 4 modes × ~15 min/run ≈ 2 h; bound to 4 h.
+_TIMEOUT_CROSS_S = 4 * 3600
 
 
 def _now() -> str:
@@ -77,8 +84,17 @@ def _save(state_path: Path, state: dict) -> None:
     tmp.replace(state_path)
 
 
-def _find_run_dir(prefix: str, cell: str, seed: int) -> Path | None:
-    cands = sorted(RUNS_DIR.glob(f"*__{prefix}_{cell}_s{seed}"),
+def _find_run_dir(prefix: str, cell: str, seed: int,
+                  train_select: str | None = None) -> Path | None:
+    """Locate the newest run dir matching `prefix_cell_sSEED[_tsMODE]`.
+
+    `train_select` disambiguates the v4deep_<cell>_s42 family: impulse uses the
+    bare suffix, non-impulse modes have `_ts<MODE>` appended (matches the
+    convention in v4_deep_sweep.py).  Passing None matches the impulse/default
+    naming.
+    """
+    suffix = "" if train_select in (None, "impulse") else f"_ts{train_select}"
+    cands = sorted(RUNS_DIR.glob(f"*__{prefix}_{cell}_s{seed}{suffix}"),
                    key=lambda p: p.stat().st_mtime, reverse=True)
     return cands[0] if cands else None
 
@@ -257,10 +273,14 @@ def main() -> None:
             key = f"v3verdict:{v3_winner}:s{seed}"
             if state.get("cells", {}).get(key, {}).get("status") == "completed":
                 continue
+            # A4 fix (timeout): the verdict only needs fusion stability
+            # across seeds (the per-paradigm story is in the seed-42 grid).
+            # Dropping --all-paradigms cuts ~3× off per-seed wall time and
+            # keeps the verdict inside _TIMEOUT_V3_S.
             status = _launch(
                 [sys.executable, "-m", "scripts.v3_deep_sweep",
                  "--encoder-run", str(encoder_run), "--cell", v3_winner,
-                 "--all-paradigms", "--seed", str(seed)],
+                 "--seed", str(seed)],
                 _TIMEOUT_V3_S, log)
             state.setdefault("cells", {})[key] = {
                 "status": status, "run_dir": str(_find_run_dir("v3deep", v3_winner, seed))}
@@ -282,6 +302,83 @@ def main() -> None:
             state.setdefault("cells", {})[key] = {
                 "status": status, "run_dir": str(_find_run_dir("v4deep", v4_winner, seed))}
             _save(state_path, state)
+
+    # ---- Phase 2b: training-window-selection ablation ----
+    # Does HOW V4 training windows are selected matter?  Run the V4 winner at
+    # all three selectors (impulse weak-GT / V3-gated / all-windows) so the
+    # thesis can show whether train/serve skew (impulse-train vs V3-deploy) or
+    # label noise (all-windows) actually affects the gated holdout MAE.
+    if v4_winner and v3_winner_dir is not None:
+        log("\n=== Phase 2b — V4 training-window-selection ablation ===")
+        for ts_mode in ("impulse", "v3gated", "all"):
+            if time.time() > deadline:
+                log("BUDGET EXCEEDED in Phase 2b"); break
+            key = f"v4trainsel:{v4_winner}:{ts_mode}:s42"
+            if state.get("cells", {}).get(key, {}).get("status") == "completed":
+                continue
+            status = _launch(
+                [sys.executable, "-m", "scripts.v4_deep_sweep",
+                 "--encoder-run", str(encoder_run), "--v3-run", str(v3_winner_dir),
+                 "--samples-cache", str(samples_cache),
+                 "--train-select", ts_mode,
+                 "--cell", v4_winner, "--seed", "42"],
+                _TIMEOUT_V4_S, log)
+            # Run-dir naming (A3 fix): v4_deep_sweep tags non-impulse modes
+            # with a `_tsMODE` suffix so the three runs never collide.
+            state.setdefault("cells", {})[key] = {
+                "status": status,
+                "run_dir": str(_find_run_dir("v4deep", v4_winner, 42, train_select=ts_mode)),
+                "train_select": ts_mode}
+            _save(state_path, state)
+
+    # ---- Phase 4: LOPO-CV by position ----
+    # Robustness of the V4 winner's holdout MAE across ALL labelled positions
+    # (~23), not just the fixed 5-position holdout.  Runs once per channel
+    # mode on the V4 winner only.  Output: <campaign_dir>/lopo/summary.json
+    # (mean ± std MAE per mode) + folds.jsonl (per-position detail).
+    if v4_winner:
+        lopo_key = f"lopo:{v4_winner}:s42"
+        if state.get("cells", {}).get(lopo_key, {}).get("status") != "completed":
+            log("\n=== Phase 4 — LOPO-CV by position (V4 winner) ===")
+            if time.time() > deadline:
+                log("BUDGET EXCEEDED — skipping Phase 4")
+            else:
+                lopo_out = campaign_dir / "lopo"
+                status = _launch(
+                    [sys.executable, "-m", "src.modeling.orchestration.v4_lopo_cv",
+                     "--encoder-run", str(encoder_run),
+                     "--samples-cache", str(samples_cache),
+                     "--all-channel-modes",
+                     "--out-dir", str(lopo_out),
+                     "--seed", "42"],
+                    _TIMEOUT_LOPO_S, log)
+                state.setdefault("cells", {})[lopo_key] = {
+                    "status": status, "out_dir": str(lopo_out)}
+                _save(state_path, state)
+
+    # ---- Phase 5: cross-dataset transfer ----
+    # Train on D1-D4, test on D5 only (and the reverse).  Confirms the
+    # winner generalizes across recording sessions / rig states, not just
+    # across positions within the same session.  V4 winner only.
+    if v4_winner:
+        cross_key = f"cross_dataset:{v4_winner}:s42"
+        if state.get("cells", {}).get(cross_key, {}).get("status") != "completed":
+            log("\n=== Phase 5 — Cross-dataset transfer (V4 winner) ===")
+            if time.time() > deadline:
+                log("BUDGET EXCEEDED — skipping Phase 5")
+            else:
+                cross_out = campaign_dir / "cross_dataset"
+                status = _launch(
+                    [sys.executable, "-m", "src.modeling.orchestration.v4_cross_dataset",
+                     "--encoder-run", str(encoder_run),
+                     "--samples-cache", str(samples_cache),
+                     "--all-channel-modes",
+                     "--out-dir", str(cross_out),
+                     "--seed", "42"],
+                    _TIMEOUT_CROSS_S, log)
+                state.setdefault("cells", {})[cross_key] = {
+                    "status": status, "out_dir": str(cross_out)}
+                _save(state_path, state)
 
     # ---- Final report ----
     log("\n=== Final report ===")

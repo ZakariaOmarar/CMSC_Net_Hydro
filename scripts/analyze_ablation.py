@@ -323,22 +323,31 @@ def _table_v3_deep(rows: list[dict]) -> str:
 
 
 def _table_v4_deep(rows: list[dict]) -> str:
-    """Deep V4 sweep — spatial-holdout MAE, V3-gated, vs V0, + gap."""
+    """Deep V4 sweep — spatial-holdout MAE, V3-gated, + train/val MAE gap.
+
+    `mae_gap_m` is `|val_mae - train_mae|` in METRES (computed from a final
+    forward pass on train_samples).  The legacy `loss_gap` column is the
+    smooth-L1 loss difference in loss_scale-cm units, kept for backward
+    compat with older runs that pre-date the train-MAE pass.
+    """
     deep = [r for r in rows if "holdout_mae_ungated_m" in r["metrics"]]
     out = ["## Table 6 — Deep V4 sweep (spatial holdout, V3-gated, gap-guarded)", ""]
     if not deep:
         out.append("_(no v4deep cells loaded)_\n")
         return "\n".join(out)
-    cols = ["cell", "seed", "holdout_MAE_gated", "holdout_MAE_ungated",
-            "n_gated", "train_val_gap_m", "es_epoch"]
+    cols = ["cell", "seed", "train_select", "holdout_MAE_gated", "holdout_MAE_ungated",
+            "n_gated", "train_MAE_m", "mae_gap_m", "loss_gap", "es_epoch"]
     out += ["| " + " | ".join(cols) + " |", "|" + "|".join(["---"] * len(cols)) + "|"]
     for r in deep:
         m = r["metrics"]
         out.append("| " + " | ".join([
             r["cell"], str(r["cfg"].get("seed", "?")),
+            str(m.get("train_select", "?")),
             _fmt(m.get("holdout_mae_v3gated_m")),
             _fmt(m.get("holdout_mae_ungated_m")),
             _fmt(m.get("n_holdout_gated"), prec=0),
+            _fmt(m.get("train_mae_3d_m")),
+            _fmt(m.get("train_val_mae_gap_m")),
             _fmt(m.get("train_val_gap_m")),
             _fmt(m.get("early_stopped_epoch"), prec=0),
         ]) + " |")
@@ -431,6 +440,213 @@ def _table_v4_channel_modes(rows: list[dict]) -> str:
     return "\n".join(out) + "\n"
 
 
+def _table_v4_train_select(rows: list[dict]) -> str:
+    """V4 training-window-selection ablation: impulse vs V3-gated vs all.
+
+    Shows whether HOW training windows are chosen (offline impulse weak-GT,
+    deployment-consistent V3 gating, or no selection) affects the V3-gated
+    holdout MAE.  Directly answers the 'does train/serve skew matter?' question.
+    """
+    # Only show cells that were actually run with ≥2 distinct selectors (the
+    # Phase-2b ablation) — every regular v4deep cell carries train_select=
+    # "impulse" by default, which is not the ablation.
+    from collections import defaultdict as _dd
+    sel_by_cell: dict[str, set] = _dd(set)
+    for r in rows:
+        ts = r["metrics"].get("train_select")
+        if ts:
+            sel_by_cell[r["cell"]].add(ts)
+    ablation_cells = {c for c, sels in sel_by_cell.items() if len(sels) >= 2}
+    ts_rows = [r for r in rows
+               if r["metrics"].get("train_select") and r["cell"] in ablation_cells]
+    out = ["## Table 10 — V4 training-window selection (impulse / v3gated / all)", ""]
+    if not ts_rows:
+        out.append("_(no train-select ablation cells loaded)_\n")
+        return "\n".join(out)
+    cols = ["cell", "train_select", "seed", "holdout_MAE_gated", "holdout_MAE_ungated",
+            "n_holdout_gated", "train_val_gap_m"]
+    out += ["| " + " | ".join(cols) + " |", "|" + "|".join(["---"] * len(cols)) + "|"]
+    # Sort so the three modes group together per cell.
+    for r in sorted(ts_rows, key=lambda r: (r["cell"], str(r["metrics"].get("train_select")))):
+        m = r["metrics"]
+        out.append("| " + " | ".join([
+            r["cell"], str(m.get("train_select")), str(r["cfg"].get("seed", "?")),
+            _fmt(m.get("holdout_mae_v3gated_m")),
+            _fmt(m.get("holdout_mae_ungated_m")),
+            _fmt(m.get("n_holdout_gated"), prec=0),
+            _fmt(m.get("train_val_gap_m")),
+        ]) + " |")
+    return "\n".join(out) + "\n"
+
+
+def _table_lopo(campaign_dir: Path | None) -> str:
+    """Table 11 — LOPO-CV by position (V4 winner only).
+
+    Reads `<campaign_dir>/lopo/summary.json` + `folds.jsonl` and reports:
+      - per-position fold MAE (every labelled position the V4 winner was
+        leave-one-position-out evaluated on)
+      - aggregate mean ± std per channel mode
+    """
+    out = ["## Table 11 — LOPO-CV by position (V4 winner)", ""]
+    if campaign_dir is None:
+        out.append("_(no campaign_dir set; LOPO summary not loaded)_\n")
+        return "\n".join(out)
+    summary_p = campaign_dir / "lopo" / "summary.json"
+    folds_p = campaign_dir / "lopo" / "folds.jsonl"
+    if not summary_p.exists():
+        out.append("_(no `lopo/summary.json` in campaign dir — Phase 4 did not run)_\n")
+        return "\n".join(out)
+    try:
+        summary = json.loads(summary_p.read_text())
+    except Exception:
+        out.append("_(failed to parse lopo/summary.json)_\n")
+        return "\n".join(out)
+    modes = summary.get("channel_modes") or ["both"]
+    agg = summary.get("aggregate_per_mode") or {}
+
+    # Per-position rows: parse folds.jsonl if available, else show aggregate
+    # only.
+    folds: list[dict] = []
+    if folds_p.exists():
+        for line in folds_p.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                folds.append(json.loads(line))
+            except Exception:
+                continue
+
+    if folds:
+        # Group folds by position; columns per mode.
+        by_pos: dict[tuple, dict[str, dict]] = defaultdict(dict)
+        for f in folds:
+            p = tuple(f.get("position_xyz", []))
+            by_pos[p][f.get("channel_mode", "?")] = f
+        cols = ["position (m)", "n_train_w", "n_val_w"] + [f"{m} MAE (m)" for m in modes]
+        out += ["| " + " | ".join(cols) + " |",
+                "|" + "|".join(["---"] * len(cols)) + "|"]
+        for p in sorted(by_pos.keys()):
+            row = by_pos[p]
+            ref = next(iter(row.values()))
+            cells = [
+                f"({p[0]:.3f}, {p[1]:.3f}, {p[2]:.3f})" if p else "?",
+                _fmt(ref.get("n_train_windows"), prec=0),
+                _fmt(ref.get("n_val_windows"), prec=0),
+            ]
+            for m in modes:
+                f = row.get(m)
+                if f is None or "error" in f:
+                    cells.append("—")
+                else:
+                    cells.append(_fmt(f.get("val_mae_3d_m")))
+            out.append("| " + " | ".join(cells) + " |")
+    else:
+        out.append("_(folds.jsonl missing; aggregate only)_")
+        out.append("")
+
+    # Aggregate footer.
+    out.append("")
+    out.append("**Aggregate across positions (mean ± std):**")
+    out.append("")
+    out.append("| mode | n_folds | mean MAE (m) | std MAE (m) | min | max |")
+    out.append("|---|---|---|---|---|---|")
+    for m in modes:
+        a = agg.get(m, {})
+        out.append("| " + " | ".join([
+            m,
+            _fmt(a.get("n_folds"), prec=0),
+            _fmt(a.get("mean_mae_m")),
+            _fmt(a.get("std_mae_m")),
+            _fmt(a.get("min_mae_m")),
+            _fmt(a.get("max_mae_m")),
+        ]) + " |")
+    return "\n".join(out) + "\n"
+
+
+def _table_v4_position_breakdown(rows: list[dict]) -> str:
+    """Table 12 — Per-position MAE on the 5-position holdout (V4 winner).
+
+    Drawn from any row whose metrics carries `val_position_breakdown`
+    (added in v4_trainer's final-eval pass).  Selects the row with the
+    lowest `holdout_mae_ungated_m` as the winner and prints its
+    per-position breakdown with a fail flag for MAE > 0.5 m.
+    """
+    out = ["## Table 12 — Per-position MAE on 5-position holdout (winner)", ""]
+    candidates = [
+        r for r in rows
+        if isinstance(r["metrics"].get("val_position_breakdown"), dict)
+        and r["metrics"]["val_position_breakdown"]
+        and r["metrics"].get("holdout_mae_ungated_m") is not None
+    ]
+    if not candidates:
+        out.append("_(no row carries val_position_breakdown — re-run v4_deep_sweep "
+                   "with the updated trainer to populate it)_\n")
+        return "\n".join(out)
+    winner = min(candidates, key=lambda r: r["metrics"]["holdout_mae_ungated_m"])
+    pb: dict = winner["metrics"]["val_position_breakdown"]
+    cell_id = winner["cell"]
+    seed = winner["cfg"].get("seed", "?")
+    out.append(f"Winner: **{cell_id}** (seed {seed}) — "
+               f"holdout MAE {_fmt(winner['metrics'].get('holdout_mae_ungated_m'))} m")
+    out.append("")
+    cols = ["position (m)", "n_windows", "MAE (m)", "p95 (m)", "n_outliers (>0.5m)", "fail"]
+    out += ["| " + " | ".join(cols) + " |",
+            "|" + "|".join(["---"] * len(cols)) + "|"]
+    for key in sorted(pb.keys()):
+        entry = pb[key]
+        mae = entry.get("mae_3d")
+        fail = "YES" if (isinstance(mae, (int, float)) and mae > 0.5) else ""
+        out.append("| " + " | ".join([
+            key,
+            _fmt(entry.get("n"), prec=0),
+            _fmt(mae),
+            _fmt(entry.get("p95_3d")),
+            _fmt(entry.get("n_outliers_gt_0_5m"), prec=0),
+            fail,
+        ]) + " |")
+    return "\n".join(out) + "\n"
+
+
+def _table_cross_dataset(campaign_dir: Path | None) -> str:
+    """Table 13 — Cross-dataset transfer (V4 winner)."""
+    out = ["## Table 13 — Cross-dataset transfer (V4 winner)", ""]
+    if campaign_dir is None:
+        out.append("_(no campaign_dir set; cross-dataset summary not loaded)_\n")
+        return "\n".join(out)
+    summary_p = campaign_dir / "cross_dataset" / "summary.json"
+    if not summary_p.exists():
+        out.append("_(no `cross_dataset/summary.json` in campaign dir — Phase 5 did not run)_\n")
+        return "\n".join(out)
+    try:
+        summary = json.loads(summary_p.read_text())
+    except Exception:
+        out.append("_(failed to parse cross_dataset/summary.json)_\n")
+        return "\n".join(out)
+    modes = summary.get("channel_modes") or ["both"]
+    directions = summary.get("directions") or {}
+    cols = ["direction", "n_train_pos", "n_test_pos"] + [f"{m} MAE (m)" for m in modes]
+    out += ["| " + " | ".join(cols) + " |",
+            "|" + "|".join(["---"] * len(cols)) + "|"]
+    for label in sorted(directions.keys()):
+        d = directions[label]
+        if "error" in d:
+            out.append(f"| {label} | — | — | " + " | ".join(["—"] * len(modes)) + " |")
+            continue
+        cells = [
+            f"{label} ({', '.join(d.get('train_dataset_ids', []))} → "
+            f"{', '.join(d.get('test_dataset_ids', []))})",
+            _fmt(d.get("n_train_positions"), prec=0),
+            _fmt(d.get("n_test_positions"), prec=0),
+        ]
+        per_mode = d.get("per_channel_mode") or {}
+        for m in modes:
+            entry = per_mode.get(m, {})
+            cells.append(_fmt(entry.get("val_mae_3d_m")))
+        out.append("| " + " | ".join(cells) + " |")
+    return "\n".join(out) + "\n"
+
+
 def _guidance(rows: list[dict]) -> str:
     return (
         "## Selection guidance\n\n"
@@ -477,6 +693,10 @@ def main() -> None:
         _table_acoustic(rows),
         _table_v3_paradigms(rows),
         _table_v4_channel_modes(rows),
+        _table_v4_train_select(rows),
+        _table_lopo(campaign_dir),
+        _table_v4_position_breakdown(rows),
+        _table_cross_dataset(campaign_dir),
         _guidance(rows),
     ]
     # When scoped to a campaign, write the report INSIDE the campaign dir so

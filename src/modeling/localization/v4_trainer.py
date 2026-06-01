@@ -222,6 +222,7 @@ def precompute_v4_samples(
     burst_aware_srp: bool = False,
     burst_seconds: float = 0.10,
     restrict_to_knock_intervals: bool = True,
+    knock_intervals_override: dict[str, list[tuple[float, float]]] | None = None,
     device: torch.device | str = "auto",
 ) -> list[V4Sample]:
     """Walk segments, slice labeled anomaly windows, build `V4Sample`s.
@@ -320,11 +321,21 @@ def precompute_v4_samples(
         # retain most windows because their bursts cover the span.
         knock_intervals: list[tuple[float, float]] = []
         if restrict_to_knock_intervals:
-            try:
-                from ..anomaly.weak_labels import derive_knock_events
-                knock_intervals = derive_knock_events(s, burst_seconds=burst_seconds)
-            except Exception:
-                knock_intervals = []
+            if knock_intervals_override is not None:
+                # V3-gated (or any externally-supplied) training-window
+                # selection: use the provided per-recording intervals instead
+                # of the impulse-envelope weak GT.  Empty list for a recording
+                # means V3 flagged NOTHING there → drop the whole recording
+                # (NOT "keep all" — that is only the impulse-path fallback).
+                knock_intervals = knock_intervals_override.get(s.recording_id, [])
+                if not knock_intervals:
+                    continue
+            else:
+                try:
+                    from ..anomaly.weak_labels import derive_knock_events
+                    knock_intervals = derive_knock_events(s, burst_seconds=burst_seconds)
+                except Exception:
+                    knock_intervals = []
 
         ds_idx = torch.tensor(
             [_dataset_idx(s.dataset_id)], dtype=torch.long, device=device
@@ -332,8 +343,9 @@ def precompute_v4_samples(
 
         for start_ac in range(0, T_ac - n_ac + 1, stride_ac):
             t_start = start_ac / max(ac_fs, 1e-9)
-            # Skip windows that don't overlap a derived knock interval.  Only
-            # active when intervals were found; empty list = keep everything.
+            # Skip windows that don't overlap a selected interval.  Only active
+            # when intervals were found; impulse-path empty list = keep all
+            # (fallback), V3-gated empty already `continue`d the recording above.
             if knock_intervals:
                 from ..anomaly.weak_labels import window_overlaps_any
                 if not window_overlaps_any(t_start, t_start + win_s, knock_intervals):
@@ -444,6 +456,23 @@ def _position_key(xyz, ndigits: int = 3) -> tuple[float, float, float]:
     """Round a target position to a hashable cm-grid key for spatial splits."""
     a = np.asarray(xyz, dtype=np.float64).ravel()
     return (round(float(a[0]), ndigits), round(float(a[1]), ndigits), round(float(a[2]), ndigits))
+
+
+def split_samples_by_dataset(
+    samples: list[V4Sample],
+    holdout_dataset_ids: set[str] | list[str] | tuple[str, ...],
+) -> tuple[list[V4Sample], list[V4Sample]]:
+    """Split V4 samples into (train, holdout) by ``dataset_id``.
+
+    The held-out dataset IDs (e.g. ``{"d5"}``) never appear in training, so
+    holdout MAE measures cross-session transfer — does V4 trained on the
+    older sessions (D1-D4) still localize knocks on a newly collected
+    session (D5)?  See Phase 5 of the deep campaign.
+    """
+    hold = {str(d) for d in holdout_dataset_ids}
+    train = [s for s in samples if s.dataset_id not in hold]
+    holdout = [s for s in samples if s.dataset_id in hold]
+    return train, holdout
 
 
 def split_samples_by_position(
@@ -563,6 +592,19 @@ class V4Result:
     val_mae_ci_method: str = "percentile_bootstrap_1000"
     early_stopped_epoch: int | None = None
     best_val_loss: float = float("nan")
+    # Train MAE/P95 in metres (3-D Euclidean) — computed via a final forward
+    # pass on train_samples after restoring the best head.  Enables a proper
+    # metres-scale generalization gap `val_mae_3d - train_mae_3d`.  The
+    # `train_loss_history[-1]` values are smooth-L1 in the loss_scale-cm
+    # space and are NOT in metres, despite a legacy field of that name in
+    # the deep-sweep metrics.json.
+    train_mae_3d: float = float("nan")
+    train_p95_3d: float = float("nan")
+    # Per-position MAE breakdown (keyed by `_position_key(target_xyz)`).
+    # Parallel to `val_recording_breakdown` but groups windows by their
+    # spatial target instead of their recording, exposing position-level
+    # error for failure-mode analysis (Table 12 in analyze_ablation).
+    val_position_breakdown: dict = field(default_factory=dict)
 
 
 def _grid_coords_from_spec(grid: GridSpec) -> torch.Tensor:
@@ -843,6 +885,31 @@ def train_v4_localization(
                 "init_xyz_mean": val_init[mask].mean(axis=0).astype(float).tolist(),
                 "delta_xyz_mean": val_delta[mask].mean(axis=0).astype(float).tolist(),
             }
+
+        # Per-POSITION breakdown (failure-mode analysis).  Groups val
+        # windows by `_position_key(target_xyz)` so multiple windows at
+        # the same spatial position aggregate into one entry — exposes
+        # which positions the head misses worst.
+        pos_breakdown: dict = {}
+        pos_keys_per_window = [_position_key(t) for t in val_targets]
+        for pk in {tuple(p) for p in pos_keys_per_window}:
+            mask = np.array(
+                [1 if tuple(p) == pk else 0 for p in pos_keys_per_window],
+                dtype=bool,
+            )
+            if not mask.any():
+                continue
+            preds_p = val_predictions[mask]
+            tgts_p = val_targets[mask]
+            errs_p = np.linalg.norm(preds_p - tgts_p, axis=-1)
+            pos_breakdown[f"({pk[0]:.3f},{pk[1]:.3f},{pk[2]:.3f})"] = {
+                "n": int(mask.sum()),
+                "mae_3d": float(errs_p.mean()),
+                "p95_3d": float(np.percentile(errs_p, 95)),
+                "target_xyz": tgts_p[0].astype(float).tolist(),
+                "pred_xyz_mean": preds_p.mean(axis=0).astype(float).tolist(),
+                "n_outliers_gt_0_5m": int((errs_p > 0.5).sum()),
+            }
     else:
         val_predictions = np.zeros((0, 3), dtype=np.float32)
         val_init = np.zeros((0, 3), dtype=np.float32)
@@ -853,6 +920,39 @@ def train_v4_localization(
         ci_low = float("nan")
         ci_high = float("nan")
         breakdown = {}
+        pos_breakdown = {}
+
+    # Final TRAIN MAE pass — same forward loop as val, in metres.  Lets the
+    # caller report `train_val_mae_gap_m = val_mae - train_mae` (the proper
+    # metres-scale gap; the smooth-L1 loss-history values are in loss_scale-cm
+    # space and are NOT metres).
+    train_mae_3d_v = float("nan")
+    train_p95_3d_v = float("nan")
+    if train_samples:
+        head.eval()
+        tr_preds: list[np.ndarray] = []
+        tr_tgts: list[np.ndarray] = []
+        with torch.no_grad():
+            for i in range(0, len(train_samples), cfg.batch_size):
+                tb_samples = train_samples[i : i + cfg.batch_size]
+                batch = _to_device(_make_batch(tb_samples, channel_mode=cfg.channel_mode))
+                tr_pred = head(
+                    batch["volumes"],
+                    batch["tdoa"],
+                    batch["contexts"],
+                    batch["scada"],
+                    unconditional=cfg.unconditional,
+                    external_init_xyz=batch.get("external_init_xyz"),
+                )
+                tr_preds.append(tr_pred.cpu().numpy())
+                tr_tgts.append(batch["targets"].cpu().numpy())
+        if tr_preds:
+            tr_p = np.concatenate(tr_preds, axis=0)
+            tr_t = np.concatenate(tr_tgts, axis=0)
+            tr_errs = np.linalg.norm(tr_p - tr_t, axis=-1)
+            if tr_errs.size:
+                train_mae_3d_v = float(tr_errs.mean())
+                train_p95_3d_v = float(np.percentile(tr_errs, 95))
 
     def _qualify(s: V4Sample) -> str:
         return f"{Path(s.source_dir).name}/{s.recording_id}"
@@ -875,6 +975,9 @@ def train_v4_localization(
         val_mae_ci_high=ci_high,
         early_stopped_epoch=early_stopped_epoch,
         best_val_loss=best_val_loss,
+        train_mae_3d=train_mae_3d_v,
+        train_p95_3d=train_p95_3d_v,
+        val_position_breakdown=pos_breakdown,
     )
 
 
@@ -883,5 +986,7 @@ __all__ = [
     "V4Result",
     "V4Sample",
     "precompute_v4_samples",
+    "split_samples_by_dataset",
+    "split_samples_by_position",
     "train_v4_localization",
 ]

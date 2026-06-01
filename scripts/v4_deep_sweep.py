@@ -4,13 +4,14 @@ Runs AFTER the Phase-1 V3 winner is chosen, because V4 is gated by V3.
 Trains the V4 head individually against a FROZEN V2 encoder (samples cached
 once; ~10 min/cell) and evaluates on the **held-out positions** (localise-an-
 unseen-position), **gated by the Phase-1 V3** (deployment-faithful: V4 only
-fires on V3-flagged windows), and compares against V0 multilateration on the
-same held-out positions.
+fires on V3-flagged windows).  The reported localization numbers are the
+absolute spatial-holdout MAE (gated and ungated); per-modality breakdown
+comes from ``--all-channel-modes`` and the training-window-selection study
+from ``--train-select``.  No V0-multilateration comparison — it is not a
+credible baseline for this rig.
 
 Selection objective (gap is a guardrail, not the target): minimize the
 **V3-gated holdout MAE**, **subject to** ``|val_mae − train_mae| ≤ guardrail``.
-Report Δ-vs-V0; if no cell beats V0 even with expanded data + gating, that is
-the rigorously-documented N-limited ceiling.
 
 Axes (superset of v4_aug_sweep):
   Regularization: head_dropout_p {0.0,0.1,0.2,0.3} × weight_decay {1e-4,5e-4,1e-3}
@@ -57,7 +58,6 @@ from src.modeling.orchestration.full_run import (
     _v2_cfg,
     _v3_cfg,
     _v4_cfg,
-    _v3_event_intervals_for_recordings,
 )
 
 
@@ -134,6 +134,75 @@ class _V3Holder:
         self.xt_pool = xt_pool
 
 
+def _v3_intervals_over_segments(segments, encoder, v3_holder, v2_cfg, v3_cfg) -> dict:
+    """Return {recording_id: [(t_start_s, t_end_s), ...]} of V3-flagged events.
+
+    Used for the ``--train-select v3gated`` ablation: run the Phase-1 V3 over
+    each labeled recording and take its alert events as the TRAINING-window
+    selector (deployment-consistent — V4 trains on what V3 would surface, with
+    no offline impulse oracle).  Mirrors the gated-eval helper but iterates the
+    segments directly.  Uses the trained xt_pool so inference pooling matches
+    training pooling (calibration fix).
+
+    Fallback (A3 fix):  if V3 fires zero events on a recording (which the
+    deepc_20260526_155457 campaign showed can happen for an entire labeled
+    cohort, sending v3gated training to 0 V4Samples → trainer crash), use the
+    impulse-derived weak-GT intervals for that recording instead.  This makes
+    v3gated *strictly more permissive* than impulse — V3 events take priority
+    where they exist, impulse oracle as fallback — and guarantees the
+    selector never produces an empty cohort.
+    """
+    from src.modeling.anomaly.event_detection import (
+        detect_events_from_score_timeline,
+        sliding_window_v3_inference,
+    )
+    from src.modeling.anomaly.v3_trainer import precompute_paired
+    from src.modeling.anomaly.weak_labels import derive_knock_events
+
+    bar = (v3_holder.thresholds.p99 if int(v3_cfg.threshold_percentile) >= 99
+           else v3_holder.thresholds.p95)
+    out: dict = {}
+    n_v3_fired = 0
+    n_impulse_fallback = 0
+    for s in segments:
+        paired = precompute_paired(s, v2_cfg)
+        v3_evs: list[tuple[float, float]] = []
+        if paired is not None:
+            try:
+                times, scores, contexts = sliding_window_v3_inference(
+                    encoder, v3_holder.flow, paired, v2_cfg=v2_cfg,
+                    inference_stride_s=0.25, xt_pool=v3_holder.xt_pool, device=v3_cfg.device)
+                if scores.size > 0:
+                    clusters = v3_holder.thresholds.assign(contexts)
+                    high = float(np.median([float(bar[int(k)]) for k in clusters]))
+                    low = high - abs(high) * 0.05
+                    if low > high:
+                        low = high
+                    evs = detect_events_from_score_timeline(
+                        scores, times, high_threshold=high, low_threshold=low,
+                        min_duration_s=0.10, max_gap_windows=0,
+                        recording_id=s.recording_id, dataset_id=s.dataset_id,
+                        window_seconds=v2_cfg.window_seconds)
+                    v3_evs = [(e.t_start_s, e.t_end_s) for e in evs]
+            except Exception:
+                v3_evs = []
+        if v3_evs:
+            out[s.recording_id] = v3_evs
+            n_v3_fired += 1
+        else:
+            try:
+                impulse_evs = derive_knock_events(s, burst_seconds=0.10)
+            except Exception:
+                impulse_evs = []
+            if impulse_evs:
+                out[s.recording_id] = impulse_evs
+                n_impulse_fallback += 1
+    print(f"  V3-gated selector: V3 fired on {n_v3_fired} segments, "
+          f"impulse-fallback on {n_impulse_fallback} segments, "
+          f"{len(segments) - n_v3_fired - n_impulse_fallback} skipped (no intervals)")
+    return out
+
+
 def _log(msg: str, log_path: Path) -> None:
     ts = _dt.datetime.now().strftime("%H:%M:%S")
     line = f"[{ts}] {msg}"
@@ -163,11 +232,33 @@ def main() -> None:
                    help="Train the cell at all 4 channel modes (acoustic SRP / "
                         "tdoa / vibration-only-learned / fusion) for the per-modality "
                         "localization breakdown.  Default: fusion ('both') only.")
+    p.add_argument("--train-select", choices=("impulse", "v3gated", "all"),
+                   default="impulse",
+                   help="How V4 TRAINING windows are selected: 'impulse' = weak "
+                        "impulse-envelope GT (default); 'v3gated' = windows the "
+                        "Phase-1 V3 flags (requires --v3-run; deployment-consistent); "
+                        "'all' = no selection (max label noise). Ablation axis.")
+    p.add_argument("--gating-min-events", type=int, default=1,
+                   help="Per-recording fallback for holdout V3-gating: if the "
+                        "strict per-cluster threshold fires fewer events than "
+                        "this on a holdout recording, fall back to a permissive "
+                        "per-recording quantile threshold (top 10%% of scores) "
+                        "so V4 always has at least N gated windows.  Set 0 to "
+                        "restore strict-only behavior (legacy; produces "
+                        "n_holdout_gated=0 when V3 can't fire).  Default 1.")
+    p.add_argument("--gating-fallback-quantile", type=float, default=0.90,
+                   help="Per-recording quantile threshold used by the gating "
+                        "fallback.  0.90 = top 10%% of in-recording scores "
+                        "considered V3-anomalous.  Only used when "
+                        "--gating-min-events > 0.")
     args = p.parse_args()
 
     encoder_run = Path(args.encoder_run)
     if not (encoder_run / "v2" / "encoder.pt").exists():
         raise SystemExit(f"v2/encoder.pt not found under {encoder_run}")
+    if args.train_select == "v3gated" and not args.v3_run:
+        raise SystemExit("--train-select v3gated requires --v3-run (need V3 to "
+                         "select training windows).")
 
     cells = [args.cell] if args.cell else _all_cells()
     v2_cfg = _v2_cfg(args.quick)
@@ -189,16 +280,31 @@ def main() -> None:
     encoder.eval()
     grid = GridSpec(lo=(-0.22, -0.22, -0.02), hi=(0.40, 0.42, 0.30), n=(32, 32, 16))
 
-    cache_path = Path(args.samples_cache) if args.samples_cache else None
-    loaders = None  # built lazily — needed for V3 gating and/or precompute
+    # Mode-specific cache so 'impulse' / 'v3gated' / 'all' training-window
+    # selections never collide (they produce different sample sets).
+    cache_path = None
+    if args.samples_cache:
+        base = Path(args.samples_cache)
+        cache_path = base.with_name(f"{base.stem}_{args.train_select}{base.suffix}")
+
+    # Load Phase-1 V3 up front — needed BEFORE precompute for v3gated training
+    # selection, and after for gated eval.  c_dim from any labeled sample's
+    # context dim == V2 embed_dim.
+    v3_holder = None
+    if args.v3_run:
+        flow, thresholds, xt_pool, _ = _load_v3(Path(args.v3_run), int(v2_cfg.embed_dim))
+        v3_holder = _V3Holder(flow, thresholds, xt_pool)
+
+    loaders = None  # built lazily — needed for precompute and/or V3 gating
     v4_samples = None
     if cache_path is not None and cache_path.exists():
         with cache_path.open("rb") as fh:
             v4_samples = pickle.load(fh)
-        print(f"Loaded {len(v4_samples)} cached V4 samples from {cache_path} "
-              f"(skipped precompute)")
+        print(f"Loaded {len(v4_samples)} cached V4 samples ({args.train_select}) "
+              f"from {cache_path} (skipped precompute)")
     if v4_samples is None:
-        print("Loading frozen V2 + D2/D3/D4/D5 loaders, precomputing V4 samples ...")
+        print(f"Loading D2/D3/D4/D5 loaders, precomputing V4 samples "
+              f"(train_select={args.train_select}) ...")
         loaders = {d: _resolved_loader(f"{d}.yaml") for d in ("d2", "d3", "d4", "d5")}
         d2_labeled = [s for s in loaders["d2"].list_segments()
                       if s.is_anomaly and s.spatial_label is not None and s.mode_label is not None]
@@ -209,15 +315,30 @@ def main() -> None:
                       if s.is_anomaly and s.spatial_label is not None]
         d5_labeled = [s for s in loaders["d5"].list_segments()
                       if s.is_anomaly and s.spatial_label is not None]
+        labeled = d2_labeled + d3_labeled + d4_labeled + d5_labeled
+
+        # Resolve the training-window selector for this mode.
+        restrict = args.train_select != "all"
+        override = None
+        if args.train_select == "v3gated":
+            # Run the Phase-1 V3 over EVERY labeled recording to get its
+            # flagged intervals → those become the training windows.  This is
+            # the deployment-consistent selector (no offline impulse oracle).
+            override = _v3_intervals_over_segments(
+                labeled, encoder, v3_holder, v2_cfg, v3_cfg)
+            n_with = sum(1 for v in override.values() if v)
+            print(f"  V3-gated training selection: V3 flagged intervals in "
+                  f"{n_with}/{len(labeled)} labeled recordings")
         v4_samples = precompute_v4_samples(
-            encoder, d2_labeled + d3_labeled + d4_labeled + d5_labeled,
+            encoder, labeled,
             v2_cfg=v2_cfg, grid=grid, spatial_label_overrides=overrides,
             burst_aware_srp=True, burst_seconds=0.10,
+            restrict_to_knock_intervals=restrict,
+            knock_intervals_override=override,
         )
-        print(f"Precomputed {len(v4_samples)} V4 samples in {time.time()-t0:.0f}s")
+        print(f"Precomputed {len(v4_samples)} V4 samples ({args.train_select}) "
+              f"in {time.time()-t0:.0f}s")
         if cache_path is not None:
-            # Atomic write so a killed cell never leaves a half-written cache
-            # that a later cell would load.
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             tmp = cache_path.with_suffix(cache_path.suffix + ".tmp")
             with tmp.open("wb") as fh:
@@ -227,49 +348,116 @@ def main() -> None:
 
     train_pos, holdout_pos = split_samples_by_position(v4_samples, V4_HOLDOUT_POSITIONS_M)
     if len(train_pos) < 4 or len(holdout_pos) < 1:
-        raise SystemExit(f"insufficient spatial split: {len(train_pos)} train / {len(holdout_pos)} holdout")
+        raise SystemExit(f"insufficient spatial split: {len(train_pos)} train / "
+                         f"{len(holdout_pos)} holdout (train_select={args.train_select})")
     print(f"Spatial split: {len(train_pos)} train / {len(holdout_pos)} holdout samples")
 
-    # Load Phase-1 V3 for gating (optional).
-    v3_holder = None
-    if args.v3_run:
-        c_dim = int(v4_samples[0].context.shape[0])
-        flow, thresholds, xt_pool, _ = _load_v3(Path(args.v3_run), c_dim)
-        v3_holder = _V3Holder(flow, thresholds, xt_pool)
-        # Gating re-runs V3 on the holdout recordings, so it needs the loaders
-        # even when samples came from cache (precompute was skipped).
-        if loaders is None:
-            loaders = {d: _resolved_loader(f"{d}.yaml") for d in ("d2", "d3", "d4", "d5")}
-
-    loaders_by_id = loaders or {}  # _v3_event_intervals_for_recordings keys by dataset_id
-
     # Precompute V3-gated keep-mask ONCE per holdout cohort (mode-independent —
-    # gating depends on V3 + window times, not on the V4 channel mode).
+    # gating depends on V3 + the V4Sample's cached features, not on the V4
+    # channel mode).
+    #
+    # DIRECT PATH (the fix for the n_holdout_gated=0 bug):  every V4Sample
+    # already carries its own `x_for_v3` + `context` (cached at precompute
+    # time from the V2 encoder at exactly the V4 window).  So we score each
+    # holdout V4Sample directly with V3 and use `PerClusterThresholds.alert`
+    # — the same gate `gate_samples_by_alert` uses everywhere else in the
+    # codebase.  The legacy interval-overlap path
+    # (`_v3_event_intervals_for_recordings` → `window_overlaps_any`) ran
+    # V3 again over the whole recording via sliding-window inference and
+    # then tried to match V4 windows by (recording_id, time-overlap); that
+    # path has two silent failure modes (recording_id collisions across
+    # D4 speed{1,2,3} subfolders that share a position folder name, and
+    # time-coordinate drift between V3's stride-0.25 timeline and V4's
+    # impulse-burst window placement) and was producing n_holdout_gated=0
+    # on every cell of the deepc_20260526_155457 campaign even under
+    # `--train-select impulse`, despite V3 firing correctly on the
+    # training-distribution real_anomaly metric (F1 ~ 0.94).
     gate_keep = None
+    gating_diag: dict = {}
     if v3_holder is not None:
         try:
-            from src.modeling.anomaly.weak_labels import window_overlaps_any
-            intervals = _v3_event_intervals_for_recordings(
-                holdout_pos, loaders_by_id, encoder, v3_holder, v2_cfg, v3_cfg)
-            win_s = float(v2_cfg.window_seconds)
-            gate_keep = np.array([
-                bool(intervals.get(s.recording_id))
-                and window_overlaps_any(s.window_start_s, s.window_start_s + win_s,
-                                        intervals.get(s.recording_id, []))
-                for s in holdout_pos], dtype=bool)
+            import torch as _t
+            xs = _t.from_numpy(np.stack([s.x_for_v3 for s in holdout_pos], axis=0)).float()
+            cs = _t.from_numpy(np.stack([s.context for s in holdout_pos], axis=0)).float()
+            with _t.no_grad():
+                v3_holder.flow.eval()
+                scores = v3_holder.flow.anomaly_score(xs, cs).cpu().numpy()
+            contexts_np = np.stack([s.context for s in holdout_pos], axis=0)
+            percentile = 99 if int(v3_cfg.threshold_percentile) >= 99 else 95
+            alerts, _clusters = v3_holder.thresholds.alert(
+                contexts_np, scores, percentile=percentile)
+            gate_keep = alerts.astype(bool)
+
+            # Per-recording diagnostics + opt-in per-recording fallback:
+            # if `--gating-min-events > 0` and a recording fires fewer
+            # alerts than this, pick the top `(1 - q)` of in-recording
+            # scores as the permissive gate (so V4 always has at least N
+            # gated windows per holdout recording).
+            rec_to_idx: dict = {}
+            for i, s in enumerate(holdout_pos):
+                rec_to_idx.setdefault(s.recording_id, []).append(i)
+            n_fallback_used = 0
+            for rid, idxs in rec_to_idx.items():
+                rec_scores = scores[idxs]
+                rec_alerts = gate_keep[idxs]
+                used_fb = False
+                fb_high = None
+                fb_n = None
+                strict_n = int(rec_alerts.sum())
+                if (
+                    int(args.gating_min_events) > 0
+                    and strict_n < int(args.gating_min_events)
+                    and rec_scores.size > 0
+                ):
+                    q = float(np.quantile(rec_scores, float(args.gating_fallback_quantile)))
+                    fb_mask = rec_scores > q
+                    if int(fb_mask.sum()) >= int(args.gating_min_events):
+                        for j, keep in zip(idxs, fb_mask):
+                            gate_keep[j] = bool(keep)
+                        used_fb = True
+                        fb_high = q
+                        fb_n = int(fb_mask.sum())
+                        n_fallback_used += 1
+                gating_diag[rid] = {
+                    "dataset_id": holdout_pos[idxs[0]].dataset_id,
+                    "n_windows": len(idxs),
+                    "score_min": float(rec_scores.min()) if rec_scores.size else None,
+                    "score_p50": float(np.quantile(rec_scores, 0.50)) if rec_scores.size else None,
+                    "score_p95": float(np.quantile(rec_scores, 0.95)) if rec_scores.size else None,
+                    "score_max": float(rec_scores.max()) if rec_scores.size else None,
+                    "strict_n_alerts": strict_n,
+                    "used_fallback": used_fb,
+                    "fallback_high": fb_high,
+                    "fallback_n_alerts": fb_n,
+                }
+            print(f"  V3 gating (direct): {len(gating_diag)} holdout recordings, "
+                  f"fallback used on {n_fallback_used}, "
+                  f"gate_keep.sum()={int(gate_keep.sum())}/{gate_keep.size}")
         except Exception as e:
             print(f"  V3 gating precompute skipped: {type(e).__name__}: {e}")
+            gate_keep = None
 
     def _train_eval(cfg, log_path) -> dict:
         res = train_v4_localization(v4_samples, cfg=cfg, grid=grid,
                                     explicit_split=(train_pos, holdout_pos))
+        # `train_val_gap_m` is a LEGACY name — it is the |val - train| smooth-L1
+        # loss gap in loss_scale-cm space (NOT metres).  Kept for backward
+        # compatibility with historical analyze_ablation tables.  The proper
+        # metres-scale gap is `train_val_mae_gap_m`, computed from a final
+        # forward pass on train_samples (see V4Result.train_mae_3d).
         d: dict = {
             "channel_mode": cfg.channel_mode,
             "holdout_mae_ungated_m": float(res.val_mae_3d),
             "holdout_p95_ungated_m": float(res.val_p95_3d),
+            "train_mae_3d_m": float(res.train_mae_3d),
+            "train_p95_3d_m": float(res.train_p95_3d),
+            "train_val_mae_gap_m": float(abs(res.val_mae_3d - res.train_mae_3d))
+                if not (np.isnan(res.val_mae_3d) or np.isnan(res.train_mae_3d))
+                else float("nan"),
             "train_val_gap_m": float(abs(
                 (res.val_loss_history[-1] if res.val_loss_history else float("nan"))
                 - (res.train_loss_history[-1] if res.train_loss_history else float("nan")))),
+            "val_position_breakdown": res.val_position_breakdown,
             "early_stopped_epoch": res.early_stopped_epoch,
             "n_holdout": int(res.val_predictions.shape[0]),
         }
@@ -288,16 +476,29 @@ def main() -> None:
 
     for cell_id in cells:
         ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_dir = REPO_ROOT / "results" / "runs" / f"{ts}__v4deep_{cell_id}_s{args.seed}"
+        # Embed train_select into the run-dir name so the three
+        # train-select-ablation runs (impulse/v3gated/all) never share a dir.
+        # The legacy `v4deep_<cell>_s<seed>` name (without the suffix) is
+        # produced when train_select=impulse to stay compatible with
+        # historical campaign state.json -> run_dir pointers that look up
+        # the impulse run.  Non-impulse modes get a `_ts<MODE>` suffix.
+        ts_suffix = "" if args.train_select == "impulse" else f"_ts{args.train_select}"
+        out_dir = REPO_ROOT / "results" / "runs" / f"{ts}__v4deep_{cell_id}_s{args.seed}{ts_suffix}"
         out_dir.mkdir(parents=True, exist_ok=True)
         log_path = out_dir / "run_log.txt"
         base_cfg = _apply_cell(cell_id, base_v4)
         (out_dir / "cell_config.json").write_text(json.dumps({
             "cell": cell_id, "seed": args.seed, "encoder_run": str(encoder_run),
-            "v3_run": args.v3_run, "v4_cfg": asdict(replace(base_cfg, seed=args.seed)),
+            "v3_run": args.v3_run, "train_select": args.train_select,
+            "v4_cfg": asdict(replace(base_cfg, seed=args.seed)),
         }, indent=2, default=str))
 
-        m: dict = {"cell": cell_id, "seed": args.seed}
+        m: dict = {
+            "cell": cell_id, "seed": args.seed, "train_select": args.train_select,
+            "v3_gating_diagnostic": gating_diag,
+            "v3_gating_min_events": int(args.gating_min_events),
+            "v3_gating_fallback_quantile": float(args.gating_fallback_quantile),
+        }
         per_mode: dict = {}
         for mode in modes:
             cfg = replace(base_cfg, seed=args.seed, channel_mode=mode)
@@ -313,7 +514,9 @@ def main() -> None:
             _log(f"  V4[{mode}] {time.time()-t0:.0f}s — holdout MAE "
                  f"ungated={d['holdout_mae_ungated_m']:.4f}m "
                  f"gated={gated if gated is None else round(gated,4)}m "
-                 f"gap={d['train_val_gap_m']:.4f} es={d['early_stopped_epoch']}", log_path)
+                 f"train_mae={d['train_mae_3d_m']:.4f}m "
+                 f"mae_gap={d['train_val_mae_gap_m']:.4f}m "
+                 f"es={d['early_stopped_epoch']}", log_path)
             if mode == "both":
                 torch.save(res.head.state_dict(), out_dir / "head.pt")
         # Hoist the fusion ('both') metrics to the top level so the campaign's

@@ -33,6 +33,7 @@ from .v4_trainer import (
     V4Result,
     V4Sample,
     precompute_v4_samples,
+    split_samples_by_dataset,
     split_samples_by_position,
     train_v4_localization,
 )
@@ -58,6 +59,7 @@ __all__ = [
     "precompute_v4_samples",
     "smooth_predictions_over_bursts",
     "soft_argmax_3d",
+    "split_samples_by_dataset",
     "split_samples_by_position",
     "train_v4_localization",
 ]
