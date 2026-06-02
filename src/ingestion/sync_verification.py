@@ -158,6 +158,7 @@ def _decimate_to_rate(
 ) -> np.ndarray:
     """Anti-alias-decimate `signal` from `source_fs` to ~`target_fs`."""
     from math import gcd
+
     from scipy.signal import resample_poly
 
     if source_fs <= target_fs + 1e-9:
@@ -972,9 +973,9 @@ def auto_sync_paired_recording(
 
 
 __all__ = [
+    "SyncCorrectionReport",
     "SyncResult",
     "SyncStabilityResult",
-    "SyncCorrectionReport",
     "apply_sync_correction",
     "auto_sync_paired_recording",
     "verify_paired_sync",

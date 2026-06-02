@@ -18,13 +18,12 @@ import pytest
 
 from src.ingestion.adapters import _read_vibration_raw_csv
 from src.ingestion.test_dataset_loader import (
+    _D4_POS_RE,
     DatasetSpec,
     TestDatasetLoader,
-    _D4_POS_RE,
     _parse_d2_context_to_mode,
     _parse_labels,
 )
-
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 D4_ROOT = REPO_ROOT / "data" / "fourth_test_dataset"

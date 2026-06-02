@@ -16,7 +16,7 @@ to reduce single-sample noise.  Writes a JSON dump of all results plus
 a final per-criterion ranking.
 
 Run:
-    python -m scripts.analyze_hop_length_full_grid
+    python -m scripts.hop_length_study.analyze_hop_length_full_grid
 """
 
 from __future__ import annotations
@@ -28,12 +28,11 @@ from pathlib import Path
 
 import numpy as np
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
 from src.features.audio_spectral import compute_log_mel_spectrogram
 from src.ingestion.test_dataset_loader import DatasetSpec, TestDatasetLoader
-
 
 # Full sweep — every n_fft x hop combo where hop <= n_fft.
 # Hops are chosen to hit the impulse-localization regime (knock < 10 ms = 160
@@ -281,7 +280,7 @@ def main() -> int:
         cost_s_total = 0.0
         mem_MB_total = 0.0
         n_cost = 0
-        for ds_id, clip in cost_clips.items():
+        for clip in cost_clips.values():
             s, m = _compute_cost(clip, n_fft, hop, n_mels)
             if not np.isnan(s):
                 cost_s_total += s

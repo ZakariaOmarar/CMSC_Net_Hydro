@@ -28,8 +28,8 @@ from src.modeling.context.v1_ssl import (
     V1SSLConfig,
     _GroupedBatchSampler,
     _PrecomputedSegment,
-    _WindowedFeatureDataset,
     _resolve_segment_scales,
+    _WindowedFeatureDataset,
 )
 
 

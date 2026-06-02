@@ -44,18 +44,17 @@ import subprocess
 import sys
 import time
 import traceback
+from collections.abc import Callable
 from dataclasses import asdict, replace
 from pathlib import Path
-from typing import Callable
 
 import numpy as np
 import torch
 
 from ...config import resolve_device
-from ...config.architecture import SYNC, WINDOWING
+from ...config.architecture import SYNC
 from ...config.dataset_registry import REGISTRY
 from ...ingestion.test_dataset_loader import DatasetSpec, TestDatasetLoader, TestDatasetSegment
-from ...modeling.localization import localization_head as lh
 from ..anomaly import (
     V3Config,
     train_v3_cnf,
@@ -80,7 +79,7 @@ from ..anomaly_baselines import (
     train_v0_mode_lgbm,
 )
 from ..context.modality_probe import run_modality_balance_probe
-from ..context.v1_ssl import V1SSLConfig, train_v1_per_modality
+from ..context.v1_ssl import train_v1_per_modality
 from ..context.v2_ssl import V2SSLConfig, train_v2_fusion
 from ..eval import paired_bootstrap_test
 from ..localization import (
@@ -93,6 +92,11 @@ from ..localization import (
 from ..localization.multilateration import accel_tdoa_multilateration_v0
 from ..scada import d3_speed_lookup
 
+# V1-V4 hyperparameter builders live in `stage_configs`; they are imported (and
+# re-exported) here so `main()` resolves them from this module's namespace,
+# which keeps the multi-seed / hop-length drivers' monkeypatching of
+# `full_run._vN_cfg` working.
+from .stage_configs import _v1_cfg, _v2_cfg, _v3_cfg, _v4_cfg
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -153,253 +157,6 @@ def _all_segments(loaders: list[TestDatasetLoader]) -> list[TestDatasetSegment]:
     for L in loaders:
         out.extend(L.list_segments())
     return out
-
-
-# ---------------------------------------------------------------------------
-# Hyperparam profiles
-# ---------------------------------------------------------------------------
-
-
-def _v1_cfg(quick: bool) -> V1SSLConfig:
-    return V1SSLConfig(
-        window_seconds=2.0,
-        window_stride_seconds=1.0,
-        feature_dim=64,
-        embed_dim=64,
-        n_heads=4,
-        proj_dim=32,
-        # Bumped 6→12 epochs for the full profile so c_t reaches a stable
-        # mode-discriminative state — a stronger c_t directly improves
-        # V3's per-cluster CNF density estimates and consequently the
-        # quality of the unsupervised p95 threshold.  CPU wall-clock cost
-        # ~ 25 min on V1 acoustic, ~ 20 min on V1 vibration.
-        epochs=3 if quick else 12,
-        batch_size=16,
-        lr=1e-3,
-        # Bumped 1e-5 → 1e-4 (2026-05-22 baseline_v2 shift).  The prior value
-        # was one order below the standard SimCLR / AdamW convention; combined
-        # with the lack of early stopping (now wired in) this was the dominant
-        # contributor to the overfitting audit's train/val gaps.  Same bump
-        # applied to V1/V2/V3/V4 builders.  The dataclass default still reads
-        # 1e-5 so older import-sites remain byte-reproducible — change this
-        # literal here only, not at the dataclass.
-        weight_decay=1e-4,
-        temperature=0.1,
-        val_ratio=0.3,
-        # n_mels / n_fft / hop_length intentionally NOT set here — inherited
-        # from `ACOUSTIC_FEATURES` in src/config/architecture.py:
-        #   n_fft=4096, hop_length=2048, n_mels=96
-        # These are the Pareto-optimal values from the empirical grid search
-        # documented in chapter 3 §3.4.2 and reproduced by
-        # `scripts/analyze_hop_length_full_grid.py`.
-        cwt_n_scales=32,
-        # CWT scalogram re-enabled for the publication run.  CWT is the
-        # primary representation for non-stationary mode-transition energy;
-        # it was disabled in the prior run only for a CPU runtime budget.
-        # Re-enabling it is the simplest single unimodal lift available given
-        # V1-acoustic already leads at 0.727 purity on log-mel-only.
-        # Wall-clock impact: V1 / V2 epoch ~ 1.7×.
-        use_cwt=True,
-        # Multi-scale window cadence — sourced from the dataset registry
-        # (configs/datasets/d*.yaml). Change there, not here.
-        window_scales_seconds_per_dataset={
-            m.id: m.window_scales_seconds for m in REGISTRY
-        },
-        window_scale_strategy=WINDOWING.window_scale_strategy,
-        window_stride_ratio=WINDOWING.window_stride_ratio,
-        # Vibration channel-2: physical-time defaults (100 ms kurtosis target,
-        # 31-sample statistical floor, 1 s crest-factor fallback).  Auto-
-        # selects kurtosis on D4 raw (~376 Hz → 37 samples) and crest
-        # factor on D1/D2/D3 peak streams (4-16 Hz).  Override here only if
-        # the impulse-duration assumption changes.
-        # R1b — push acoustic SSL augmentation harder.  The 2026-05-16 B5
-        # run reached V1-acoustic NMI 0.729 with the prior 6/6/8 settings;
-        # V0 LightGBM hits macro-F1 = 1.0 on D1, so the features carry
-        # enough mode signal for NMI ≳ 0.95.  Stronger augmentation forces
-        # the contrastive task to rely on deeper mode-structural cues
-        # rather than surface invariances.  Vibration shares the same
-        # config but receives only the time-domain masks (envelope channel
-        # is robust to gain_jitter and freq_mask doesn't apply).
-        gain_jitter_db=9.0,
-        channel_dropout_p=0.2,
-        spec_augment_freq_mask=12,
-        spec_augment_time_mask=16,
-        # R1a REVERTED (2026-05-16, after the first wider-CNN retrain): the
-        # 2× width regressed V1-acoustic NMI from 0.729 → 0.689 — the wider
-        # CNN over-fit the tiny per-mode cohort (12 epochs × ~10 recordings
-        # per mode) despite the stronger augmentation (R1b).  Reverted to
-        # the published 32/64/128 backbone.  Keep R1b (augmentation push)
-        # and R1c (CMA on by default) since those are independent.
-        acoustic_cnn_width_mult=1,
-        seed=42,
-    )
-
-
-def _v2_cfg(quick: bool) -> V2SSLConfig:
-    return V2SSLConfig(
-        window_seconds=2.0,
-        window_stride_seconds=1.0,
-        feature_dim=64,
-        embed_dim=64,
-        n_heads=4,
-        proj_dim=32,
-        # Bumped 6→12 epochs (matches V1).  With asymmetric modality dropout
-        # (vibration_dropout_p=0.5), the fusion block sees only ~ 50 % of
-        # the vibration stream per batch and needs the extra epochs to
-        # converge.
-        epochs=3 if quick else 12,
-        batch_size=16,
-        lr=1e-3,
-        # Bumped 1e-5 → 1e-4 (2026-05-22 baseline_v2 shift).  The prior value
-        # was one order below the standard SimCLR / AdamW convention; combined
-        # with the lack of early stopping (now wired in) this was the dominant
-        # contributor to the overfitting audit's train/val gaps.  Same bump
-        # applied to V1/V2/V3/V4 builders.  The dataclass default still reads
-        # 1e-5 so older import-sites remain byte-reproducible — change this
-        # literal here only, not at the dataclass.
-        weight_decay=1e-4,
-        temperature=0.1,
-        val_ratio=0.3,
-        # n_mels / n_fft / hop_length inherited from `ACOUSTIC_FEATURES` — see _v1_cfg note above.
-        cwt_n_scales=32,
-        # CWT enabled — see _v1_cfg note.
-        use_cwt=True,
-        # Multi-scale window cadence — sourced from the dataset registry
-        # (configs/datasets/d*.yaml). V1 and V2 MUST use the same dict
-        # (V1→V2 weight transfer enforces shape parity per scale).
-        window_scales_seconds_per_dataset={
-            m.id: m.window_scales_seconds for m in REGISTRY
-        },
-        window_scale_strategy=WINDOWING.window_scale_strategy,
-        window_stride_ratio=WINDOWING.window_stride_ratio,
-        # Vibration channel-2: physical-time defaults inherited from
-        # `compute_vibration_input_stack` (kurtosis on D4 raw; crest factor
-        # on D1/D2/D3 peak streams).  See _v1_cfg above for justification.
-        # R1b — augmentation parity with V1.  See V1 _v1_cfg note above.
-        gain_jitter_db=9.0,
-        channel_dropout_p=0.2,
-        spec_augment_freq_mask=12,
-        spec_augment_time_mask=16,
-        lmm_mask_p=0.3,
-        lmm_weight=1.0,
-        # Asymmetric modality dropout: acoustic is the strong mode-
-        # discriminator (V1-acoustic purity 0.727 vs V1-vib 0.572 in the
-        # prior run).  Dropping vibration twice as often as acoustic stops
-        # the fusion block from diluting the acoustic signal — the
-        # mechanism that produced V2 purity 0.612 < V1-acoustic 0.727.
-        modality_dropout_p=0.0,  # legacy fallback off
-        acoustic_dropout_p=0.0,
-        vibration_dropout_p=0.5,
-        # R1c — CMA on by default.  The 2026-05-16 B5 ablation showed
-        # cma_weight=0.5 lifts V1-acoustic NMI from 0.649 (baseline) to
-        # 0.729 — the largest absolute V1 improvement of the Phase-B
-        # sweep.  Keeping it on costs only a small per-step compute
-        # increment.  Doesn't fix the joint-PMA fusion gap (still negative
-        # at the modality-probe level) but the unimodal V1 trunks are
-        # strictly stronger with it on, which matters for R2 (V3-acoustic /
-        # V3-vibration adapters inherit V1 weights).
-        cma_weight=0.5,
-        cma_temperature=0.1,
-        # Two PMA seeds in the context pool — one summary is bottlenecked
-        # for a 9–14-token fused sequence.
-        num_context_seeds=2,
-        # R1a REVERTED — see `_v1_cfg` note.  Match V1's narrow CNN.
-        acoustic_cnn_width_mult=1,
-        seed=42,
-    )
-
-
-def _v3_cfg(quick: bool) -> V3Config:
-    return V3Config(
-        n_layers=6,
-        hidden_dim=64,
-        n_hidden_per_net=2,
-        epochs=8 if quick else 15,
-        batch_size=32,
-        lr=1e-3,
-        # Bumped 1e-5 → 1e-4 (2026-05-22 baseline_v2 shift).  The prior value
-        # was one order below the standard SimCLR / AdamW convention; combined
-        # with the lack of early stopping (now wired in) this was the dominant
-        # contributor to the overfitting audit's train/val gaps.  Same bump
-        # applied to V1/V2/V3/V4 builders.  The dataclass default still reads
-        # 1e-5 so older import-sites remain byte-reproducible — change this
-        # literal here only, not at the dataclass.
-        weight_decay=1e-4,
-        val_ratio=0.3,
-        unconditional=False,
-        # K = 3 matches the 3-mode hypothesis (Pump / Standstill / Turbine);
-        # see REVIEW.md fix (A).
-        n_threshold_clusters=3,
-        # p95 = lower-FPR-tolerant operating point that's still defensible
-        # vs healthy variance; see REVIEW.md fix (C) and §3.4.6.
-        threshold_percentile=95,
-        # Per-stage V3 window override — sourced from the dataset registry
-        # (configs/datasets/d*.yaml::v3_window_seconds).  Chapter 3 §3.4.4 +
-        # chapter 4 §A.4 for the per-dataset justifications.
-        window_seconds_override={m.id: m.v3_window_seconds for m in REGISTRY},
-        # PMA-2 xt pool — see `_XtPool` docstring in `v3_trainer.py` for the
-        # full thesis defense (closes the second mean-pool dilution stage
-        # on the channel-token axis).
-        xt_pool="pma2",
-        xt_pool_num_heads=4,
-        # CNF coupling MLP dropout — set as part of the 2026-05-22 baseline_v2
-        # shift to defend against the +56 % V3 train/val NLL gap the audit
-        # identified.  Threaded into FiLMMLP between GELU activations via
-        # cnf_head.py.
-        dropout_p=0.1,
-        seed=42,
-    )
-
-
-def _v4_cfg(quick: bool, scada_dim: int = 0, unconditional: bool = False) -> V4Config:
-    return V4Config(
-        cnn_feature_dim=64,
-        tdoa_feature_dim=32,
-        hidden_dim=64,
-        n_heads_tdoa=2,
-        scada_dim=scada_dim,
-        unconditional=unconditional,
-        # Per-stage V4 window override — sourced from the dataset registry
-        # (configs/datasets/d*.yaml::v4_window_seconds).  Chapter 4 §A.4 for
-        # the 4× SRP-PHAT SNR justification on D3/D4.
-        window_seconds_override={m.id: m.v4_window_seconds for m in REGISTRY},
-        # Soft-argmax + FiLM-residual head: most of the work is in the
-        # 3-D CNN trunk, which is unchanged from the original Cross3D.
-        # 30 epochs is enough for the residual to stabilise.
-        epochs=15 if quick else 30,
-        batch_size=8,
-        lr=1e-3,
-        # Bumped 1e-5 → 1e-4 (2026-05-22 baseline_v2 shift).  The prior value
-        # was one order below the standard SimCLR / AdamW convention; combined
-        # with the lack of early stopping (now wired in) this was the dominant
-        # contributor to the overfitting audit's train/val gaps.  Same bump
-        # applied to V1/V2/V3/V4 builders.  The dataclass default still reads
-        # 1e-5 so older import-sites remain byte-reproducible — change this
-        # literal here only, not at the dataclass.
-        weight_decay=1e-4,
-        val_ratio=0.3,
-        seed=42,
-        # Soft-argmax / residual / loss / augmentation: see V4Config defaults.
-        # Residual half-range = 20 cm (was 5 cm).  The 2026-05-11 retrain
-        # showed soft-argmax centre-bias of 10–15 cm on corner-of-grid
-        # ground-truth positions (e.g. D4 `(-20, 0, 0)`); the prior cap
-        # could not correct it, producing 0.192 m MAE vs the prior dense
-        # regressor's 0.160 m.  See REVIEW.md fourth-pass audit.
-        residual_scale_m=0.20,
-        soft_argmax_temperature=1.0,
-        train_in_centimetres=True,
-        smooth_l1_beta=1.0,  # = 1 cm in the post-scale unit
-        target_pos_noise_m=0.002,
-        srp_volume_noise_std=0.02,
-        tdoa_jitter_m=0.001,
-        augment=True,
-        # FiLM-residual head dropout — set as part of the 2026-05-22 baseline_v2
-        # shift to defend against the +1236 % V4 train/val gap the audit
-        # identified (10 labeled recordings, 50 fixed epochs, no early stop).
-        # Threaded into FiLMResidualHead between GELU activations via
-        # v4_loc_head.py.
-        head_dropout_p=0.1,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -485,13 +242,20 @@ def _v3_event_intervals_for_recordings(
 # ---------------------------------------------------------------------------
 
 
+# Ground-truth spatial label for D3's `hit_between_Fl_Gr_speed1` family.
+# Sensors Fl=(6, -5, 8) cm and Gr=(11, 0, 8) cm both sit at z=8 cm, so the
+# knock is constrained to that height and approximated by their centroid
+# (cm converted to metres). z is the reliable constraint; x, y carry larger
+# uncertainty. This is the only D3 hit family with a usable spatial label.
+_D3_HIT_FL_GR_XYZ_M: tuple[float, float, float] = (0.085, -0.025, 0.080)
+
+
 def _d3_spatial_overrides(d3_segments: list[TestDatasetSegment]) -> dict[str, tuple[float, float, float]]:
     """Derive spatial labels for D3 `hit_between_*_speed*` recordings.
 
-    Uses the ROW II reference constant `S3_HIT_FL_GR_APPROX_M` for the single
-    `hit_between_Fl_Gr_*` family.  For other hit pairs we fall back to the
-    midpoint of named accelerometer positions (`SENSOR_XYZ`) if available,
-    otherwise skip.
+    Only the `hit_between_Fl_Gr_*` family has a usable ground-truth position
+    (`_D3_HIT_FL_GR_XYZ_M`); it is matched on either the recording id or the
+    source folder name. Other hit pairs lack a reliable label and are skipped.
     """
     out: dict[str, tuple[float, float, float]] = {}
     for s in d3_segments:
@@ -499,12 +263,11 @@ def _d3_spatial_overrides(d3_segments: list[TestDatasetSegment]) -> dict[str, tu
             continue
         rec_lower = s.recording_id.lower()
         src_lower = str(s.source_dir).lower()
-        if "fl" in rec_lower and "gr" in rec_lower:
-            xyz = lh.S3_HIT_FL_GR_APPROX_M
-            out[s.recording_id] = (float(xyz[0]), float(xyz[1]), float(xyz[2]))
-        elif "fl" in src_lower and "gr" in src_lower:
-            xyz = lh.S3_HIT_FL_GR_APPROX_M
-            out[s.recording_id] = (float(xyz[0]), float(xyz[1]), float(xyz[2]))
+        is_fl_gr = ("fl" in rec_lower and "gr" in rec_lower) or (
+            "fl" in src_lower and "gr" in src_lower
+        )
+        if is_fl_gr:
+            out[s.recording_id] = _D3_HIT_FL_GR_XYZ_M
     return out
 
 
@@ -919,7 +682,7 @@ def main(quick: bool = False) -> dict:
     v1_cfg = _v1_cfg(quick)
     v2_cfg_base = _v2_cfg(quick)
     # b5_cma: CMA loss on with cma_weight=0.5 and tightened temperature.
-    # Source of truth: `scripts/run_v1_v2_only.py::_apply_variant("b5_cma")`.
+    # Source of truth: `scripts/campaigns/run_v1_v2_only.py::_apply_variant("b5_cma")`.
     v2_cfg = replace(v2_cfg_base, cma_weight=0.5, cma_temperature=0.1)
     log(f"V1 config: epochs={v1_cfg.epochs}, n_mels={v1_cfg.n_mels}, use_cwt={v1_cfg.use_cwt}")
     log(f"V2 config: epochs={v2_cfg.epochs}, cma_weight={v2_cfg.cma_weight}, "
@@ -1126,12 +889,16 @@ def main(quick: bool = False) -> dict:
         # Synthetic anomaly ROC-AUC across SNR ladder.
         try:
             if v3.val_contexts.shape[0] >= 4:
+                import torch.utils.data as _tud
+
                 from ..anomaly.v3_trainer import _extract_xc
                 from ..context.v2_ssl import (
-                    _PairedGroupedBatchSampler, _PairedWindowedDataset,
-                    _collate, _split_segments_by_recording, _gather_paired_segments,
+                    _collate,
+                    _gather_paired_segments,
+                    _PairedGroupedBatchSampler,
+                    _PairedWindowedDataset,
+                    _split_segments_by_recording,
                 )
-                import torch.utils.data as _tud
                 segs_all = _gather_paired_segments(ANOM_LOADERS, v2_cfg)
                 _, _val_segs_full = _split_segments_by_recording(
                     segs_all, v3_cfg.val_ratio, v3_cfg.seed,
@@ -1312,7 +1079,7 @@ def main(quick: bool = False) -> dict:
         try:
             from ..anomaly.event_detection import v3_real_anomaly_detection
             rf_segments = []
-            for loader, dsid in ((D4, "d4"), (D2, "d2"), (D5, "d5")):
+            for loader, _dsid in ((D4, "d4"), (D2, "d2"), (D5, "d5")):
                 if loader is None:
                     continue
                 rf_segments += [s for s in loader.list_segments() if s.is_anomaly]
@@ -1504,7 +1271,7 @@ def main(quick: bool = False) -> dict:
             try:
                 hold_recs = {s.recording_id for s in holdout_pos}
                 v0_errs: list[float] = []
-                for dsid, payload in metrics["stages"]["v0_multilateration"].items():
+                for payload in metrics["stages"]["v0_multilateration"].values():
                     for rec in payload.get("per_recording", []):
                         if rec.get("recording_id") in hold_recs and "error_m" in rec:
                             v0_errs.append(float(rec["error_m"]))
@@ -1669,7 +1436,7 @@ def main(quick: bool = False) -> dict:
         # Pool V0 MAE across D2/D3/D4 (mean of per-dataset means, weighted
         # by n_successful).  Single value comparable to V4's pooled val MAE.
         v0_errs: list[float] = []
-        for dsid, payload in v0_multi.items():
+        for payload in v0_multi.values():
             n = int(payload.get("n_successful", 0))
             mean = payload.get("mean_error_m")
             if n > 0 and isinstance(mean, (int, float)) and not (isinstance(mean, float) and (mean != mean)):

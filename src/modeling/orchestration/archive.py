@@ -28,7 +28,6 @@ import subprocess
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 
-
 ARCHIVE_ROOT = Path(__file__).resolve().parents[3] / "results" / "runs"
 
 
@@ -190,4 +189,4 @@ def list_runs() -> list[dict]:
     return json.loads(index_path.read_text()).get("runs", [])
 
 
-__all__ = ["archive_run", "list_runs", "ARCHIVE_ROOT"]
+__all__ = ["ARCHIVE_ROOT", "archive_run", "list_runs"]

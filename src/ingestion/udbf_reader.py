@@ -25,7 +25,6 @@ from typing import NamedTuple
 
 import numpy as np
 
-
 _UUID_RE = re.compile(rb"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 # Matches both Allg (ROWII_Allg_M1__2026-04-15_00-00-00.dat)
 # and RMS/FFT  (RmsGeneratorMic__0_2026-04-15_00-00-00_000000.dat) filenames.

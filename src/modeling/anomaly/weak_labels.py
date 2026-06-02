@@ -179,7 +179,7 @@ def window_overlaps_any(
 
 
 __all__ = [
-    "derive_knock_intervals",
     "derive_knock_events",
+    "derive_knock_intervals",
     "window_overlaps_any",
 ]

@@ -16,12 +16,11 @@ Why one-hot rather than the raw RPM:
 
 from __future__ import annotations
 
-from typing import Iterable
+from collections.abc import Iterable
 
 import numpy as np
 
 from ...ingestion.test_dataset_loader import TestDatasetSegment
-
 
 D3_SPEED_BUCKETS = ("speed1", "speed2", "speed3")
 D3_SCADA_DIM = len(D3_SPEED_BUCKETS)
@@ -63,4 +62,4 @@ def d3_speed_lookup(
     return out
 
 
-__all__ = ["D3_SPEED_BUCKETS", "D3_SCADA_DIM", "d3_speed_one_hot", "d3_speed_lookup"]
+__all__ = ["D3_SCADA_DIM", "D3_SPEED_BUCKETS", "d3_speed_lookup", "d3_speed_one_hot"]

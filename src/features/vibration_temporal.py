@@ -319,4 +319,4 @@ def _rolling_crest_factor(x: np.ndarray, window: int) -> np.ndarray:
     return cf
 
 
-__all__ = ["compute_vibration_input_stack", "channel2_statistic_name"]
+__all__ = ["channel2_statistic_name", "compute_vibration_input_stack"]

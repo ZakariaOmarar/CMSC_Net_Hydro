@@ -79,7 +79,7 @@ through the `DatasetRegistry`.
 Adding a dataset is a single YAML edit; see the schema and inline comments in
 [`configs/datasets/d1.yaml`](configs/datasets/d1.yaml). For a sensor that needs
 its vibration sampling rate derived from raw timestamps, use
-[`scripts/derive_dataset_sampling_rate.py`](scripts/derive_dataset_sampling_rate.py).
+[`scripts/utils/derive_dataset_sampling_rate.py`](scripts/utils/derive_dataset_sampling_rate.py).
 
 The recordings themselves are not redistributed with this repository.
 
@@ -92,10 +92,11 @@ Two layers, by design:
    and are the canonical source of truth, loaded via `DatasetSpec.from_yaml`
    and `src/config/dataset_registry.py`.
 2. **Per-stage model hyperparameters** (V1–V5 trainer settings) live in the
-   Python builders `_v1_cfg`, `_v2_cfg`, `_v3_cfg`, `_v4_cfg`, … in
-   [`full_run.py`](src/modeling/orchestration/full_run.py). These are the single
-   source shared by the orchestrator and every driver under `scripts/`; change
-   them there, not at the caller.
+   Python builders `_v1_cfg`, `_v2_cfg`, `_v3_cfg`, `_v4_cfg` in
+   [`stage_configs.py`](src/modeling/orchestration/stage_configs.py) (re-exported
+   from [`full_run.py`](src/modeling/orchestration/full_run.py)). These are the
+   single source shared by the orchestrator and every driver under `scripts/`;
+   change them there, not at the caller.
 
 Architecture-wide constants (the empirically-selected acoustic features
 `n_fft=4096, hop=2048, n_mels=96`; sync windows) live in
@@ -153,6 +154,17 @@ python -m pytest -q
 Tests that exercise the real recordings are marked `@pytest.mark.requires_data`
 and skip cleanly on a checkout without a `data/` directory (see
 [`tests/conftest.py`](tests/conftest.py)).
+
+## Linting
+
+```bash
+ruff check
+```
+
+The rule set is configured in `[tool.ruff]` in `pyproject.toml` and is
+deliberately scoped: `pep8-naming` is left off because the modelling code uses
+maths/ML conventions (`X`, `W`, `B, T, C = x.shape`), and a few rules are
+ignored with inline rationale. The tree is kept clean.
 
 ## Notes on the previous repo state
 

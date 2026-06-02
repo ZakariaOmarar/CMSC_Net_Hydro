@@ -18,8 +18,8 @@ id and the consumer can apply its own mapping later.
 from __future__ import annotations
 
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Iterable
 
 import numpy as np
 import torch
@@ -35,7 +35,6 @@ from ..context.v2_fusion import V2FusionEncoder
 from ..context.v2_ssl import V2SSLConfig, _dataset_idx
 from ..localization.v4_features import GridSpec, compute_accel_tdoa_tokens, compute_srp_phat_volume
 from ..localization.v4_loc_head import V4LocalizationHead
-
 
 # ---------------------------------------------------------------------------
 # Output schema

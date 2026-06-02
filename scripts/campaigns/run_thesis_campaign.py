@@ -26,8 +26,8 @@ The result set this produces covers the full thesis:
 
 Run::
 
-    python -m scripts.run_thesis_campaign
-    python -m scripts.run_thesis_campaign --resume thesis_<ts>
+    python -m scripts.campaigns.run_thesis_campaign
+    python -m scripts.campaigns.run_thesis_campaign --resume thesis_<ts>
 """
 
 from __future__ import annotations
@@ -40,8 +40,7 @@ import sys
 import time
 from pathlib import Path
 
-
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 RUNS_DIR = REPO / "results" / "runs"
 
 ACOUSTIC_CELLS = [
@@ -144,8 +143,9 @@ def main() -> None:
             log(f"  resume: {cell} done")
             continue
         if time.time() > deadline:
-            log("  BUDGET EXCEEDED in Stage A"); break
-        cmd = [sys.executable, "-m", "scripts.ablation_full_pipeline",
+            log("  BUDGET EXCEEDED in Stage A")
+            break
+        cmd = [sys.executable, "-m", "scripts.campaigns.ablation_full_pipeline",
                "--cell", cell, "--seed", "42", "--skip-v3", "--skip-v4"]
         log(f"  $ {' '.join(cmd[2:])}")
         try:
@@ -173,7 +173,7 @@ def main() -> None:
     log("\n=== Stage B — deep V3 -> V4 campaign on acoustic winner ===")
     remaining_h = max(0.5, (deadline - time.time()) / 3600.0)
     deep_dir_name = f"deepc_{_now()}"
-    cmd = [sys.executable, "-m", "scripts.run_deep_v3v4_campaign",
+    cmd = [sys.executable, "-m", "scripts.campaigns.run_deep_v3v4_campaign",
            "--encoder-run", str(encoder_run),
            "--budget-hours", f"{remaining_h:.2f}",
            "--resume", deep_dir_name]
@@ -189,7 +189,7 @@ def main() -> None:
     log("\n=== Final report ===")
     try:
         subprocess.run(
-            [sys.executable, "-m", "scripts.analyze_ablation",
+            [sys.executable, "-m", "scripts.campaigns.analyze_ablation",
              "--campaign-dir", str(campaign_dir)],
             cwd=str(REPO), timeout=600, check=False)
     except Exception as e:

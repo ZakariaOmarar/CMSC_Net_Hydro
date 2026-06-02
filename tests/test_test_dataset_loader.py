@@ -13,7 +13,6 @@ import pytest
 from src.ingestion.positions import PositionRegistry
 from src.ingestion.test_dataset_loader import DatasetSpec, TestDatasetLoader
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 pytestmark = pytest.mark.requires_data

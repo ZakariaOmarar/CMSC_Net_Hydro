@@ -38,7 +38,6 @@ from src.modeling.anomaly.v3_trainer import (
 )
 from src.modeling.context.v2_ssl import V2SSLConfig
 
-
 # ---------------------------------------------------------------------------
 # _XtPool shape + gradient invariants
 # ---------------------------------------------------------------------------

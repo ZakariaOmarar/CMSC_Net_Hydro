@@ -29,7 +29,6 @@ from .full_run import (
     main as full_run_main,
 )
 
-
 HEADLINE_KEYS = (
     "v1_acoustic_purity",
     "v1_vibration_purity",

@@ -201,7 +201,7 @@ def run_loocv(
             "fold": i,
             "hold_out": hold,
             "skipped": False,
-            "n_train_recordings": len(set(_qualify(s) for s in tr)),
+            "n_train_recordings": len({_qualify(s) for s in tr}),
             "n_val_recordings": 1,
             "n_train_windows": len(tr),
             "n_val_windows": len(va),
@@ -261,6 +261,7 @@ def _train_v4_with_explicit_split(
     what we want for LOOCV).
     """
     import torch.nn.functional as F  # noqa: F401 — used inside the original trainer
+
     from ..localization.v4_loc_head import V4LocalizationHead
     from ..localization.v4_trainer import (
         V4Result,

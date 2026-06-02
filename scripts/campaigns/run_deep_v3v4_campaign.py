@@ -16,8 +16,8 @@ V1/V2 retraining per cell. Resume-safe via state.json, like
 
 Run on the GPU box (training is not viable on the laptop)::
 
-    python -m scripts.run_deep_v3v4_campaign --encoder-run results/runs/<best_encoder_dir>
-    python -m scripts.run_deep_v3v4_campaign --encoder-run <dir> --resume deepc_<ts>
+    python -m scripts.campaigns.run_deep_v3v4_campaign --encoder-run results/runs/<best_encoder_dir>
+    python -m scripts.campaigns.run_deep_v3v4_campaign --encoder-run <dir> --resume deepc_<ts>
 """
 
 from __future__ import annotations
@@ -30,9 +30,7 @@ import sys
 import time
 from pathlib import Path
 
-
-
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 RUNS_DIR = REPO / "results" / "runs"
 
 # Cell catalogs (must match the sweep scripts).
@@ -231,7 +229,7 @@ def main() -> None:
     log("\n=== Phase 1 — deep V3 sweep ===")
     p1 = _run_phase(
         "v3deep", PHASE1_V3_CELLS,
-        lambda cell, seed: [sys.executable, "-m", "scripts.v3_deep_sweep",
+        lambda cell, seed: [sys.executable, "-m", "scripts.sweeps.v3_deep_sweep",
                             "--encoder-run", str(encoder_run), "--cell", cell, "--seed", str(seed)],
         _TIMEOUT_V3_S, state, state_path, log, deadline)
     v3_winner = pick_v3_winner(p1, args.v3_gap_guardrail)
@@ -252,7 +250,7 @@ def main() -> None:
     log("\n=== Phase 2 — deep V4 sweep (gated by Phase-1 V3) ===")
     p2 = _run_phase(
         "v4deep", PHASE2_V4_CELLS,
-        lambda cell, seed: [sys.executable, "-m", "scripts.v4_deep_sweep",
+        lambda cell, seed: [sys.executable, "-m", "scripts.sweeps.v4_deep_sweep",
                             "--encoder-run", str(encoder_run),
                             "--v3-run", str(v3_winner_dir),
                             "--samples-cache", str(samples_cache),
@@ -268,7 +266,8 @@ def main() -> None:
     if v3_winner:
         for seed in VERDICT_SEEDS:
             if time.time() > deadline:
-                log("BUDGET EXCEEDED in Phase 3 (V3 seeds)"); break
+                log("BUDGET EXCEEDED in Phase 3 (V3 seeds)")
+                break
             key = f"v3verdict:{v3_winner}:s{seed}"
             if state.get("cells", {}).get(key, {}).get("status") == "completed":
                 continue
@@ -277,7 +276,7 @@ def main() -> None:
             # Dropping --all-paradigms cuts ~3× off per-seed wall time and
             # keeps the verdict inside _TIMEOUT_V3_S.
             status = _launch(
-                [sys.executable, "-m", "scripts.v3_deep_sweep",
+                [sys.executable, "-m", "scripts.sweeps.v3_deep_sweep",
                  "--encoder-run", str(encoder_run), "--cell", v3_winner,
                  "--seed", str(seed)],
                 _TIMEOUT_V3_S, log)
@@ -287,12 +286,13 @@ def main() -> None:
     if v4_winner and v3_winner_dir is not None:
         for seed in VERDICT_SEEDS:
             if time.time() > deadline:
-                log("BUDGET EXCEEDED in Phase 3 (V4 seeds)"); break
+                log("BUDGET EXCEEDED in Phase 3 (V4 seeds)")
+                break
             key = f"v4verdict:{v4_winner}:s{seed}"
             if state.get("cells", {}).get(key, {}).get("status") == "completed":
                 continue
             status = _launch(
-                [sys.executable, "-m", "scripts.v4_deep_sweep",
+                [sys.executable, "-m", "scripts.sweeps.v4_deep_sweep",
                  "--encoder-run", str(encoder_run), "--v3-run", str(v3_winner_dir),
                  "--samples-cache", str(samples_cache),
                  "--all-channel-modes",
@@ -311,12 +311,13 @@ def main() -> None:
         log("\n=== Phase 2b — V4 training-window-selection ablation ===")
         for ts_mode in ("impulse", "v3gated", "all"):
             if time.time() > deadline:
-                log("BUDGET EXCEEDED in Phase 2b"); break
+                log("BUDGET EXCEEDED in Phase 2b")
+                break
             key = f"v4trainsel:{v4_winner}:{ts_mode}:s42"
             if state.get("cells", {}).get(key, {}).get("status") == "completed":
                 continue
             status = _launch(
-                [sys.executable, "-m", "scripts.v4_deep_sweep",
+                [sys.executable, "-m", "scripts.sweeps.v4_deep_sweep",
                  "--encoder-run", str(encoder_run), "--v3-run", str(v3_winner_dir),
                  "--samples-cache", str(samples_cache),
                  "--train-select", ts_mode,
@@ -383,7 +384,7 @@ def main() -> None:
     log("\n=== Final report ===")
     try:
         subprocess.run(
-            [sys.executable, "-m", "scripts.analyze_ablation",
+            [sys.executable, "-m", "scripts.campaigns.analyze_ablation",
              "--campaign-dir", str(campaign_dir)],
             cwd=str(REPO), timeout=600, check=False)
     except Exception as e:

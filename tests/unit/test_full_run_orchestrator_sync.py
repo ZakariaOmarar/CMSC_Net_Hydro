@@ -37,7 +37,6 @@ from scipy.io import wavfile
 
 from src.ingestion.test_dataset_loader import DatasetSpec, TestDatasetLoader
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 pytestmark = pytest.mark.requires_data

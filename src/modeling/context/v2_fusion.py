@@ -32,7 +32,6 @@ from ...config.architecture import ENCODER
 from ..encoders import PMA, PerModalityEncoder
 from ..fusion import BidirectionalCrossAttention
 
-
 ContextMode = Literal["joint_pma", "skip", "dual_pma"]
 
 

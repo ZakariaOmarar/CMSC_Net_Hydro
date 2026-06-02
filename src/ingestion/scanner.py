@@ -6,7 +6,6 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-
 # NOTE on the `sensor` capture group: `[^_]+` matches a single underscore-free
 # token.  For D3 stereo filenames like `recorded_D_l_Pump.wav` this matches
 # `sensor="D"` and `recording="l_Pump"` — the `D_l` stereo-channel ID is NOT

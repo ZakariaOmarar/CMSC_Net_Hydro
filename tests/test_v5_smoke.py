@@ -24,7 +24,6 @@ from src.modeling.scada import (
     rank_channels_by_mi,
 )
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 

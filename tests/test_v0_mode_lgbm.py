@@ -21,7 +21,6 @@ from src.modeling.anomaly_baselines.mode_lgbm import (
     train_v0_mode_lgbm,
 )
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 pytestmark = pytest.mark.requires_data

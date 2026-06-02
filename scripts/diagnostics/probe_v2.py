@@ -22,7 +22,7 @@ For each held-out window we extract a ladder of representations:
 Each row is K-means(k=4) → Hungarian-matched to mode labels → cluster purity.
 
 Run with:
-    python -m scripts.probe_v2
+    python -m scripts.diagnostics.probe_v2
 """
 
 from __future__ import annotations
@@ -39,17 +39,16 @@ from src.modeling.context.v1_ssl import V1SSLConfig
 from src.modeling.context.v2_fusion import V2FusionEncoder
 from src.modeling.context.v2_ssl import (
     V2SSLConfig,
-    _PairedGroupedBatchSampler,
-    _PairedWindowedDataset,
     _collate,
     _gather_paired_segments,
+    _PairedGroupedBatchSampler,
+    _PairedWindowedDataset,
     _split_segments_by_recording,
 )
 from src.modeling.encoders import PerModalityEncoder
 from src.modeling.orchestration.full_run import _resolved_loader, _v2_cfg
 
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 RESULTS = REPO_ROOT / "results" / "full_run"
 
 

@@ -6,8 +6,8 @@ fill in that field from the data itself, so a new prototype (different DMA
 batch size, different firmware cadence) just works once its YAML is created.
 
 Usage:
-    python -m scripts.derive_dataset_sampling_rate configs/datasets/d5.yaml
-    python -m scripts.derive_dataset_sampling_rate configs/datasets/d5.yaml --apply
+    python -m scripts.utils.derive_dataset_sampling_rate configs/datasets/d5.yaml
+    python -m scripts.utils.derive_dataset_sampling_rate configs/datasets/d5.yaml --apply
 
 Without `--apply` the script prints the derivation report and exits.  With
 `--apply` it writes the rounded integer back into the YAML, preserving the
@@ -30,13 +30,12 @@ from __future__ import annotations
 
 import argparse
 import csv
-from pathlib import Path
 import sys
+from pathlib import Path
 
 import yaml
 
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _parse_pc_time_seconds(s: str) -> float:
@@ -275,7 +274,7 @@ def _apply_to_yaml(yaml_path: Path, report: dict) -> None:
     _replace_or_append(
         "accel_target_sr",
         str(rate),
-        "derived empirically by scripts/derive_dataset_sampling_rate.py",
+        "derived empirically by scripts/utils/derive_dataset_sampling_rate.py",
     )
     if overrides:
         override_repr = (

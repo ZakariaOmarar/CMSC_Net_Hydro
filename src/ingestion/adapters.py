@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import csv
 import warnings
-from datetime import datetime, timezone
+from collections.abc import Iterable, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterable, Sequence
 
 import numpy as np
 from scipy.io import wavfile
@@ -125,7 +125,7 @@ class WavVibrationAdapter:
         self._vibration_glob = vibration_glob
         self._accel_target_sr = accel_target_sr
         self._allowed_mic_counts = tuple(
-            sorted(set(int(c) for c in allowed_mic_counts))
+            sorted({int(c) for c in allowed_mic_counts})
         )
         self._vibration_format = vibration_format
         self._accel_sr_overrides = dict(accel_sr_overrides or {})
@@ -504,7 +504,7 @@ class WavVibrationAdapter:
             # If the dataset declares a per-sensor override (e.g. D5 sensor E
             # at 471 Hz vs the 446 Hz dataset-wide rate), use that instead of
             # the timestamp-based inference.  Overrides are firmware-documented
-            # rates from `scripts/derive_dataset_sampling_rate.py` and are more
+            # rates from `scripts/utils/derive_dataset_sampling_rate.py` and are more
             # reliable than per-recording timestamp inference on short clips.
             sensor_id = _sensor_id_from_raw_csv(csv_path)
             sr = float(self._accel_sr_overrides.get(sensor_id, sr_inferred))
@@ -553,7 +553,7 @@ def _read_first_pc_time(path: Path) -> datetime | None:
                 if not raw:
                     continue
                 t = float(raw)
-                return datetime.fromtimestamp(t, tz=timezone.utc)
+                return datetime.fromtimestamp(t, tz=UTC)
     except (OSError, ValueError):
         return None
     return None
@@ -596,8 +596,8 @@ def _infer_recording_start_time(
         except OSError:
             continue
     if mtimes:
-        return datetime.fromtimestamp(min(mtimes), tz=timezone.utc), "file_mtime"
-    return datetime.now(timezone.utc), "load_time"
+        return datetime.fromtimestamp(min(mtimes), tz=UTC), "file_mtime"
+    return datetime.now(UTC), "load_time"
 
 
 def _read_vibration_raw_csv(path: Path) -> tuple[np.ndarray, float]:

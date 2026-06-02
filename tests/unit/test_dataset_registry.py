@@ -5,9 +5,9 @@ from __future__ import annotations
 import pytest
 
 from src.config.dataset_registry import (
+    _VALID_POSITION_SOURCES,
     REGISTRY,
     DatasetRegistry,
-    _VALID_POSITION_SOURCES,
 )
 
 

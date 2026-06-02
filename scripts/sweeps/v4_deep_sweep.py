@@ -25,8 +25,8 @@ Axes (superset of v4_aug_sweep):
 
 Run::
 
-    python -m scripts.v4_deep_sweep --encoder-run <dir> --v3-run <phase1_v3_winner_dir>
-    python -m scripts.v4_deep_sweep --encoder-run <dir> --v3-run <dir> --cell v4_hd2_w5
+    python -m scripts.sweeps.v4_deep_sweep --encoder-run <dir> --v3-run <phase1_v3_winner_dir>
+    python -m scripts.sweeps.v4_deep_sweep --encoder-run <dir> --v3-run <dir> --cell v4_hd2_w5
 """
 
 from __future__ import annotations
@@ -59,7 +59,6 @@ from src.modeling.orchestration.full_run import (
     _v3_cfg,
     _v4_cfg,
 )
-
 
 _DROPOUT_LEVELS = {"hd0": 0.0, "hd1": 0.1, "hd2": 0.2, "hd3": 0.3}
 _WD_LEVELS = {"w4": 1e-4, "w5": 5e-4, "w3": 1e-3}

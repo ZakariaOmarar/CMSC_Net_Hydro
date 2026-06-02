@@ -60,7 +60,6 @@ import numpy as np
 import torch
 
 from ...config import resolve_device
-
 from .cnf_head import ConditionalRealNVP
 
 
@@ -166,7 +165,7 @@ def evaluate_synthetic_anomaly_auc(
         return SyntheticAnomalyAUC(
             snr_db_to_auc={s: float("nan") for s in snr_db_list},
             snr_db_to_n_clean={s: int(healthy_x.shape[0]) for s in snr_db_list},
-            snr_db_to_n_corrupted={s: 0 for s in snr_db_list},
+            snr_db_to_n_corrupted=dict.fromkeys(snr_db_list, 0),
             snr_db_to_auc_ci_low={s: float("nan") for s in snr_db_list},
             snr_db_to_auc_ci_high={s: float("nan") for s in snr_db_list},
             seed=int(seed),
@@ -182,7 +181,7 @@ def evaluate_synthetic_anomaly_auc(
         return SyntheticAnomalyAUC(
             snr_db_to_auc={s: float("nan") for s in snr_db_list},
             snr_db_to_n_clean={s: int(healthy_x.shape[0]) for s in snr_db_list},
-            snr_db_to_n_corrupted={s: 0 for s in snr_db_list},
+            snr_db_to_n_corrupted=dict.fromkeys(snr_db_list, 0),
             snr_db_to_auc_ci_low={s: float("nan") for s in snr_db_list},
             snr_db_to_auc_ci_high={s: float("nan") for s in snr_db_list},
             seed=int(seed),

@@ -271,4 +271,4 @@ class PerModalityEncoder(nn.Module):
         return tokens, summary
 
 
-__all__ = ["Acoustic2DCNN", "Vibration1DCNN", "PerModalityEncoder"]
+__all__ = ["Acoustic2DCNN", "PerModalityEncoder", "Vibration1DCNN"]

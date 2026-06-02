@@ -1,6 +1,6 @@
 """R2.3 — Unimodal × 2 + Late Fusion × 4 + Intermediate Fusion comparison.
 
-Consumes the artefacts written by `scripts/run_v3_three_paradigms.py`:
+Consumes the artefacts written by `scripts/paradigms/run_v3_three_paradigms.py`:
 
   results/runs/<v3-three-paradigms-run>/
     ├── v3_acoustic/{flow.pt, thresholds.npz, val_eval.npz}
@@ -69,7 +69,6 @@ from ..context.v2_ssl import (
 )
 from ..encoders.per_modality import PerModalityEncoder
 from ..orchestration.full_run import _v1_cfg, _v2_cfg
-
 
 REPO = Path(__file__).resolve().parents[3]
 
@@ -142,8 +141,10 @@ def _score_cohort_three_paradigms(
     """
     out: dict[str, list] = {p.name: [[], [], []] for p in pipelines}
     for batch in loader:
-        ac = batch["ac_feat"]; ac_xyz = batch["ac_xyz"]
-        vib = batch["vib_feat"]; vib_xyz = batch["vib_xyz"]
+        ac = batch["ac_feat"]
+        ac_xyz = batch["ac_xyz"]
+        vib = batch["vib_feat"]
+        vib_xyz = batch["vib_xyz"]
         ds = batch["dataset_idx"]
         with torch.no_grad():
             for p in pipelines:
@@ -273,7 +274,8 @@ def _audit_alert_quadrants(alert_a: np.ndarray, alert_v: np.ndarray) -> dict[str
     n = alert_a.size
     if n == 0:
         return {"a_only": 0.0, "v_only": 0.0, "both": 0.0, "neither": 0.0, "n": 0}
-    a = alert_a.astype(bool); v = alert_v.astype(bool)
+    a = alert_a.astype(bool)
+    v = alert_v.astype(bool)
     return {
         "a_only": float((a & ~v).mean()),
         "v_only": float((~a & v).mean()),
@@ -291,7 +293,7 @@ def _audit_alert_quadrants(alert_a: np.ndarray, alert_v: np.ndarray) -> dict[str
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--v3-three-run", required=True,
-                    help="Run dir produced by scripts/run_v3_three_paradigms.py")
+                    help="Run dir produced by scripts/paradigms/run_v3_three_paradigms.py")
     ap.add_argument("--source-run", required=True,
                     help="V1+V2 weights source run (same one used to seed the V3 paradigms run)")
     args = ap.parse_args()
@@ -307,9 +309,15 @@ def main() -> None:
 
     # Build + load encoders.
     print(f"[rq2-3p] Loading V1+V2 from {src_run.relative_to(REPO)} ...")
-    v1_a = _build_v1("acoustic", v1_cfg); _load_state(src_run / "v1" / "acoustic.pt", v1_a); v1_a.eval()
-    v1_v = _build_v1("vibration", v1_cfg); _load_state(src_run / "v1" / "vibration.pt", v1_v); v1_v.eval()
-    v2 = _build_v2(v2_cfg); _load_state(src_run / "v2" / "encoder.pt", v2); v2.eval()
+    v1_a = _build_v1("acoustic", v1_cfg)
+    _load_state(src_run / "v1" / "acoustic.pt", v1_a)
+    v1_a.eval()
+    v1_v = _build_v1("vibration", v1_cfg)
+    _load_state(src_run / "v1" / "vibration.pt", v1_v)
+    v1_v.eval()
+    v2 = _build_v2(v2_cfg)
+    _load_state(src_run / "v2" / "encoder.pt", v2)
+    v2.eval()
 
     # Build the three pipeline states.
     flow_a, th_a = _load_v3(v3_run / "v3_acoustic", x_dim=embed, c_dim=embed)

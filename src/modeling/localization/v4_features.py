@@ -29,7 +29,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .localization_head import gcc_phat, srp_phat_3d
+from .classical import gcc_phat, srp_phat_3d
 
 C_AIR_MS = 343.0
 # Default structure-borne wave speed for the 3D-printed plastic rig
@@ -276,11 +276,11 @@ def compute_accel_tdoa_tokens(
 
 
 __all__ = [
-    "GridSpec",
     "C_AIR_MS",
     "C_PLASTIC_3DP_MS",
-    "compute_srp_phat_volume",
-    "compute_burst_aware_srp_phat_volume",
+    "GridSpec",
     "compute_accel_tdoa_tokens",
+    "compute_burst_aware_srp_phat_volume",
+    "compute_srp_phat_volume",
     "find_burst_window",
 ]

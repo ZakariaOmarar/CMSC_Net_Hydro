@@ -17,9 +17,9 @@ rather than blocking on a single bad cell).
 
 Run::
 
-    python -m scripts.run_ablation_campaign                 # fresh 48 h campaign
-    python -m scripts.run_ablation_campaign --budget-hours 24  # tighter cap
-    python -m scripts.run_ablation_campaign --resume campaign_20260522_120000
+    python -m scripts.campaigns.run_ablation_campaign                 # fresh 48 h campaign
+    python -m scripts.campaigns.run_ablation_campaign --budget-hours 24  # tighter cap
+    python -m scripts.campaigns.run_ablation_campaign --resume campaign_20260522_120000
 """
 
 from __future__ import annotations
@@ -32,13 +32,12 @@ import sys
 import time
 from pathlib import Path
 
-
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 RUNS_DIR = REPO / "results" / "runs"
 
 
 # ---------------------------------------------------------------------------
-# Cell catalogs (must match scripts.ablation_full_pipeline)
+# Cell catalogs (must match scripts.campaigns.ablation_full_pipeline)
 # ---------------------------------------------------------------------------
 
 PHASE2_CELLS = [
@@ -128,13 +127,13 @@ def _launch_ablation_cell(
     cell_id: str, base_cell: str | None, seed: int,
     skip_v3: bool, skip_v4: bool, log: CampaignLog,
 ) -> tuple[str, Path | None]:
-    """Run one `scripts.ablation_full_pipeline` cell as a subprocess.
+    """Run one `scripts.campaigns.ablation_full_pipeline` cell as a subprocess.
 
     Returns (status, run_dir).  Status is "completed", "failed", or "timeout".
     """
     timeout = _TIMEOUT_V1V2_ONLY_S if (skip_v3 and skip_v4) else _TIMEOUT_FULL_PIPELINE_S
     cmd = [
-        sys.executable, "-m", "scripts.ablation_full_pipeline",
+        sys.executable, "-m", "scripts.campaigns.ablation_full_pipeline",
         "--cell", cell_id, "--seed", str(seed),
     ]
     if base_cell:
@@ -184,7 +183,7 @@ def _launch_v4_aug_cell(
     cell_id: str, baseline_dir: Path, seed: int, log: CampaignLog,
 ) -> tuple[str, Path | None]:
     cmd = [
-        sys.executable, "-m", "scripts.v4_aug_sweep",
+        sys.executable, "-m", "scripts.sweeps.v4_aug_sweep",
         "--baseline-run", str(baseline_dir),
         "--cell", cell_id, "--seed", str(seed),
     ]
@@ -592,7 +591,7 @@ def main() -> None:
     # =========================================================== Final report
     log("\n=== Generating final report ===")
     report_cmd = [
-        sys.executable, "-m", "scripts.analyze_ablation",
+        sys.executable, "-m", "scripts.campaigns.analyze_ablation",
         "--campaign-dir", str(campaign_dir),
     ]
     try:

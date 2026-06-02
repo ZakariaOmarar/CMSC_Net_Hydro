@@ -43,7 +43,6 @@ import numpy as np
 
 from .statistics import paired_bootstrap_test
 
-
 REPO = Path(__file__).resolve().parents[3]
 
 
@@ -189,7 +188,7 @@ def _loro_folds(recording_keys: np.ndarray) -> list[tuple[np.ndarray, np.ndarray
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--v4-three-run", required=True,
-                    help="Run dir produced by scripts/run_v4_three_paradigms.py")
+                    help="Run dir produced by scripts/paradigms/run_v4_three_paradigms.py")
     ap.add_argument("--holdout-calibration-ratio", type=float, default=0.5,
                     help="Fraction of val RECORDINGS used to fit LF weights; "
                          "rest is held-out test for the defensible MAE.  "

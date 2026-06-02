@@ -1,4 +1,4 @@
-"""Aggregate `scripts.ablation_full_pipeline` cells into a markdown report.
+"""Aggregate `scripts.campaigns.ablation_full_pipeline` cells into a markdown report.
 
 Reads every ``results/runs/*__ablation_*/metrics.json`` + ``cell_config.json``
 and emits four tables to ``results/runs/ablation_report_<ts>.md``:
@@ -21,8 +21,8 @@ Selection guidance (printed at the bottom of the report):
 
 Run::
 
-    python -m scripts.analyze_ablation
-    python -m scripts.analyze_ablation --filter "p2_a1_*"   # glob
+    python -m scripts.campaigns.analyze_ablation
+    python -m scripts.campaigns.analyze_ablation --filter "p2_a1_*"   # glob
 """
 
 from __future__ import annotations
@@ -36,8 +36,7 @@ from collections import defaultdict
 from pathlib import Path
 from statistics import mean, stdev
 
-
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 RUNS_DIR = REPO / "results" / "runs"
 
 
@@ -264,7 +263,7 @@ def _multi_seed(rows: list[dict]) -> str:
             continue
         any_row = True
 
-        def _collect(path: list[str]) -> list[float]:
+        def _collect(path: list[str], runs=runs) -> list[float]:
             vals: list[float] = []
             for r in runs:
                 node = r["metrics"]
@@ -397,11 +396,11 @@ def _table_v3_paradigms(rows: list[dict]) -> str:
     for r in para_rows:
         pa = r["metrics"]["paradigms"]
 
-        def _f1(name):
+        def _f1(name, pa=pa):
             ra = (pa.get(name) or {}).get("real_anomaly") or {}
             return _fmt(ra.get("f1"))
 
-        def _nll(name):
+        def _nll(name, pa=pa):
             return _fmt((pa.get(name) or {}).get("val_nll_final"))
 
         out.append("| " + " | ".join([
@@ -425,7 +424,7 @@ def _table_v4_channel_modes(rows: list[dict]) -> str:
     for r in cm_rows:
         cm = r["metrics"]["channel_modes"]
 
-        def _mae(mode):
+        def _mae(mode, cm=cm):
             d = cm.get(mode) or {}
             v = d.get("holdout_mae_v3gated_m")
             if v is None:

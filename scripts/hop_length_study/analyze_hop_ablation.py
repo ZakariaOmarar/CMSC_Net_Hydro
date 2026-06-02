@@ -15,8 +15,8 @@ With n_seeds>=5 the test starts to have meaningful sensitivity.
 
 Usage::
 
-    python scripts/analyze_hop_ablation.py --csv results/ablation_hop/<ts>/metrics.csv
-    python scripts/analyze_hop_ablation.py --csv ... --metric auc_neg5db  # alt SNR
+    python scripts/hop_length_study/analyze_hop_ablation.py --csv results/ablation_hop/<ts>/metrics.csv
+    python scripts/hop_length_study/analyze_hop_ablation.py --csv ... --metric auc_neg5db  # alt SNR
 """
 
 from __future__ import annotations
@@ -29,7 +29,6 @@ from pathlib import Path
 from statistics import mean, pstdev
 
 import numpy as np
-
 
 HEADLINE_METRIC = "auc_0db"  # primary; CLI can override
 

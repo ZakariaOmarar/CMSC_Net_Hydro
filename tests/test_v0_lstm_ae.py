@@ -20,7 +20,6 @@ from src.modeling.anomaly_baselines.lstm_ae import (
     train_v0_lstm_ae,
 )
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 pytestmark = pytest.mark.requires_data

@@ -35,7 +35,6 @@ from src.modeling.anomaly.v3_trainer import precompute_paired
 from src.modeling.context.v2_fusion import V2FusionEncoder
 from src.modeling.context.v2_ssl import V2SSLConfig
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 pytestmark = pytest.mark.requires_data

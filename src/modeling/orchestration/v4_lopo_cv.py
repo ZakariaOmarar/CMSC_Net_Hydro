@@ -25,7 +25,7 @@ Usage:
         [--all-channel-modes] [--out-dir <dir>] [--seed 42]
 
 Unlike `v4_loocv.py` this driver is wired directly into the deep-campaign
-pipeline (Phase 4 in `scripts/run_deep_v3v4_campaign.py`).  It does NOT
+pipeline (Phase 4 in `scripts/campaigns/run_deep_v3v4_campaign.py`).  It does NOT
 retrain V1/V2/V3 and reuses the campaign's V2 encoder + precomputed V4
 sample cache.
 """
@@ -57,7 +57,6 @@ from .full_run import (
     _v2_cfg,
     _v4_cfg,
 )
-
 
 _CHANNEL_MODES: tuple[Literal["both", "srp_only", "tdoa_only", "vibration_only_learned"], ...] = (
     "both", "srp_only", "tdoa_only", "vibration_only_learned",

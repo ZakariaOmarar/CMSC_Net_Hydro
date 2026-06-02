@@ -10,8 +10,8 @@ Two baselines, one per research question:
                     (RQ1 upper-bound reference; the only place mode labels are
                     legitimately used as a training target).
 
-The V0 SRP-PHAT localization baseline (RQ3 reference) wraps the existing
-`src/modeling/localization/localization_head.py` and lives there.
+The V0 SRP-PHAT localization baseline (RQ3 reference) wraps the classical
+primitives in `src/modeling/localization/classical.py` and lives there.
 """
 
 from .lstm_ae import (

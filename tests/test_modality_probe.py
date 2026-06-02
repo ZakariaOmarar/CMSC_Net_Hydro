@@ -24,7 +24,6 @@ from src.modeling.context.modality_probe import run_modality_balance_probe
 from src.modeling.context.v2_fusion import V2FusionEncoder
 from src.modeling.context.v2_ssl import V2SSLConfig, _precompute_paired
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 pytestmark = pytest.mark.requires_data

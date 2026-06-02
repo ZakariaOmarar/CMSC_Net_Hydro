@@ -29,13 +29,14 @@ from __future__ import annotations
 
 import csv
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
 import pytest
 from scipy.io import wavfile
 
+from src.exceptions import IngestionError
 from src.ingestion.adapters import (
     WavVibrationAdapter,
     _infer_recording_start_time,
@@ -46,8 +47,6 @@ from src.ingestion.adapters import (
 )
 from src.ingestion.positions import PositionRegistry
 from src.ingestion.sync_verification import apply_sync_correction
-from src.exceptions import IngestionError
-
 
 # ---------------------------------------------------------------------------
 # Synthetic-data helpers (mirror the patterns already used in the
@@ -188,7 +187,7 @@ def test_start_time_falls_back_to_mtime_without_pc_time(tmp_path: Path) -> None:
     _write_wav_int16(wav_path)
     # Pin the WAV mtime to a known value (~ 2024-01-01) so the test is
     # deterministic against whatever the OS picked.
-    fixed_mtime = datetime(2024, 1, 1, tzinfo=timezone.utc).timestamp()
+    fixed_mtime = datetime(2024, 1, 1, tzinfo=UTC).timestamp()
     os.utime(wav_path, (fixed_mtime, fixed_mtime))
     os.utime(csv_path, (fixed_mtime + 60, fixed_mtime + 60))
     start, source = _infer_recording_start_time([csv_path], [wav_path])
@@ -199,9 +198,9 @@ def test_start_time_falls_back_to_mtime_without_pc_time(tmp_path: Path) -> None:
 
 
 def test_start_time_falls_back_to_load_time_when_no_files() -> None:
-    before = datetime.now(timezone.utc).timestamp()
+    before = datetime.now(UTC).timestamp()
     start, source = _infer_recording_start_time([], [])
-    after = datetime.now(timezone.utc).timestamp()
+    after = datetime.now(UTC).timestamp()
     assert source == "load_time"
     assert before - 1 <= start.timestamp() <= after + 1
 
@@ -212,14 +211,14 @@ def test_adapter_propagates_start_time_into_segment(tmp_path: Path) -> None:
     for sensor in "BCDE":
         _write_wav_int16(rec / f"recorded_{sensor}.wav")
         _write_peak_vibration_csv(rec / f"vibration_{sensor}.csv")
-    fixed_mtime = datetime(2024, 6, 15, tzinfo=timezone.utc).timestamp()
+    fixed_mtime = datetime(2024, 6, 15, tzinfo=UTC).timestamp()
     for p in rec.iterdir():
         os.utime(p, (fixed_mtime, fixed_mtime))
 
     adapter = WavVibrationAdapter()
     segment = adapter.read_recording_directory(rec)
     # start_time should NOT be wall-clock-now (within a second of test start)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     assert abs((segment.start_time - now).total_seconds()) > 60 * 60 * 24
     # Should be tz-aware
     assert segment.start_time.tzinfo is not None

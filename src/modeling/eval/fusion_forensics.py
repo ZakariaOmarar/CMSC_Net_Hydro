@@ -58,9 +58,9 @@ Outputs (paths fixed for the current run; edit `RUN_DIR` to retarget):
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Iterable
 
 import numpy as np
 import torch
@@ -77,7 +77,6 @@ from ..context.v2_ssl import (
     _PairedSegment,
     _PairedWindowedDataset,
 )
-
 
 REPO = Path(__file__).resolve().parents[3]
 RUN_DIR = REPO / "results" / "runs" / "20260515_064625__full_seed42"

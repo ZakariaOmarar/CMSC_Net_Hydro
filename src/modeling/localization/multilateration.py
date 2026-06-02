@@ -23,9 +23,9 @@ Pipeline:
      Y. T. Chan & K. C. Ho, "A simple and efficient estimator for
      hyperbolic location", IEEE TSP 42(8), 1905-1915, 1994.
   3. **L-BFGS-B non-linear refinement** of the closed-form initial estimate
-     against the same residual `tdoa_triangulate` uses
-     ([localization_head.py:790-859](../localization_head.py)), with
-     accelerometer-pair geometry and the steel wave-speed.
+     against the hyperbolic TDOA residual (predicted minus measured
+     path-difference), with accelerometer-pair geometry and the rig's
+     structure-borne wave-speed.
 
 Returns the refined `(x, y, z)` plus a confidence proxy (final residual
 sum-of-squares).
@@ -42,8 +42,7 @@ from itertools import combinations
 
 import numpy as np
 
-from .localization_head import gcc_phat
-
+from .classical import gcc_phat
 
 # Wave-speed default for the 3D-printed PLA/ABS bench-top rig.  The
 # prior `C_STEEL_MS = 5100` constant was removed (2026-05-20): the rig
@@ -164,7 +163,7 @@ def _chan_ho_initial_estimate(
     # Build A · [x, y, z, R_0]^T = b.
     A_rows: list[np.ndarray] = []
     b_rows: list[float] = []
-    for k, (i, j) in ref_pairs:
+    for k, (_i, j) in ref_pairs:
         # i == 0, j != 0
         xj = sensor_xyz[j]
         r_j0 = float(c * tdoa_s[k])  # path-diff r_j - r_0 in metres
@@ -193,10 +192,10 @@ def _refine_lbfgs(
 ) -> tuple[np.ndarray, float]:
     """L-BFGS-B refinement of the Chan-Ho initial estimate.
 
-    Mirrors `tdoa_triangulate`'s residual / Jacobian formulation but takes
-    pairs + TDOAs directly (rather than a `gcc_stack` — we already have
-    sub-sample-refined TDOAs and don't want to throw that resolution away
-    by re-running an integer argmax inside the refinement).
+    Minimises the hyperbolic TDOA residual but takes pairs + TDOAs directly
+    (rather than a `gcc_stack` — we already have sub-sample-refined TDOAs and
+    don't want to throw that resolution away by re-running an integer argmax
+    inside the refinement).
     """
     from scipy.optimize import minimize  # type: ignore[import-untyped]
 
@@ -304,7 +303,7 @@ def accel_tdoa_multilateration_v0(
 
 
 __all__ = [
+    "C_PLASTIC_3DP_MS",
     "accel_tdoa_multilateration_v0",
     "estimate_pairwise_tdoas",
-    "C_PLASTIC_3DP_MS",
 ]

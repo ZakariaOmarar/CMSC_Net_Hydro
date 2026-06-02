@@ -109,7 +109,7 @@ class PositionRegistry:
     @classmethod
     def from_source(
         cls, position_source: str, position_path: Path | None = None
-    ) -> "PositionRegistry":
+    ) -> PositionRegistry:
         """Dispatch on `position_source` enum (single source: `DatasetMetadata`).
 
         Parsers are keyed by data layout, not by dataset id — so D3, D4, D5
@@ -268,10 +268,8 @@ def _parse_d3_position_json(path: Path) -> list[SensorPosition]:
 
 def _illwerke_geometry() -> list[SensorPosition]:
     sensors: list[SensorPosition] = []
-    for xyz in mic_cartesian_positions():
-        # Use the SENSOR_LAYOUT name (e.g., "L1_0") as the canonical id, looked up
-        # by channel index.
-        pass
+    # Mic ids are the SENSOR_LAYOUT names (e.g. "L1_0"), paired with the
+    # Cartesian positions in channel order.
     mic_records = (
         SENSOR_LAYOUT["microphones"]["level_1"]
         + SENSOR_LAYOUT["microphones"]["level_2"]
@@ -297,4 +295,4 @@ def _illwerke_geometry() -> list[SensorPosition]:
     return sensors
 
 
-__all__ = ["SensorPosition", "PositionRegistry"]
+__all__ = ["PositionRegistry", "SensorPosition"]

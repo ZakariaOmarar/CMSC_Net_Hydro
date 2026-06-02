@@ -30,7 +30,6 @@ from src.modeling.encoders.pooling import (
     AttentiveStatsPool2d,
 )
 
-
 # ---------------------------------------------------------------------------
 # Shape invariance across input lengths
 # ---------------------------------------------------------------------------
@@ -145,11 +144,11 @@ def test_asp1d_rejects_non_positive_reduction() -> None:
 
 def test_asp2d_rejects_wrong_input_rank() -> None:
     pool = AttentiveStatsPool2d(channels=8)
-    with pytest.raises(ValueError, match="expects.*B, C, F, T"):
+    with pytest.raises(ValueError, match=r"expects.*B, C, F, T"):
         pool(torch.randn(4, 8, 10))
 
 
 def test_asp1d_rejects_wrong_input_rank() -> None:
     pool = AttentiveStatsPool1d(channels=8)
-    with pytest.raises(ValueError, match="expects.*B, C, T"):
+    with pytest.raises(ValueError, match=r"expects.*B, C, T"):
         pool(torch.randn(4, 8, 10, 5))

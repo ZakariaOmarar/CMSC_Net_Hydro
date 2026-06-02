@@ -17,7 +17,7 @@ uninterpretable, but `alert_rate_per_recording` is a clean signal of
 "how anomaly-like is this recording in V3's eyes."
 
 Run:
-    python -m scripts.v3_diagnostic
+    python -m scripts.diagnostics.v3_diagnostic
 """
 
 from __future__ import annotations
@@ -35,13 +35,12 @@ from src.modeling.context.v2_ssl import _gather_paired_segments
 from src.modeling.localization.v4_features import GridSpec
 from src.modeling.localization.v4_trainer import precompute_v4_samples
 from src.modeling.orchestration.full_run import (
+    _d3_spatial_overrides,
     _resolved_loader,
     _v2_cfg,
-    _d3_spatial_overrides,
 )
 
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 RESULTS = REPO_ROOT / "results" / "full_run"
 
 

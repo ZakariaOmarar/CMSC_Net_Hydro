@@ -47,7 +47,7 @@ def compute_log_mel_spectrogram(
         n_fft: STFT window length (samples).  These are the bare function
             defaults; the pipeline passes the empirically-selected values from
             `src.config.architecture.ACOUSTIC_FEATURES` (n_fft=4096) — see
-            chapter 3 §3.4.2 and `scripts/analyze_hop_length_full_grid.py`.
+            chapter 3 §3.4.2 and `scripts/hop_length_study/analyze_hop_length_full_grid.py`.
         hop_length: STFT hop length (samples).  Pipeline value comes from
             `ACOUSTIC_FEATURES.hop_length` (2048); the grid sweep showed the
             downstream tasks are insensitive to hop once n_fft and n_mels are
@@ -275,4 +275,4 @@ def _linear_resize_freq(arr: np.ndarray, target_F: int) -> np.ndarray:
     return out
 
 
-__all__ = ["compute_log_mel_spectrogram", "compute_encoder_input_stack"]
+__all__ = ["compute_encoder_input_stack", "compute_log_mel_spectrogram"]

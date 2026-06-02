@@ -26,7 +26,7 @@ Output: ``results/runs/<timestamp>__v1v2_only_<variant>/`` with
 
 Run::
 
-    python -m scripts.run_v1_v2_only --variant b5_cma
+    python -m scripts.campaigns.run_v1_v2_only --variant b5_cma
 """
 
 from __future__ import annotations
@@ -39,19 +39,19 @@ from pathlib import Path
 
 import torch
 
+from src.modeling.context.modality_probe import run_modality_balance_probe
+
 # Re-use the canonical config builders + training helpers from the orchestrator
 # so the V1+V2-only path is byte-equivalent except for the named intervention.
-from src.modeling.context.v1_ssl import train_v1_per_modality, V1SSLConfig
+from src.modeling.context.v1_ssl import V1SSLConfig, train_v1_per_modality
 from src.modeling.context.v2_ssl import V2SSLConfig, train_v2_fusion
-from src.modeling.context.modality_probe import run_modality_balance_probe
 from src.modeling.orchestration.full_run import (
     _resolved_loader,
     _v1_cfg,
     _v2_cfg,
 )
 
-
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 
 
 def _apply_variant(

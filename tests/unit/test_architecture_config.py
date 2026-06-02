@@ -8,7 +8,6 @@ publication architecture has drifted from its documented design.
 
 from __future__ import annotations
 
-
 from src.config.architecture import (
     ACOUSTIC_CWT,
     ACOUSTIC_FEATURES,
@@ -21,7 +20,6 @@ from src.config.architecture import (
     WINDOWING,
 )
 from src.config.dataset_registry import REGISTRY
-
 
 # ---------------------------------------------------------------------------
 # 1 · Acquisition: per-dataset rates and formats (registry-sourced)
@@ -67,7 +65,7 @@ def test_d4_and_d5_ship_raw_vibration() -> None:
 def test_stft_bin_width_resolves_rotor_pole_vs_vane_pass() -> None:
     """STFT bin width must be ≤ 17 Hz (100 Hz rotor-pole − 117 Hz vane-pass).
 
-    The empirical sweep (chapter 3 §3.4.2 + scripts/analyze_hop_length_full_grid.py)
+    The empirical sweep (chapter 3 §3.4.2 + scripts/hop_length_study/analyze_hop_length_full_grid.py)
     showed n_fft=1024 (bin width 15.6 Hz) does NOT cleanly separate the two
     tones; only n_fft >= 2048 (bin width ≤ 7.8 Hz) does.  The publication
     pick is n_fft=4096 (bin width 3.9 Hz) for maximum AUC on the D2/D3

@@ -22,13 +22,12 @@ import numpy as np
 from src.ingestion.sync_verification import (
     SyncCorrectionReport,
     SyncStabilityResult,
+    _fractional_sample_shift,  # private but useful
     apply_sync_correction,
     auto_sync_paired_recording,
     verify_paired_sync,
     verify_sync_stability,
 )
-from src.ingestion.sync_verification import _fractional_sample_shift  # private but useful
-
 
 # ---------------------------------------------------------------------------
 # Synthetic-signal helpers

@@ -1,9 +1,9 @@
 # pyright: reportMissingImports=false
 """Localization sub-package.
 
-`localization_head` ships the classical primitives (GCC-PHAT, SRP-PHAT,
-ROW II reference geometry).  `v4_features`, `v4_loc_head`, and `v4_trainer`
-add the V4 anomaly-gated learning-based localization head.
+`classical` ships the classical signal-processing primitives (GCC-PHAT,
+SRP-PHAT).  `v4_features`, `v4_loc_head`, and `v4_trainer` add the V4
+anomaly-gated learning-based localization head.
 """
 
 from .v4_features import (
@@ -39,9 +39,9 @@ from .v4_trainer import (
 )
 
 __all__ = [
-    "AlertBurst",
     "C_AIR_MS",
     "C_PLASTIC_3DP_MS",
+    "AlertBurst",
     "FiLMResidualHead",
     "GridSpec",
     "HeatmapCross3D",

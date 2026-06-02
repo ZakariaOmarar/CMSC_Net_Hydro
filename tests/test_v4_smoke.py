@@ -46,7 +46,6 @@ from src.modeling.localization import (
 )
 from src.modeling.localization.v4_trainer import _grid_coords_from_spec
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 pytestmark = pytest.mark.requires_data
@@ -410,7 +409,7 @@ def test_train_v4_end_to_end_with_synthetic_labels() -> None:
         assert float(np.abs(result.val_residuals).max()) <= 0.20 + 1e-5
         # Per-recording breakdown is populated for every val recording.
         assert set(result.val_recording_breakdown.keys()) == set(result.val_recording_ids)
-        for k, row in result.val_recording_breakdown.items():
+        for _k, row in result.val_recording_breakdown.items():
             assert row["n"] >= 1
             assert np.isfinite(row["mae_3d"])
             assert len(row["target_xyz"]) == 3

@@ -29,7 +29,6 @@ from src.modeling.context.cluster_metric import (
 from src.modeling.context.v1_ssl import V1SSLConfig, train_v1_per_modality
 from src.modeling.encoders.per_modality import PerModalityEncoder
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 pytestmark = pytest.mark.requires_data

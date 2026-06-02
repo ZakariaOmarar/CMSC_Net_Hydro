@@ -324,9 +324,9 @@ class V4LocalizationHead(nn.Module):
 
 
 __all__ = [
+    "FiLMResidualHead",
     "HeatmapCross3D",
     "TDOASetEncoder",
-    "FiLMResidualHead",
     "V4LocalizationHead",
     "soft_argmax_3d",
 ]

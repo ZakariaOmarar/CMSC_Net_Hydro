@@ -35,7 +35,6 @@ from src.modeling.localization import (
 )
 from src.modeling.streaming import GatedPipeline, cost_quality_study
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 pytestmark = pytest.mark.requires_data

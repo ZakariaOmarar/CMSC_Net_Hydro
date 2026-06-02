@@ -24,9 +24,9 @@ Cells:
 
 Run::
 
-    python -m scripts.v3_deep_sweep --encoder-run results/runs/<best_encoder_dir>
-    python -m scripts.v3_deep_sweep --encoder-run <dir> --cell v3_d2_w5
-    python -m scripts.v3_deep_sweep --encoder-run <dir> --cell v3_d2_w5 --all-paradigms
+    python -m scripts.sweeps.v3_deep_sweep --encoder-run results/runs/<best_encoder_dir>
+    python -m scripts.sweeps.v3_deep_sweep --encoder-run <dir> --cell v3_d2_w5
+    python -m scripts.sweeps.v3_deep_sweep --encoder-run <dir> --cell v3_d2_w5 --all-paradigms
 """
 
 from __future__ import annotations
@@ -57,7 +57,6 @@ from src.modeling.orchestration.full_run import (
     _v2_cfg,
     _v3_cfg,
 )
-
 
 _DROPOUT_LEVELS = {"d0": 0.0, "d1": 0.1, "d2": 0.2, "d3": 0.3}
 _WD_LEVELS = {"w4": 1e-4, "w5": 5e-4, "w3": 1e-3}

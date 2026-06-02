@@ -18,7 +18,7 @@ mixtures to confirm the n_fft frequency-bin argument.
 Designed to run in ~5–10 minutes on CPU with no model training.
 
 Usage:
-    python -m scripts.analyze_hop_length_empirical
+    python -m scripts.hop_length_study.analyze_hop_length_empirical
 """
 
 from __future__ import annotations
@@ -29,12 +29,11 @@ from pathlib import Path
 
 import numpy as np
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
 from src.features.audio_spectral import compute_log_mel_spectrogram
 from src.ingestion.test_dataset_loader import DatasetSpec, TestDatasetLoader
-
 
 # Configurations to sweep — (n_fft, hop_length).
 SWEEP = [
@@ -99,7 +98,7 @@ def test_tone_resolution_two_sines() -> None:
         )
         log(
             f"{n_fft:>6d} {bin_width:>13.2f}  {'YES' if resolved else 'NO':>16}  "
-            f"{str(peak_freqs):>22}"
+            f"{peak_freqs!s:>22}"
         )
 
 
@@ -409,7 +408,7 @@ def main() -> int:
     results_knock: dict = {}  # keyed by (dataset_id, n_fft, hop)
     log(f"{'ds':>3} {'n_fft':>6} {'hop':>5} {'frame_rate':>11} {'anom_T':>8} "
         f"{'SNR_db':>10} {'contrast_db':>13}")
-    for ds_id, (anom, healthy, meta) in pairs.items():
+    for ds_id, (anom, healthy, _meta) in pairs.items():
         for n_fft, hop in SWEEP:
             res = evaluate_knock_snr(anom, healthy, n_fft, hop)
             results_knock[(ds_id, n_fft, hop)] = res

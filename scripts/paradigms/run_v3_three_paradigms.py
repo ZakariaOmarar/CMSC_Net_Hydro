@@ -26,7 +26,7 @@ Inputs (CLI):
 
 Run::
 
-    python -m scripts.run_v3_three_paradigms --from-run results/runs/<id>
+    python -m scripts.paradigms.run_v3_three_paradigms --from-run results/runs/<id>
 """
 
 from __future__ import annotations
@@ -46,14 +46,13 @@ from src.modeling.anomaly.v3_per_modality import (
     V3VibrationOnlyAdapter,
 )
 from src.modeling.anomaly.v3_trainer import V3Config, V3Result, train_v3_cnf
+from src.modeling.context.v1_ssl import V1SSLConfig
 from src.modeling.context.v2_fusion import V2FusionEncoder
 from src.modeling.context.v2_ssl import V2SSLConfig
-from src.modeling.context.v1_ssl import V1SSLConfig
 from src.modeling.encoders.per_modality import PerModalityEncoder
 from src.modeling.orchestration.full_run import _resolved_loader, _v1_cfg, _v2_cfg, _v3_cfg
 
-
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 
 
 def _build_v1_encoder(modality: str, v1_cfg: V1SSLConfig) -> PerModalityEncoder:

@@ -41,11 +41,11 @@ Pre-registered decision rule (applied by analyze_hop_ablation.py):
 Usage
 -----
 Pilot (single seed, fast):
-  python scripts/ablation_hop_length.py --seeds 0 --quick --datasets d4 \\
+  python scripts/hop_length_study/ablation_hop_length.py --seeds 0 --quick --datasets d4 \\
       --conditions default,naive_match,coherent_fast
 
 Full (3 seeds):
-  python scripts/ablation_hop_length.py --seeds 0,1,2 --datasets d4 \\
+  python scripts/hop_length_study/ablation_hop_length.py --seeds 0,1,2 --datasets d4 \\
       --conditions default,naive_match,coherent_fast
 
 Output: results/ablation_hop/<timestamp>/{metrics.csv, run_log.txt, per_run/*.json}
@@ -69,10 +69,10 @@ from src.modeling.anomaly.synthetic_eval import evaluate_synthetic_anomaly_auc
 from src.modeling.anomaly.v3_trainer import _extract_xc, train_v3_cnf
 from src.modeling.context.v1_ssl import train_v1_per_modality
 from src.modeling.context.v2_ssl import (
-    _PairedGroupedBatchSampler,
-    _PairedWindowedDataset,
     _collate,
     _gather_paired_segments,
+    _PairedGroupedBatchSampler,
+    _PairedWindowedDataset,
     _split_segments_by_recording,
     train_v2_fusion,
 )
@@ -83,7 +83,7 @@ from src.modeling.orchestration.full_run import (
     _v3_cfg,
 )
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 
 
 # ----------------------------------------------------------------------------
@@ -397,7 +397,7 @@ def main() -> None:
                 log(traceback.format_exc())
 
     log(f"\nAll runs complete. CSV: {csv_path}")
-    log("Next: python scripts/analyze_hop_ablation.py --csv " + str(csv_path))
+    log("Next: python scripts/hop_length_study/analyze_hop_ablation.py --csv " + str(csv_path))
 
 
 if __name__ == "__main__":

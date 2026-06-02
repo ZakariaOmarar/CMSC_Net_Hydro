@@ -33,15 +33,15 @@ Wall-clock estimate: ~7-12 hours (baseline ~6h at hop=512; hop=43 V1+V2
 
 Usage::
 
-    python scripts/full_run_hop43.py            # full pipeline
-    python scripts/full_run_hop43.py --quick    # smoke test of the wrapper
+    python scripts/hop_length_study/full_run_hop43.py            # full pipeline
+    python scripts/hop_length_study/full_run_hop43.py --quick    # smoke test of the wrapper
 
 Memory note
 -----------
 At hop=43 the in-memory acoustic feature cache is ~12x larger than at
 hop=512.  The full pipeline trains on D1+D2+D3+D4 with V1 precomputation;
 peak RAM may exceed 30 GB.  If the process OOMs, the cleanest fallback is
-``python scripts/full_run_hop43.py --only-datasets d4`` (matches the
+``python scripts/hop_length_study/full_run_hop43.py --only-datasets d4`` (matches the
 ``--only-datasets`` semantics of ``full_run.py``).
 """
 
@@ -53,12 +53,11 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from src.modeling.orchestration import full_run as fr  # noqa: E402
-
+from src.modeling.orchestration import full_run as fr
 
 HOP_NEW = 43
 N_FFT_NEW = 1024

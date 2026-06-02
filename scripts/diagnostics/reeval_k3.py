@@ -9,7 +9,7 @@ exclusively from Pump / Standstill / Turbine recordings, runs K-means(k=3)
 on `c_t`, Hungarian-matches to those three labels, and reports purity.
 
 Run:
-    python -m scripts.reeval_k3
+    python -m scripts.diagnostics.reeval_k3
 """
 
 from __future__ import annotations
@@ -25,15 +25,14 @@ from src.modeling.context.cluster_metric import cluster_purity_and_nmi
 from src.modeling.context.v2_fusion import V2FusionEncoder
 from src.modeling.context.v2_ssl import (
     V2SSLConfig,
-    _PairedGroupedBatchSampler,
-    _PairedWindowedDataset,
     _collate,
     _gather_paired_segments,
+    _PairedGroupedBatchSampler,
+    _PairedWindowedDataset,
 )
 from src.modeling.orchestration.full_run import _resolved_loader, _v2_cfg
 
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 RESULTS = REPO_ROOT / "results" / "full_run"
 HEALTHY_MODES_K3 = ("Pump", "Standstill", "Turbine")
 

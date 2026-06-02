@@ -17,7 +17,6 @@ from src.features.vibration_temporal import (
 )
 from src.ingestion.test_dataset_loader import DatasetSpec, TestDatasetLoader
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 pytestmark = pytest.mark.requires_data

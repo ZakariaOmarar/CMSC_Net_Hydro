@@ -29,7 +29,6 @@ from src.modeling.context.v2_ssl import V2SSLConfig, train_v2_fusion
 from src.modeling.encoders import PerModalityEncoder
 from src.modeling.fusion import BidirectionalCrossAttention
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 pytestmark = pytest.mark.requires_data

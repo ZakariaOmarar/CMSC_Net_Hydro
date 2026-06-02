@@ -30,8 +30,8 @@ no new data.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable
 
 import numpy as np
 import torch
@@ -42,10 +42,10 @@ from .cluster_metric import cluster_purity_and_nmi
 from .v2_fusion import V2FusionEncoder
 from .v2_ssl import (
     V2SSLConfig,
+    _collate,
     _PairedGroupedBatchSampler,
     _PairedSegment,
     _PairedWindowedDataset,
-    _collate,
 )
 
 

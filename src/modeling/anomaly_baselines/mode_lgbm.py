@@ -22,13 +22,13 @@ Training:
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import numpy as np
 import torch  # noqa: F401  # keeps deterministic seeding consistent with lstm_ae.py
-
 from scipy.stats import kurtosis as _kurtosis
 
 from ...features.audio_spectral import compute_log_mel_spectrogram
@@ -36,7 +36,6 @@ from ...ingestion.test_dataset_loader import (
     TestDatasetLoader,
     TestDatasetSegment,
 )
-
 
 # ---------------------------------------------------------------------------
 # Config
@@ -272,7 +271,7 @@ def _stratified_split_by_recording(
         by_label.setdefault(rec_to_label[r], []).append(r)
     train_ids: set[str] = set()
     val_ids: set[str] = set()
-    for lbl, recs in by_label.items():
+    for _lbl, recs in by_label.items():
         recs_shuffled = list(recs)
         rng.shuffle(recs_shuffled)
         if len(recs_shuffled) <= 1:
@@ -330,7 +329,7 @@ def train_v0_mode_lgbm(
     # Adapt to present classes only.  `y` carries indices into
     # `cfg.target_classes`; we remap to a contiguous index space over the
     # subset that actually appears in this campaign.
-    present_label_indices = sorted(set(int(v) for v in y))
+    present_label_indices = sorted({int(v) for v in y})
     present_classes = tuple(cfg.target_classes[i] for i in present_label_indices)
     if len(present_classes) < 2:
         raise RuntimeError(
@@ -399,10 +398,10 @@ def train_v0_mode_lgbm(
             probs = np.stack([1.0 - probs, probs], axis=1)
         y_pred = np.argmax(probs, axis=1)
         macro_f1, per_class, cm = _macro_f1(y_val, y_pred, len(present_classes))
-        per_class_dict = {c: f for c, f in zip(present_classes, per_class)}
+        per_class_dict = dict(zip(present_classes, per_class))
     else:
         macro_f1 = 0.0
-        per_class_dict = {c: 0.0 for c in present_classes}
+        per_class_dict = dict.fromkeys(present_classes, 0.0)
         cm = np.zeros((len(present_classes), len(present_classes)), dtype=np.int64)
 
     return ModeTrainResult(
@@ -456,9 +455,9 @@ def predict_modes(
 
 
 __all__ = [
-    "V0ModeConfig",
     "ModeTrainResult",
+    "V0ModeConfig",
     "extract_mode_features",
-    "train_v0_mode_lgbm",
     "predict_modes",
+    "train_v0_mode_lgbm",
 ]

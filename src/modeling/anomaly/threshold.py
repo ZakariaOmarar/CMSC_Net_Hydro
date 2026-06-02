@@ -52,7 +52,7 @@ class PerClusterThresholds:
         *,
         n_clusters: int = 4,
         seed: int = 0,
-    ) -> "PerClusterThresholds":
+    ) -> PerClusterThresholds:
         contexts = np.asarray(contexts, dtype=np.float64)
         scores = np.asarray(scores, dtype=np.float64).ravel()
         if contexts.ndim != 2:
@@ -143,7 +143,7 @@ class PerClusterThresholds:
         healthy_scores_for_calibration: np.ndarray | None = None,
         *,
         target: str = "youden_j",
-    ) -> "PerClusterThresholds":
+    ) -> PerClusterThresholds:
         """**Analysis helper — not used for headline thresholds.**
 
         Fits a per-cluster threshold that maximises Youden's J on a "known

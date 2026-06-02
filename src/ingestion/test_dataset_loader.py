@@ -27,10 +27,11 @@ cross-dataset healthy group as D3/D4 `speed{1,2,3}`.
 
 from __future__ import annotations
 
+import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-import re
-from typing import Any, Iterable
+from typing import Any
 
 import numpy as np
 import yaml
@@ -39,7 +40,6 @@ from ..data import DataSegment
 from .adapters import WavVibrationAdapter, filter_vibration_csv_paths
 from .positions import PositionRegistry
 from .scanner import RecordingGroup, RecordingScanner
-
 
 _KNOWN_MODES = ("Pump", "Standstill", "Turbine", "RandomFault")
 _D2_POS_RE = re.compile(
@@ -88,7 +88,7 @@ class DatasetSpec:
     extra: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def from_yaml(cls, path: Path) -> "DatasetSpec":
+    def from_yaml(cls, path: Path) -> DatasetSpec:
         """Load and resolve all paths to absolute (REPO_ROOT-prefixed)."""
         path = Path(path)
         with path.open("r", encoding="utf-8") as fh:
@@ -140,7 +140,7 @@ class DatasetSpec:
         )
 
     @classmethod
-    def from_metadata(cls, meta) -> "DatasetSpec":
+    def from_metadata(cls, meta) -> DatasetSpec:
         """Build from a ``DatasetMetadata`` returned by the registry."""
         return cls(
             id=meta.id,
@@ -485,4 +485,4 @@ def _parse_labels(
     raise ValueError(f"unknown label_scheme {scheme!r}")
 
 
-__all__ = ["DatasetSpec", "TestDatasetSegment", "TestDatasetLoader"]
+__all__ = ["DatasetSpec", "TestDatasetLoader", "TestDatasetSegment"]

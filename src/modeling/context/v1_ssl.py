@@ -20,8 +20,9 @@ metrics, and the train/val recording IDs.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Iterable, Literal
+from typing import Literal
 
 import numpy as np
 import torch
@@ -39,11 +40,6 @@ from ...config.architecture import (
     WINDOWING,
 )
 from ...config.dataset_registry import REGISTRY
-
-
-def _registry_window_scales() -> dict[str, tuple[float, ...]]:
-    """Per-dataset multi-scale window cadence sourced from the registry."""
-    return {m.id: m.window_scales_seconds for m in REGISTRY}
 from ...features.audio_spectral import compute_encoder_input_stack
 from ...features.vibration_temporal import compute_vibration_input_stack
 from ...ingestion.test_dataset_loader import (
@@ -52,6 +48,11 @@ from ...ingestion.test_dataset_loader import (
 )
 from ..encoders import PerModalityEncoder
 from .cluster_metric import cluster_purity_and_nmi
+
+
+def _registry_window_scales() -> dict[str, tuple[float, ...]]:
+    """Per-dataset multi-scale window cadence sourced from the registry."""
+    return {m.id: m.window_scales_seconds for m in REGISTRY}
 
 
 # ---------------------------------------------------------------------------
@@ -311,7 +312,7 @@ def _resolve_segment_scales(
          is the byte-equivalent path for pre-2026-05-19 configs.
     """
     per_ds = cfg.window_scales_seconds_per_dataset or {}
-    if dataset_id in per_ds and per_ds[dataset_id]:
+    if per_ds.get(dataset_id):
         scales = tuple(float(s) for s in per_ds[dataset_id])
         return scales, float(cfg.window_stride_ratio)
     if cfg.window_scales_seconds:
@@ -471,7 +472,7 @@ class _GroupedBatchSampler(tud.Sampler[list[int]]):
 
     def __init__(
         self,
-        dataset: "_WindowedFeatureDataset",
+        dataset: _WindowedFeatureDataset,
         batch_size: int,
         shuffle: bool,
         seed: int = 0,
@@ -725,7 +726,7 @@ def _split_segments_by_recording(
     val_keys: set = set()
     time_split_train: list[_PrecomputedSegment] = []
     time_split_val: list[_PrecomputedSegment] = []
-    for lbl, recs in by_label.items():
+    for recs in by_label.values():
         recs_shuffled = list(recs)
         rng.shuffle(recs_shuffled)
         if len(recs_shuffled) == 1:
@@ -1040,8 +1041,8 @@ def evaluate_sanity_gate(
 
 
 __all__ = [
-    "V1SSLConfig",
     "V1Result",
-    "train_v1_per_modality",
+    "V1SSLConfig",
     "evaluate_sanity_gate",
+    "train_v1_per_modality",
 ]

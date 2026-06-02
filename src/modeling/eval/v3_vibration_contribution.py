@@ -59,7 +59,6 @@ from ..context.v2_ssl import (
 )
 from ..eval.statistics import paired_bootstrap_test
 
-
 REPO = Path(__file__).resolve().parents[3]
 RUN_DIR = REPO / "results" / "runs" / "20260515_064625__full_seed42"
 V2_WEIGHTS = RUN_DIR / "v2" / "encoder.pt"
@@ -495,7 +494,7 @@ def main() -> None:
         n_windows=int(s_full_h.size),
         alert_rate_full=float(a_full_h.mean()) if a_full_h.size else 0.0,
         alert_rate_vib_zeroed=float(a_vibz_h.mean()) if a_vibz_h.size else 0.0,
-        alert_rate_delta=float((a_full_h.mean() - a_vibz_h.mean())) if a_full_h.size else 0.0,
+        alert_rate_delta=float(a_full_h.mean() - a_vibz_h.mean()) if a_full_h.size else 0.0,
         mean_score_full=float(s_full_h.mean()) if s_full_h.size else 0.0,
         mean_score_vib_zeroed=float(s_vibz_h.mean()) if s_vibz_h.size else 0.0,
         mean_score_delta=float(s_full_h.mean() - s_vibz_h.mean()) if s_full_h.size else 0.0,

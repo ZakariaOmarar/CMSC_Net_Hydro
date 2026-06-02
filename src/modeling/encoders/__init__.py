@@ -23,10 +23,10 @@ from .set_transformer import (
 )
 
 __all__ = [
-    "Acoustic2DCNN",
-    "ChannelTokenEnricher",
     "MAB",
     "PMA",
+    "Acoustic2DCNN",
+    "ChannelTokenEnricher",
     "PerModalityEncoder",
     "Vibration1DCNN",
 ]

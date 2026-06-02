@@ -40,13 +40,13 @@ Cell IDs (the cartesian axes):
 
 Output: ``results/runs/<ts>__ablation_<cell>_s<seed>[/{v3,v4}_skipped]/``
 with ``metrics.json`` + ``cell_config.json`` documenting the overrides
-applied.  Use ``scripts/analyze_ablation.py`` to aggregate cells.
+applied.  Use ``scripts/campaigns/analyze_ablation.py`` to aggregate cells.
 
 Run::
 
-    python -m scripts.ablation_full_pipeline --cell p2_a1_v5 --skip-v3 --skip-v4
-    python -m scripts.ablation_full_pipeline --cell p3_m2_e64 --base-cell p2_a1_v5 --skip-v3 --skip-v4
-    python -m scripts.ablation_full_pipeline --cell p2_a1_v5             # full pipeline
+    python -m scripts.campaigns.ablation_full_pipeline --cell p2_a1_v5 --skip-v3 --skip-v4
+    python -m scripts.campaigns.ablation_full_pipeline --cell p3_m2_e64 --base-cell p2_a1_v5 --skip-v3 --skip-v4
+    python -m scripts.campaigns.ablation_full_pipeline --cell p2_a1_v5             # full pipeline
 """
 
 from __future__ import annotations
@@ -60,9 +60,9 @@ from pathlib import Path
 
 import torch
 
+from src.modeling.context.modality_probe import run_modality_balance_probe
 from src.modeling.context.v1_ssl import V1SSLConfig, train_v1_per_modality
 from src.modeling.context.v2_ssl import V2SSLConfig, train_v2_fusion
-from src.modeling.context.modality_probe import run_modality_balance_probe
 from src.modeling.orchestration.full_run import (
     _resolved_loader,
     _v1_cfg,
@@ -71,8 +71,7 @@ from src.modeling.orchestration.full_run import (
     _v4_cfg,
 )
 
-
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 
 
 # ---------------------------------------------------------------------------
@@ -498,9 +497,9 @@ def main() -> None:
     # Monkey-patch the builders to return our cell-mutated cfgs.  This is a
     # surgical override; the orchestrator otherwise behaves identically.
     _orig_v1, _orig_v2, _orig_v3, _orig_v4 = _fr._v1_cfg, _fr._v2_cfg, _fr._v3_cfg, _fr._v4_cfg
-    _fr._v1_cfg = lambda quick: v1_cfg  # noqa: E731
-    _fr._v2_cfg = lambda quick: v2_cfg  # noqa: E731
-    _fr._v3_cfg = lambda quick: v3_cfg  # noqa: E731
+    _fr._v1_cfg = lambda quick: v1_cfg
+    _fr._v2_cfg = lambda quick: v2_cfg
+    _fr._v3_cfg = lambda quick: v3_cfg
     _fr._v4_cfg = lambda quick, scada_dim=0, unconditional=False: replace(
         v4_cfg, scada_dim=scada_dim, unconditional=unconditional,
     )

@@ -79,9 +79,10 @@ def compute_cwt_scalogram(
     # energy above `decimate_to_hz / 2` is removed cleanly — consistent
     # with ``min_freq_hz`` and the 250 Hz upper edge of our scale grid.
     if decimate_to_hz is not None and fs > decimate_to_hz:
-        from scipy.signal import resample_poly
         # Greatest-common-divisor-based ratio to keep up/down small.
         from math import gcd
+
+        from scipy.signal import resample_poly
         target = int(decimate_to_hz)
         g = gcd(int(fs), target)
         up = target // g

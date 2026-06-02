@@ -188,6 +188,6 @@ def evaluate_burst_localization(
 __all__ = [
     "AlertBurst",
     "detect_alert_bursts",
-    "smooth_predictions_over_bursts",
     "evaluate_burst_localization",
+    "smooth_predictions_over_bursts",
 ]

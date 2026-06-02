@@ -11,8 +11,9 @@ same 95th/99th-percentile logic as `src/modeling/mode/p5_anomaly/per_mode_baseli
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import Any
 
 import numpy as np
 import torch
@@ -25,7 +26,6 @@ from ...ingestion.test_dataset_loader import (
     TestDatasetLoader,
     TestDatasetSegment,
 )
-
 
 # ---------------------------------------------------------------------------
 # Config
@@ -367,7 +367,7 @@ def train_v0_lstm_ae(
     train_history: list[float] = []
     val_history: list[float] = []
 
-    for epoch in range(cfg.epochs):
+    for _epoch in range(cfg.epochs):
         model.train()
         epoch_train = 0.0
         n_train = 0
@@ -448,10 +448,10 @@ def score_recordings(
 
 
 __all__ = [
-    "V0Config",
     "LSTMAutoencoderV0",
     "TrainResult",
+    "V0Config",
     "extract_log_mel_windows",
-    "train_v0_lstm_ae",
     "score_recordings",
+    "train_v0_lstm_ae",
 ]

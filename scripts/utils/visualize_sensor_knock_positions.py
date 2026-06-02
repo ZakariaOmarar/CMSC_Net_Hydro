@@ -16,9 +16,9 @@ boxes, and which knocks fall outside the sensor footprint). Nothing here
 loads waveforms, so it runs in well under a second.
 
 Usage:
-    python -m scripts.visualize_sensor_knock_positions
-    python -m scripts.visualize_sensor_knock_positions --show
-    python -m scripts.visualize_sensor_knock_positions --out my_figure.png
+    python -m scripts.utils.visualize_sensor_knock_positions
+    python -m scripts.utils.visualize_sensor_knock_positions --show
+    python -m scripts.utils.visualize_sensor_knock_positions --out my_figure.png
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ from pathlib import Path
 
 import numpy as np
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # All three circular-rig campaigns reuse the D3 position.json. D5 ships its
 # own copy (identical content); we read whichever the campaign points at.
@@ -160,7 +160,6 @@ def print_summary(sensors: Sensors, knocks_by_campaign: dict[str, list[Knock]]) 
           f"z [{lo[2]:.1f}, {hi[2]:.1f}]   extent = {hi - lo}")
 
     print("\n=== Knock positions (cm) ===")
-    all_knocks = []
     for name, knocks in knocks_by_campaign.items():
         print(f"  {name}: {len(knocks)} positions")
         for k in knocks:
@@ -238,7 +237,9 @@ def plot(sensors: Sensors, knocks_by_campaign: dict[str, list[Knock]], out: Path
         if knocks_by_campaign.get(name):
             ax3d.scatter([], [], [], c=cfg["colour"], marker=cfg["marker"], s=90,
                          label=f"{name} knock")
-    ax3d.set_xlabel("x (cm)"); ax3d.set_ylabel("y (cm)"); ax3d.set_zlabel("z (cm)")
+    ax3d.set_xlabel("x (cm)")
+    ax3d.set_ylabel("y (cm)")
+    ax3d.set_zlabel("z (cm)")
     ax3d.set_title("3D view")
     ax3d.legend(loc="upper left", fontsize=7)
 
@@ -250,7 +251,9 @@ def plot(sensors: Sensors, knocks_by_campaign: dict[str, list[Knock]], out: Path
     ):
         draw_sensors(ax, ix, iy, annotate=(ax is ax_xy))
         draw_knocks(ax, ix, iy)
-        ax.set_xlabel(xl); ax.set_ylabel(yl); ax.set_title(title)
+        ax.set_xlabel(xl)
+        ax.set_ylabel(yl)
+        ax.set_title(title)
         ax.axhline(0, color="0.85", lw=0.8, zorder=0)
         ax.axvline(0, color="0.85", lw=0.8, zorder=0)
         ax.set_aspect("equal", adjustable="datalim")

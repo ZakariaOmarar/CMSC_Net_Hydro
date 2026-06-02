@@ -15,9 +15,10 @@ Two ablation knobs:
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Iterable, Literal
+from typing import Literal
 
 import numpy as np
 import torch
@@ -31,18 +32,17 @@ from ...ingestion.test_dataset_loader import TestDatasetLoader
 from ..context.v2_fusion import V2FusionEncoder
 from ..context.v2_ssl import (
     V2SSLConfig,
+    _collate,
+    _gather_paired_segments,
     _PairedGroupedBatchSampler,
     _PairedSegment,
     _PairedWindowedDataset,
-    _collate,
-    _gather_paired_segments,
     _precompute_paired,
     _split_segments_by_recording,
 )
 from ..encoders.set_transformer import PMA
 from .cnf_head import ConditionalRealNVP
 from .threshold import PerClusterThresholds
-
 
 XtPoolKind = Literal["mean", "pma2"]
 
@@ -1092,10 +1092,10 @@ def transition_fpr(
 __all__ = [
     "V3Config",
     "V3Result",
-    "train_v3_cnf",
-    "score_segments",
-    "make_transition_segment",
-    "transition_fpr",
-    "precompute_paired",
     "gate_samples_by_alert",
+    "make_transition_segment",
+    "precompute_paired",
+    "score_segments",
+    "train_v3_cnf",
+    "transition_fpr",
 ]

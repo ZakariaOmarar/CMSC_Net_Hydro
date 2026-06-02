@@ -295,9 +295,9 @@ def sliding_window_v3_inference(
     from ...config import resolve_device
     from ..context.v2_ssl import (
         V2SSLConfig,
+        _collate,
         _PairedGroupedBatchSampler,
         _PairedWindowedDataset,
-        _collate,
     )
     from .v3_trainer import _extract_xc
 
@@ -433,7 +433,7 @@ def v3_real_anomaly_detection(
         matched_pred = [False] * len(pred_intervals)
         for (gs, ge) in gt:
             hit = False
-            for j, (ps, pe, ppk) in enumerate(pred_intervals):
+            for j, (ps, pe, _ppk) in enumerate(pred_intervals):
                 if ps < ge and gs < pe:  # overlap
                     hit = True
                     matched_pred[j] = True

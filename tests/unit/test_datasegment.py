@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import numpy as np
 
@@ -20,7 +20,7 @@ def test_datasegment_from_arrays_basic() -> None:
     seg = DataSegment.from_arrays(
         mic_data=mic,
         accel_data=accel,
-        start_time=datetime(2026, 3, 26, tzinfo=timezone.utc),
+        start_time=datetime(2026, 3, 26, tzinfo=UTC),
         mic_sr=mic_sr,
         accel_sr=accel_sr,
         metadata={"state_code": "TU"},

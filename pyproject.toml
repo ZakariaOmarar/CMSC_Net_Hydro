@@ -23,6 +23,7 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "pytest-cov>=4.1",
+    "ruff>=0.15",
 ]
 dl = [
     "torch>=2.2",
@@ -39,3 +40,41 @@ addopts = "-v --tb=short"
 markers = [
     "requires_data: test needs the real recordings under data/ (auto-skipped if absent)",
 ]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+# Generated artefacts and thesis prose are not source code (and are git-ignored).
+extend-exclude = ["docs", "results", "data"]
+
+[tool.ruff.lint]
+# A focused, high-signal rule set. pycodestyle-naming (N) is deliberately NOT
+# enabled: the modelling code follows maths/ML convention, where single-capital
+# tensor/matrix names (X, W, H, B, C) and signal names (Xi, Xj, G) read more
+# clearly than snake_case and are used consistently throughout.
+select = ["E4", "E7", "E9", "W", "F", "I", "UP", "B", "C4", "RUF"]
+ignore = [
+    # Intentional Unicode in docstrings/comments/strings — the thesis prose
+    # uses §, ×, –, →, ≈, ≳ on purpose.
+    "RUF001", "RUF002", "RUF003",
+    # Explicit int() on NumPy scalars is deliberate (np.int64 → builtin int for
+    # indexing and JSON serialisation).
+    "RUF046",
+    # dict(key=value) is kept where it reads better than a brace literal for
+    # block-style keyword config (e.g. the sync-gate thresholds).
+    "C408",
+    # zip() strictness is decided per call site; some pairings are intentionally
+    # ragged or already length-checked upstream.
+    "B905",
+    # Unpacking every return value documents a function's contract or a tensor's
+    # shape (e.g. `B, T, C = x.shape`) even when one name is locally unused;
+    # renaming those to `_` would lose the dimension labels.
+    "RUF059",
+    # `seq + [item]` is as clear as `[*seq, item]`; not worth rewriting.
+    "RUF005",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Experiment drivers prepend the repo root to sys.path before importing `src`,
+# so their module-level imports legitimately follow that runtime setup.
+"scripts/**" = ["E402"]

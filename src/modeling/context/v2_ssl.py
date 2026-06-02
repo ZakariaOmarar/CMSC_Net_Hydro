@@ -23,8 +23,9 @@ stays identical, but no information flows from the vibration branch.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Iterable, Literal
+from typing import Literal
 
 import numpy as np
 import torch
@@ -43,6 +44,10 @@ from ...config.architecture import (
 )
 from ...config.dataset_registry import REGISTRY
 from ...features.audio_spectral import compute_encoder_input_stack, compute_log_mel_spectrogram
+from ...features.vibration_temporal import compute_vibration_input_stack
+from ...ingestion.test_dataset_loader import TestDatasetLoader, TestDatasetSegment
+from .cluster_metric import cluster_purity_and_nmi
+from .v2_fusion import V2FusionEncoder
 
 
 def _registry_window_scales() -> dict[str, tuple[float, ...]]:
@@ -51,16 +56,12 @@ def _registry_window_scales() -> dict[str, tuple[float, ...]]:
 
 
 # Note: `hop_for_dataset` removed 2026-05-21 after the empirical grid sweep
-# (scripts/analyze_hop_length_full_grid.py + chapter 3 §3.4.2) found that
+# (scripts/hop_length_study/analyze_hop_length_full_grid.py + chapter 3 §3.4.2) found that
 # hop_length contributes < 0.005 ROC AUC across the [32, 4096] range once
 # (n_fft, n_mels) are set correctly.  The previous per-dataset hop plumbing
 # was based on a "cross-modal alignment" intuition that the empirical test
 # refuted.  A single global hop_length=2048 (from ACOUSTIC_FEATURES) is now
 # the architectural choice on all datasets.
-from ...features.vibration_temporal import compute_vibration_input_stack
-from ...ingestion.test_dataset_loader import TestDatasetLoader, TestDatasetSegment
-from .cluster_metric import cluster_purity_and_nmi
-from .v2_fusion import V2FusionEncoder
 
 
 # ---------------------------------------------------------------------------
@@ -301,7 +302,7 @@ def _resolve_paired_segment_scales(
     same precedence as :func:`v1_ssl._resolve_segment_scales`.
     """
     per_ds = cfg.window_scales_seconds_per_dataset or {}
-    if dataset_id in per_ds and per_ds[dataset_id]:
+    if per_ds.get(dataset_id):
         scales = tuple(float(s) for s in per_ds[dataset_id])
         return scales, float(cfg.window_stride_ratio)
     if cfg.window_scales_seconds:
@@ -442,7 +443,7 @@ class _PairedGroupedBatchSampler(tud.Sampler[list[int]]):
 
     def __init__(
         self,
-        dataset: "_PairedWindowedDataset",
+        dataset: _PairedWindowedDataset,
         batch_size: int,
         shuffle: bool,
         seed: int = 0,
@@ -730,7 +731,7 @@ def _split_segments_by_recording(
     val_keys: set = set()
     time_split_train: list[_PairedSegment] = []
     time_split_val: list[_PairedSegment] = []
-    for lbl, recs in by_label.items():
+    for recs in by_label.values():
         recs_shuffled = list(recs)
         rng.shuffle(recs_shuffled)
         if len(recs_shuffled) == 1:
@@ -1109,8 +1110,8 @@ def evaluate_rq1_purity(
 
 
 __all__ = [
-    "V2SSLConfig",
     "V2Result",
-    "train_v2_fusion",
+    "V2SSLConfig",
     "evaluate_rq1_purity",
+    "train_v2_fusion",
 ]

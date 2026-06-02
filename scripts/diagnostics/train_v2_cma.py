@@ -9,7 +9,7 @@ mismatched windows.  Combined with SimCLR-on-c_t and LMM, this gives the
 cross-attention block aligned modality embeddings to fuse.
 
 Run:
-    python -m scripts.train_v2_cma
+    python -m scripts.diagnostics.train_v2_cma
 """
 
 from __future__ import annotations
@@ -24,8 +24,7 @@ import torch
 from src.modeling.context.v2_ssl import V2SSLConfig, train_v2_fusion
 from src.modeling.orchestration.full_run import _resolved_loader, _v2_cfg
 
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def main() -> dict:

@@ -23,8 +23,8 @@ sample arrays still dominate per-cell wall-clock budget.
 
 Run::
 
-    python -m scripts.v4_aug_sweep --baseline-run results/runs/<ts>__baseline_v2
-    python -m scripts.v4_aug_sweep --baseline-run <path> --cell v4_pos5_srp10
+    python -m scripts.sweeps.v4_aug_sweep --baseline-run results/runs/<ts>__baseline_v2
+    python -m scripts.sweeps.v4_aug_sweep --baseline-run <path> --cell v4_pos5_srp10
 """
 
 from __future__ import annotations
@@ -47,7 +47,6 @@ from src.modeling.orchestration.full_run import (
     _v2_cfg,
     _v4_cfg,
 )
-
 
 # Augmentation level dicts — pos = target_pos_noise_m, srp = srp_volume_noise_std.
 _POS_LEVELS: dict[str, float] = {

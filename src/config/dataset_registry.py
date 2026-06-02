@@ -28,12 +28,12 @@ Optional fields the registry tolerates as `None`:
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator, Literal
+from typing import Literal
 
 import yaml
-
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 _CONFIGS_DIR = REPO_ROOT / "configs" / "datasets"
@@ -140,7 +140,7 @@ class DatasetRegistry:
         if "accel_target_sr" not in data or data["accel_target_sr"] in (None, 0):
             raise ValueError(
                 f"{source.name}: accel_target_sr is missing or 0 — run "
-                f"`python -m scripts.derive_dataset_sampling_rate {source.relative_to(REPO_ROOT)} --apply` "
+                f"`python -m scripts.utils.derive_dataset_sampling_rate {source.relative_to(REPO_ROOT)} --apply` "
                 f"to populate it from data."
             )
 
@@ -243,4 +243,4 @@ class DatasetRegistry:
 REGISTRY = DatasetRegistry()
 
 
-__all__ = ["DatasetMetadata", "DatasetRegistry", "REGISTRY"]
+__all__ = ["REGISTRY", "DatasetMetadata", "DatasetRegistry"]

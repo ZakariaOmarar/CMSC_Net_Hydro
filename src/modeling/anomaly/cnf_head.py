@@ -192,4 +192,4 @@ class ConditionalRealNVP(nn.Module):
         return -self.log_prob(x, c)
 
 
-__all__ = ["FiLMMLP", "FiLMCoupling", "ConditionalRealNVP"]
+__all__ = ["ConditionalRealNVP", "FiLMCoupling", "FiLMMLP"]

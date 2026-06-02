@@ -1,7 +1,7 @@
 """V0 classical SRP-PHAT localization baseline (RQ3 reference number).
 
-Thin wrapper around `src/modeling/localization/localization_head.py`'s
-`gcc_phat` + `srp_phat_3d` primitives.  Runs on any `TestDatasetSegment` whose
+Thin wrapper around `src/modeling/localization/classical.py`'s `gcc_phat` +
+`srp_phat_3d` primitives.  Runs on any `TestDatasetSegment` whose
 `mic_positions` are known and whose spatial ground truth is available.
 
 Spatial-label resolution:
@@ -28,8 +28,7 @@ from ...ingestion.test_dataset_loader import (
     TestDatasetLoader,
     TestDatasetSegment,
 )
-from ..localization.localization_head import gcc_phat, srp_phat_3d
-
+from ..localization.classical import gcc_phat, srp_phat_3d
 
 _HIT_RE = re.compile(r"^hit_between_(?P<a>[A-Za-z0-9]+)_(?P<b>[A-Za-z0-9]+)_speed\d+$")
 

@@ -18,7 +18,7 @@ Usage:
         --encoder-run <dir> [--samples-cache <path>] [--all-channel-modes] \\
         [--out-dir <dir>] [--seed 42]
 
-Phase 5 of `scripts/run_deep_v3v4_campaign.py` invokes this on the V4 winner
+Phase 5 of `scripts/campaigns/run_deep_v3v4_campaign.py` invokes this on the V4 winner
 only.  Reuses the same V2 encoder + V4 sample cache as Phase 2 / Phase 4
 (no re-precompute).
 """
@@ -50,7 +50,6 @@ from .full_run import (
     _v2_cfg,
     _v4_cfg,
 )
-
 
 _CHANNEL_MODES: tuple[Literal["both", "srp_only", "tdoa_only", "vibration_only_learned"], ...] = (
     "both", "srp_only", "tdoa_only", "vibration_only_learned",

@@ -31,7 +31,7 @@ Writes under ``results/runs/<timestamp>__v4_three_paradigms/``:
 
 Run::
 
-    python -m scripts.run_v4_three_paradigms \\
+    python -m scripts.paradigms.run_v4_three_paradigms \\
         --source-run results/runs/<v1+v2-run>
 """
 
@@ -69,8 +69,7 @@ from src.modeling.orchestration.full_run import (
     _v4_cfg,
 )
 
-
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 
 
 def _build_v2(cfg: V2SSLConfig) -> V2FusionEncoder:
@@ -182,7 +181,8 @@ def main() -> None:
 
     log("Loading loaders ...")
     D2 = _resolved_loader("d2.yaml")
-    D3 = _resolved_loader("d3.yaml"); D4 = _resolved_loader("d4.yaml")
+    D3 = _resolved_loader("d3.yaml")
+    D4 = _resolved_loader("d4.yaml")
 
     log("Loading V2 encoder ...")
     v2_encoder = _build_v2(v2_cfg)

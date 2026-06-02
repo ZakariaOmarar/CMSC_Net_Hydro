@@ -26,7 +26,6 @@ from src.modeling.anomaly_baselines.srp_phat_baseline import (
     summarise,
 )
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 pytestmark = pytest.mark.requires_data

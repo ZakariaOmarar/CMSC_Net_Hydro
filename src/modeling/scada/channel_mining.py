@@ -22,13 +22,12 @@ Pure-evaluation utility: V5.2 does not train anything.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 import numpy as np
 from sklearn.feature_selection import mutual_info_classif
-
 
 # Heuristic keyword → physical-family map for Allg_M1 channels.
 # The Allg_M1 catalog uses German labels — ``Druck`` (pressure), ``Temp``

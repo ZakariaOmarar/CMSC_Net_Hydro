@@ -103,8 +103,8 @@ def test_adapter_ignores_unused_modality_inputs(encoders, batch):
 def test_train_v3_cnf_accepts_per_modality_adapter():
     """Smoke: feed a per-modality adapter into the real V3 trainer on a
     micro batch and confirm the (x, c) extraction + flow init succeed."""
-    from src.modeling.anomaly.v3_trainer import _extract_xc
     from src.modeling.anomaly.cnf_head import ConditionalRealNVP
+    from src.modeling.anomaly.v3_trainer import _extract_xc
 
     torch.manual_seed(0)
     ac_enc = PerModalityEncoder(

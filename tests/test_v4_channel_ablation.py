@@ -14,12 +14,12 @@ import numpy as np
 import torch
 
 from src.modeling.localization import GridSpec, V4Config
+from src.modeling.localization.v4_loc_head import V4LocalizationHead
 from src.modeling.localization.v4_trainer import (
     V4Sample,
     _grid_coords_from_spec,
     _make_batch,
 )
-from src.modeling.localization.v4_loc_head import V4LocalizationHead
 
 
 def test_make_batch_srp_only_zeros_tdoa() -> None:

@@ -16,8 +16,7 @@ from scipy.io import wavfile
 
 from src.features.audio_spectral import compute_log_mel_spectrogram
 
-
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 REC = REPO / "data" / "fourth_test_dataset" / "RandomFault_knock_unter_speed1" / "(2, -4, 8)"
 WAV = REC / "recorded_E.wav"  # one of the 9 mics
 
@@ -88,7 +87,7 @@ def main() -> None:
         # peak-energy frame location (proxy for onset resolution)
         per_frame_energy = mel.sum(axis=0)
         peak_frame = int(np.argmax(per_frame_energy))
-        peak_time_ms = 1000.0 * peak_frame / feature_fs  # noqa
+        peak_time_ms = 1000.0 * peak_frame / feature_fs
         # spread of energy around the peak (5%-95% quantile width in time)
         cum = np.cumsum(per_frame_energy)
         cum = cum / cum[-1]

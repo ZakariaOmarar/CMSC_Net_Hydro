@@ -43,7 +43,7 @@ from typing import Literal
 
 # Re-export the ROW II / sensor-array physical constants from
 # `constants.py` for a single import.
-from .constants import (  # noqa: F401  (re-export)
+from .constants import (
     ACCEL_COUNT,
     ACCEL_SAMPLE_RATE_TARGET,
     CASING_RADIUS_M,
@@ -54,7 +54,6 @@ from .constants import (  # noqa: F401  (re-export)
     TURBINE_LEVEL_Z_M,
     mic_cartesian_positions,
 )
-
 
 # ============================================================================
 # 1 · Acquisition — per-dataset sensor rates
@@ -89,7 +88,7 @@ ACQUISITION = _Acquisition()
 @dataclass(frozen=True)
 class _AcousticFeatures:
     """STFT + log-mel grid — empirically validated by full grid search on all
-    5 datasets.  See chapter 3 §3.4.2 and `scripts/analyze_hop_length_full_grid.py`.
+    5 datasets.  See chapter 3 §3.4.2 and `scripts/hop_length_study/analyze_hop_length_full_grid.py`.
 
     The selected configuration is the Pareto-optimal point in a 152-configuration
     sweep over (n_fft, hop_length, n_mels), measured by ROC AUC of per-frame
@@ -373,7 +372,7 @@ SYNC = _Sync()
 # Public API
 # ============================================================================
 
-__all__ = [
+__all__ = [  # noqa: RUF022 — grouped by origin (own settings vs constants.py re-exports)
     "ACQUISITION",
     "ACOUSTIC_FEATURES",
     "ACOUSTIC_CWT",

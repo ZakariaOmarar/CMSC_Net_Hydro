@@ -10,14 +10,14 @@ Both are stored as Gantner UDBF .dat files, one sub-folder per day (YYYYMMDD).
 from __future__ import annotations
 
 import warnings
+from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
-from typing import NamedTuple, Sequence
+from typing import NamedTuple
 
 import numpy as np
 
 from .udbf_reader import UDBFFile, concat_udbf, read_udbf_folder
-
 
 # ---------------------------------------------------------------------------
 # Public contract
@@ -74,7 +74,7 @@ def _day_dirs(root: Path, days: Sequence[date | str] | None) -> list[Path]:
             if p.is_dir():
                 out.append(p)
             else:
-                warnings.warn(f"Day directory not found: {p}")
+                warnings.warn(f"Day directory not found: {p}", stacklevel=2)
         return sorted(out)
     return sorted(p for p in root.iterdir() if p.is_dir() and p.name.isdigit())
 
