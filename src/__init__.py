@@ -1,18 +1,18 @@
 """Thesis hydropower starter package.
 
-Top-level imports are resolved lazily so submodule entry-points like
-``python -m src.modeling.flow.infer`` do not pull optional feature-stack
-dependencies unless the symbols are actually used.
+The top-level ``DataSegment`` export is resolved lazily via ``__getattr__`` so
+submodule entry-points (e.g. ``python -m src.modeling.orchestration.full_run``)
+do not pull the optional feature-stack dependencies unless the symbol is used.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-__all__ = [
-    "DataSegment",
-    "FeatureFrame",
-]
+if TYPE_CHECKING:  # let type checkers see the lazily-exported symbol
+    from .data import DataSegment
+
+__all__ = ["DataSegment"]
 
 
 def __getattr__(name: str) -> Any:
@@ -20,8 +20,4 @@ def __getattr__(name: str) -> Any:
         from .data import DataSegment
 
         return DataSegment
-    if name == "FeatureFrame":
-        from .features import FeatureFrame
-
-        return FeatureFrame
     raise AttributeError(f"module 'src' has no attribute {name!r}")

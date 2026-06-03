@@ -64,11 +64,11 @@ from src.modeling.context.modality_probe import run_modality_balance_probe
 from src.modeling.context.v1_ssl import V1SSLConfig, train_v1_per_modality
 from src.modeling.context.v2_ssl import V2SSLConfig, train_v2_fusion
 from src.modeling.orchestration.full_run import (
-    _resolved_loader,
-    _v1_cfg,
-    _v2_cfg,
-    _v3_cfg,
-    _v4_cfg,
+    resolved_loader,
+    v1_config,
+    v2_config,
+    v3_config,
+    v4_config,
 )
 
 REPO = Path(__file__).resolve().parents[2]
@@ -364,10 +364,10 @@ def main() -> None:
     # Build base configs from the canonical orchestrator builders, then apply
     # the cell mutation.  Seed override happens at the very end so it
     # supersedes the orchestrator's default seed=42.
-    v1_cfg = _v1_cfg(args.quick)
-    v2_cfg = _v2_cfg(args.quick)
-    v3_cfg = _v3_cfg(args.quick)
-    v4_cfg = _v4_cfg(args.quick)
+    v1_cfg = v1_config(args.quick)
+    v2_cfg = v2_config(args.quick)
+    v3_cfg = v3_config(args.quick)
+    v4_cfg = v4_config(args.quick)
     v1_cfg, v2_cfg, v3_cfg, v4_cfg = apply_cell(
         args.cell, args.base_cell, v1_cfg, v2_cfg, v3_cfg, v4_cfg,
     )
@@ -399,7 +399,7 @@ def main() -> None:
 
     # Loaders.  V1/V2 use D1-D4 (D5 reserved for anomaly stages).
     log("Loading D1..D4 SSL loaders ...")
-    SSL_LOADERS = [_resolved_loader(f"{d}.yaml") for d in ("d1", "d2", "d3", "d4")]
+    SSL_LOADERS = [resolved_loader(f"{d}.yaml") for d in ("d1", "d2", "d3", "d4")]
 
     # --- V1 acoustic --------------------------------------------------------
     log("V1 acoustic ...")
@@ -496,11 +496,11 @@ def main() -> None:
 
     # Monkey-patch the builders to return our cell-mutated cfgs.  This is a
     # surgical override; the orchestrator otherwise behaves identically.
-    _orig_v1, _orig_v2, _orig_v3, _orig_v4 = _fr._v1_cfg, _fr._v2_cfg, _fr._v3_cfg, _fr._v4_cfg
-    _fr._v1_cfg = lambda quick: v1_cfg
-    _fr._v2_cfg = lambda quick: v2_cfg
-    _fr._v3_cfg = lambda quick: v3_cfg
-    _fr._v4_cfg = lambda quick, scada_dim=0, unconditional=False: replace(
+    _orig_v1, _orig_v2, _orig_v3, _orig_v4 = _fr.v1_config, _fr.v2_config, _fr.v3_config, _fr.v4_config
+    _fr.v1_config = lambda quick: v1_cfg
+    _fr.v2_config = lambda quick: v2_cfg
+    _fr.v3_config = lambda quick: v3_cfg
+    _fr.v4_config = lambda quick, scada_dim=0, unconditional=False: replace(
         v4_cfg, scada_dim=scada_dim, unconditional=unconditional,
     )
     try:
@@ -510,10 +510,10 @@ def main() -> None:
         metrics["full_run_deep_vs_simple"] = fr_metrics.get("deep_vs_simple", {})
         metrics["full_run_timings_s"] = fr_metrics.get("timings_s", {})
     finally:
-        _fr._v1_cfg = _orig_v1
-        _fr._v2_cfg = _orig_v2
-        _fr._v3_cfg = _orig_v3
-        _fr._v4_cfg = _orig_v4
+        _fr.v1_config = _orig_v1
+        _fr.v2_config = _orig_v2
+        _fr.v3_config = _orig_v3
+        _fr.v4_config = _orig_v4
 
     metrics_path = out_dir / "metrics.json"
     metrics_path.write_text(json.dumps(metrics, indent=2, default=str))

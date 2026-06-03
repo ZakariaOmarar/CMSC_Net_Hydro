@@ -323,8 +323,7 @@ class _V4Localization:
     # D2 rectangular rig: ~ 41 cm y-axis extent).  The relevant comparison
     # is "how far from the grid centre can a corner-of-grid soft-argmax
     # be from its true voxel" — the inward-bias of soft-argmax on edge
-    # positions is ~ 10-15 cm on the D2 cohort (REVIEW.md fourth-pass
-    # audit, 2026-05-11), and 20 cm leaves a safety margin without
+    # positions is ~ 10-15 cm on the D2 cohort, and 20 cm leaves a safety margin without
     # letting the residual swing wildly under noisy gradients.  An
     # earlier comment here claimed "any voxel in the 10 cm prototype
     # bounding box" — incorrect for D2; see positions.py for the

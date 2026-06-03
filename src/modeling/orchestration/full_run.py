@@ -22,8 +22,8 @@ directory ``results/runs/<ts>__full_pipeline_b5_cma/``:
   Stage 9  Inline RQ3 localisation paradigm eval (LF confidence-gated +
              LORO cross-validation via ``rq3_three_paradigm_eval``)
 
-The module-level config builders (`_resolved_loader`, `_v1_cfg`, `_v2_cfg`,
-`_v3_cfg`, `_v4_cfg`, `_d3_spatial_overrides`) are the canonical source of
+The module-level config builders (`resolved_loader`, `v1_config`, `v2_config`,
+`v3_config`, `v4_config`, `_d3_spatial_overrides`) are the canonical source of
 truth shared with the sibling orchestrators in this package and the
 ablation scripts under ``scripts/`` — change configs here, not at the
 caller.
@@ -83,7 +83,7 @@ from ..context.v1_ssl import train_v1_per_modality
 from ..context.v2_ssl import V2SSLConfig, train_v2_fusion
 from ..eval import paired_bootstrap_test
 from ..localization import (
-    GridSpec,
+    V4_CANDIDATE_GRID,
     V4Config,
     V4Sample,
     precompute_v4_samples,
@@ -95,8 +95,8 @@ from ..scada import d3_speed_lookup
 # V1-V4 hyperparameter builders live in `stage_configs`; they are imported (and
 # re-exported) here so `main()` resolves them from this module's namespace,
 # which keeps the multi-seed / hop-length drivers' monkeypatching of
-# `full_run._vN_cfg` working.
-from .stage_configs import _v1_cfg, _v2_cfg, _v3_cfg, _v4_cfg
+# `full_run.vN_config` working.
+from .stage_configs import v1_config, v2_config, v3_config, v4_config
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -106,7 +106,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 # ---------------------------------------------------------------------------
 
 
-def _resolved_loader(yaml_name: str) -> TestDatasetLoader:
+def resolved_loader(yaml_name: str) -> TestDatasetLoader:
     """Build a sync-corrected loader for one dataset spec.
 
     Two things matter here that the legacy implementation missed:
@@ -217,6 +217,8 @@ def _v3_event_intervals_for_recordings(
                     xt_pool=getattr(v3, "xt_pool", None), device=v3_cfg.device,
                 )
             except Exception:
+                # Skip a recording whose V3 inference fails; it simply gets no
+                # event-interval entry (callers read `out` with .get()).
                 continue
             if scores.size == 0:
                 continue
@@ -587,7 +589,19 @@ def _train_one_v4(
 # ---------------------------------------------------------------------------
 
 
-def main(quick: bool = False) -> dict:
+def main(
+    quick: bool = False,
+    *,
+    run_sync_audit: bool = False,
+    run_v0_baselines: bool = False,
+) -> dict:
+    """Run the end-to-end V1-V5 pipeline and return the metrics dict.
+
+    Args:
+        quick: halve epoch counts at every stage for a smoke run.
+        run_sync_audit: also run the opt-in cross-modal sync audit (Stage 0).
+        run_v0_baselines: also run the opt-in V0 reference baselines (Stage 1).
+    """
     # Determinism — Python / NumPy / PyTorch RNGs pinned, deterministic
     # algorithms enabled where available (warn_only so non-deterministic
     # kernels fall through rather than crash).  BLAS thread scheduling
@@ -599,7 +613,9 @@ def main(quick: bool = False) -> dict:
     np.random.seed(42)
     try:
         torch.use_deterministic_algorithms(True, warn_only=True)
-    except Exception:
+    except (RuntimeError, AttributeError):
+        # Older torch lacks the API; a few ops have no deterministic kernel
+        # even under warn_only. Determinism here is best-effort.
         pass
 
     timestamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -640,7 +656,7 @@ def main(quick: bool = False) -> dict:
             log(f"  skipping {meta.id} (root does not exist: {meta.root})")
             continue
         log(f"  loading {meta.id} from {meta.root.relative_to(REPO_ROOT)} ...")
-        LOADERS_BY_ID[meta.id] = _resolved_loader(f"{meta.id}.yaml")
+        LOADERS_BY_ID[meta.id] = resolved_loader(f"{meta.id}.yaml")
 
     # SSL stages (V1, V2) — user direction: D5 has no operating-mode label
     # and is reserved for V3/V4 only, so the SSL cohort stays D1..D4.
@@ -663,24 +679,28 @@ def main(quick: bool = False) -> dict:
     D4 = LOADERS_BY_ID.get("d4")
     D5 = LOADERS_BY_ID.get("d5")
 
-    # ================================================================= S0
-    # log("\n=== Stage 0 — cross-modal sync verification + correction audit ===")
-    # try:
-    #     metrics["stages"]["sync_correction"] = _audit_sync(SSL_LOADERS, log)
-    # except Exception as e:
-    #     log(f"sync audit failed: {type(e).__name__}: {e}")
-    #     metrics["stages"]["sync_correction"] = {"skipped_reason": f"{type(e).__name__}: {e}"}
-    # _stage_done("stage_0_sync")
+    # ===================================================== S0 / S1 (opt-in)
+    # The cross-modal sync audit and the V0 reference baselines are expensive
+    # and off by default; enable them with run_sync_audit / run_v0_baselines
+    # (or the matching CLI flags) for an ad-hoc or full-provenance run.
+    if run_sync_audit:
+        log("\n=== Stage 0 — cross-modal sync verification + correction audit ===")
+        try:
+            metrics["stages"]["sync_correction"] = _audit_sync(SSL_LOADERS, log)
+        except Exception as e:
+            log(f"sync audit failed: {type(e).__name__}: {e}")
+            metrics["stages"]["sync_correction"] = {"skipped_reason": f"{type(e).__name__}: {e}"}
+        _stage_done("stage_0_sync")
 
-    # # ================================================================= S1
-    # log("=== Stage 1 — V0 baselines (LSTM-AE / LightGBM / SRP-PHAT) ===")
-    # metrics["stages"]["v0"] = _run_v0(SSL_LOADERS, log)
-    # _stage_done("stage_1_v0")
+    if run_v0_baselines:
+        log("=== Stage 1 — V0 baselines (LSTM-AE / LightGBM / SRP-PHAT) ===")
+        metrics["stages"]["v0"] = _run_v0(SSL_LOADERS, log)
+        _stage_done("stage_1_v0")
 
     # ================================================================= S2
     log("=== Stage 2 — V1 + V2 with b5_cma intervention ===")
-    v1_cfg = _v1_cfg(quick)
-    v2_cfg_base = _v2_cfg(quick)
+    v1_cfg = v1_config(quick)
+    v2_cfg_base = v2_config(quick)
     # b5_cma: CMA loss on with cma_weight=0.5 and tightened temperature.
     # Source of truth: `scripts/campaigns/run_v1_v2_only.py::_apply_variant("b5_cma")`.
     v2_cfg = replace(v2_cfg_base, cma_weight=0.5, cma_temperature=0.1)
@@ -793,7 +813,7 @@ def main(quick: bool = False) -> dict:
 
     # ================================================================= S3
     log("=== Stage 3 — V3 three paradigms (acoustic / vibration / fusion) ===")
-    v3_cfg = _v3_cfg(quick)
+    v3_cfg = v3_config(quick)
     log(f"V3 config: epochs={v3_cfg.epochs}, K={v3_cfg.n_threshold_clusters}, "
         f"percentile={v3_cfg.threshold_percentile}")
 
@@ -1130,7 +1150,7 @@ def main(quick: bool = False) -> dict:
     log(f"Labelled segments: D2={len(d2_labeled)} D3={len(d3_labeled)} "
         f"D4={len(d4_labeled)} D5={len(d5_labeled)} | distinct positions={n_positions}")
 
-    grid = GridSpec(lo=(-0.22, -0.22, -0.02), hi=(0.40, 0.42, 0.30), n=(32, 32, 16))
+    grid = V4_CANDIDATE_GRID
 
     log("Precomputing V4 samples (burst-aware SRP-PHAT + accel TDOA + V2 c_t) ...")
     t0 = time.time()
@@ -1148,7 +1168,7 @@ def main(quick: bool = False) -> dict:
         "n_with_multilat": n_with_multilat,
     }
 
-    v4_cfg = _v4_cfg(quick)
+    v4_cfg = v4_config(quick)
     v4_paradigms = [
         ("acoustic", "srp_only"),
         ("vibration", "vibration_only_learned"),
@@ -1362,7 +1382,7 @@ def main(quick: bool = False) -> dict:
                     source_dir=s.source_dir, dataset_id=s.dataset_id,
                     multilat_xyz=s.multilat_xyz,
                 ))
-            v5_1_cfg = _v4_cfg(quick, scada_dim=scada_dim)
+            v5_1_cfg = v4_config(quick, scada_dim=scada_dim)
             t0 = time.time()
             v5_1 = train_v4_localization(v5_1_samples, cfg=v5_1_cfg, grid=grid)
             log(f"  V5.1 {time.time()-t0:.0f}s — val MAE={v5_1.val_mae_3d:.3f} m "
@@ -1566,5 +1586,13 @@ if __name__ == "__main__":
         "--quick", action="store_true",
         help="Halve epoch counts at every stage for a smoke run (~25 min CPU).",
     )
+    p.add_argument(
+        "--sync-audit", action="store_true",
+        help="Also run the opt-in cross-modal sync audit (Stage 0).",
+    )
+    p.add_argument(
+        "--v0-baselines", action="store_true",
+        help="Also run the opt-in V0 reference baselines (Stage 1).",
+    )
     args = p.parse_args()
-    main(quick=args.quick)
+    main(quick=args.quick, run_sync_audit=args.sync_audit, run_v0_baselines=args.v0_baselines)

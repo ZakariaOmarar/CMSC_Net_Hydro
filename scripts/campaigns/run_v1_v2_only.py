@@ -46,9 +46,9 @@ from src.modeling.context.modality_probe import run_modality_balance_probe
 from src.modeling.context.v1_ssl import V1SSLConfig, train_v1_per_modality
 from src.modeling.context.v2_ssl import V2SSLConfig, train_v2_fusion
 from src.modeling.orchestration.full_run import (
-    _resolved_loader,
-    _v1_cfg,
-    _v2_cfg,
+    resolved_loader,
+    v1_config,
+    v2_config,
 )
 
 REPO = Path(__file__).resolve().parents[2]
@@ -156,10 +156,10 @@ def main() -> None:
     log(f"out_dir = {out_dir}")
 
     log("Loading D1, D2, D3, D4 SSL loaders ...")
-    SSL_LOADERS = [_resolved_loader(f"{d}.yaml") for d in ("d1", "d2", "d3", "d4")]
+    SSL_LOADERS = [resolved_loader(f"{d}.yaml") for d in ("d1", "d2", "d3", "d4")]
 
-    v1_cfg = _v1_cfg(args.quick)
-    v2_cfg = _v2_cfg(args.quick)
+    v1_cfg = v1_config(args.quick)
+    v2_cfg = v2_config(args.quick)
     v1_cfg, v2_cfg = _apply_variant(args.variant, v1_cfg, v2_cfg)
     log(f"V1 config: epochs={v1_cfg.epochs}, n_mels={v1_cfg.n_mels}, "
         f"use_cwt={v1_cfg.use_cwt}, standardize_acoustic={v1_cfg.standardize_acoustic}")

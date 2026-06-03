@@ -46,7 +46,7 @@ from src.modeling.context.v2_ssl import (
     _split_segments_by_recording,
 )
 from src.modeling.encoders import PerModalityEncoder
-from src.modeling.orchestration.full_run import _resolved_loader, _v2_cfg
+from src.modeling.orchestration.full_run import resolved_loader, v2_config
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RESULTS = REPO_ROOT / "results" / "full_run"
@@ -78,7 +78,7 @@ def _load_v2_encoder(cfg: V2SSLConfig, ckpt: Path | None = None) -> V2FusionEnco
 
 
 def main(v2_ckpt: Path | None = None, label: str = "v2") -> dict:
-    cfg = _v2_cfg(quick=False)  # match the full-epoch run
+    cfg = v2_config(quick=False)  # match the full-epoch run
     device = resolve_device("auto")
 
     print(f"Loading checkpoints ... (V2 from {v2_ckpt or 'results/full_run/v2/encoder.pt'})")
@@ -87,8 +87,8 @@ def main(v2_ckpt: Path | None = None, label: str = "v2") -> dict:
     v2 = _load_v2_encoder(cfg, ckpt=v2_ckpt).to(device)
 
     print("Gathering D1+D2 healthy paired windows ...")
-    D1 = _resolved_loader("d1.yaml")
-    D2 = _resolved_loader("d2.yaml")
+    D1 = resolved_loader("d1.yaml")
+    D2 = resolved_loader("d2.yaml")
     segments = _gather_paired_segments([D1, D2], cfg)
     _, val_segs = _split_segments_by_recording(segments, cfg.val_ratio, cfg.seed)
     val_ds = _PairedWindowedDataset(val_segs, cfg)

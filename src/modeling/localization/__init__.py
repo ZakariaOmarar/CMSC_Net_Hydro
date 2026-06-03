@@ -3,12 +3,16 @@
 
 `classical` ships the classical signal-processing primitives (GCC-PHAT,
 SRP-PHAT).  `v4_features`, `v4_loc_head`, and `v4_trainer` add the V4
-anomaly-gated learning-based localization head.
+anomaly-gated learning-based localization head (the live pipeline).
+`localization_head` holds the earlier neural S2/S3/dual-SRP localizers, kept as
+Chapter 6 baselines and built on the `classical` primitives; it is not imported
+by the live pipeline.
 """
 
 from .v4_features import (
     C_AIR_MS,
     C_PLASTIC_3DP_MS,
+    V4_CANDIDATE_GRID,
     GridSpec,
     compute_accel_tdoa_tokens,
     compute_burst_aware_srp_phat_volume,
@@ -41,6 +45,7 @@ from .v4_trainer import (
 __all__ = [
     "C_AIR_MS",
     "C_PLASTIC_3DP_MS",
+    "V4_CANDIDATE_GRID",
     "AlertBurst",
     "FiLMResidualHead",
     "GridSpec",

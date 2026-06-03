@@ -185,105 +185,77 @@ def _loro_folds(recording_keys: np.ndarray) -> list[tuple[np.ndarray, np.ndarray
     return folds
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--v4-three-run", required=True,
-                    help="Run dir produced by scripts/paradigms/run_v4_three_paradigms.py")
-    ap.add_argument("--holdout-calibration-ratio", type=float, default=0.5,
-                    help="Fraction of val RECORDINGS used to fit LF weights; "
-                         "rest is held-out test for the defensible MAE.  "
-                         "Default 0.5 (recording-level, seeded).")
-    ap.add_argument("--holdout-seed", type=int, default=42,
-                    help="Seed for the recording-level calibration/test split.")
-    args = ap.parse_args()
-    v4_run = Path(args.v4_three_run).resolve()
-    if not v4_run.exists():
-        raise SystemExit(f"{v4_run} does not exist")
+def _in_sample_late_fusion(
+    p_a: dict | None, p_v: dict | None
+) -> tuple[list[_ParadigmRow], dict]:
+    """Late-fusion rows fit *and* scored on the full val cohort.
 
-    # Load per-paradigm predictions.
-    paradigms = {
-        "acoustic":   _load_pipeline(v4_run / "v4_acoustic"),
-        "vibration":  _load_pipeline(v4_run / "v4_vibration"),
-        "vibration_tdoa_only_legacy": _load_pipeline(v4_run / "v4_vibration_tdoa_only_legacy"),
-        "fusion":     _load_pipeline(v4_run / "v4_fusion"),
-    }
-    missing = [k for k, v in paradigms.items() if v is None]
-    if missing:
-        print(f"[rq3-3p] WARNING: missing predictions for {missing} (training failed?)")
+    This is an upper bound — the weights see the windows they're evaluated on.
+    Returns (rows_to_add, summary); both empty when either unimodal run is
+    missing or the two were trained on different val splits.
+    """
+    if p_a is None or p_v is None:
+        return [], {}
+    if p_a["targets"].shape != p_v["targets"].shape or not np.allclose(
+        p_a["targets"], p_v["targets"], atol=1e-6
+    ):
+        print("[rq3-3p] WARNING: val targets differ between V4-acoustic and "
+              "V4-vibration; Late Fusion disabled (samples used different val splits)")
+        return [], {}
 
-    # Build rows.
+    target = p_a["targets"]
     rows: list[_ParadigmRow] = []
-    for name, p in paradigms.items():
-        if p is None:
-            continue
-        errors = _per_window_errors(p["predictions"], p["targets"])
-        paradigm = "Unimodal" if name in ("acoustic", "vibration",
-                                          "vibration_tdoa_only_legacy") else "Intermediate Fusion"
-        rows.append(_row(paradigm, f"V4-{name}", errors))
+    # LF uniform.
+    lf_uniform = 0.5 * (p_a["predictions"] + p_v["predictions"])
+    rows.append(_row("Late Fusion", "uniform_avg",
+                     _per_window_errors(lf_uniform, target)))
+    # LF weighted (per-axis LS, in-sample).
+    w, b = _fit_weighted_late_fusion(p_a["predictions"], p_v["predictions"], target)
+    lf_weighted = _apply_weighted_late_fusion(p_a["predictions"], p_v["predictions"], w, b)
+    rows.append(_row("Late Fusion", "weighted_avg_in_sample",
+                     _per_window_errors(lf_weighted, target)))
+    # LF confidence-gated.
+    lf_gated = _confidence_gated_late_fusion(
+        p_a["predictions"], p_v["predictions"], p_a["residuals"], p_v["residuals"],
+    )
+    rows.append(_row("Late Fusion", "confidence_gated",
+                     _per_window_errors(lf_gated, target)))
+    summary = {
+        "weighted_axis_weights": w.tolist(),
+        "weighted_axis_biases": b.tolist(),
+        "warn_in_sample_fit": (
+            "weighted_avg_in_sample fits weights on the val cohort and "
+            "applies them to the same cohort — best-case for LF.  Treat "
+            "as an upper bound on LF performance."
+        ),
+    }
+    return rows, summary
 
-    # Late Fusion — only when both unimodal pipelines exist + share window
-    # geometry.  We assume the same precomputed sample list was used to
-    # train every paradigm in the same orchestrator run, so the val splits
-    # are identical (same seed, same recording-level split).  Sanity-check
-    # by comparing target arrays element-wise.
-    p_a = paradigms["acoustic"]
-    p_v = paradigms["vibration"]
-    late_fusion_summary: dict = {}
-    if p_a is not None and p_v is not None:
-        if p_a["targets"].shape != p_v["targets"].shape or not np.allclose(
-            p_a["targets"], p_v["targets"], atol=1e-6
-        ):
-            print("[rq3-3p] WARNING: val targets differ between V4-acoustic and "
-                  "V4-vibration; Late Fusion disabled (samples used different val splits)")
-        else:
-            target = p_a["targets"]
-            # LF uniform.
-            lf_uniform = 0.5 * (p_a["predictions"] + p_v["predictions"])
-            rows.append(_row("Late Fusion", "uniform_avg",
-                              _per_window_errors(lf_uniform, target)))
-            # LF weighted (per-axis LS, in-sample).
-            w, b = _fit_weighted_late_fusion(
-                p_a["predictions"], p_v["predictions"], target,
-            )
-            lf_weighted = _apply_weighted_late_fusion(
-                p_a["predictions"], p_v["predictions"], w, b,
-            )
-            rows.append(_row("Late Fusion", "weighted_avg_in_sample",
-                              _per_window_errors(lf_weighted, target)))
-            # LF confidence-gated.
-            lf_gated = _confidence_gated_late_fusion(
-                p_a["predictions"], p_v["predictions"],
-                p_a["residuals"], p_v["residuals"],
-            )
-            rows.append(_row("Late Fusion", "confidence_gated",
-                              _per_window_errors(lf_gated, target)))
-            late_fusion_summary = {
-                "weighted_axis_weights": w.tolist(),
-                "weighted_axis_biases": b.tolist(),
-                "warn_in_sample_fit": (
-                    "weighted_avg_in_sample fits weights on the val cohort and "
-                    "applies them to the same cohort — best-case for LF.  Treat "
-                    "as an upper bound on LF performance."
-                ),
-            }
 
-    # -----------------------------------------------------------------
-    # Held-out LF calibration/test split (recording-level)
-    # -----------------------------------------------------------------
-    # The in-sample LF-weighted row above is an upper bound.  This block
-    # splits the V4 val cohort BY RECORDING into a calibration subset
-    # (fit LF weights) and a test subset (report MAE), so the headline
-    # LF-weighted number is defensible: the weights never see the test
-    # windows.  Recording-level (not window-level) split prevents
-    # window-level leakage from shared recording noise / geometry.
+def _held_out_late_fusion(
+    p_a: dict | None,
+    p_v: dict | None,
+    paradigms: dict,
+    *,
+    calibration_ratio: float,
+    seed: int,
+) -> tuple[list[_ParadigmRow], dict]:
+    """Recording-level held-out calibration/test split for late fusion.
+
+    Fits LF weights on a calibration subset of the val *recordings* and reports
+    the defensible test-cohort MAE (the weights never see the test windows).
+    Recording-level (not window-level) splitting prevents leakage from shared
+    within-recording noise/geometry. Returns (rows_to_add, summary); both empty
+    when the unimodal runs or per-window recording keys are unavailable.
+    """
     holdout_summary: dict = {}
     holdout_rows: list[_ParadigmRow] = []
     if p_a is not None and p_v is not None and "recording_keys" in p_a:
         try:
             calib_mask, test_mask = _recording_level_holdout_split(
                 p_a["recording_keys"],
-                calibration_ratio=args.holdout_calibration_ratio,
-                seed=args.holdout_seed,
+                calibration_ratio=calibration_ratio,
+                seed=seed,
             )
         except ValueError as e:
             print(f"[rq3-3p] held-out LF skipped: {e}")
@@ -374,6 +346,69 @@ def main() -> None:
                     "p_value_two_sided": float(res_lf_fusion_t.p_value_two_sided),
                     "direction": res_lf_fusion_t.direction,
                 }
+    return holdout_rows, holdout_summary
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--v4-three-run", required=True,
+                    help="Run dir produced by scripts/paradigms/run_v4_three_paradigms.py")
+    ap.add_argument("--holdout-calibration-ratio", type=float, default=0.5,
+                    help="Fraction of val RECORDINGS used to fit LF weights; "
+                         "rest is held-out test for the defensible MAE.  "
+                         "Default 0.5 (recording-level, seeded).")
+    ap.add_argument("--holdout-seed", type=int, default=42,
+                    help="Seed for the recording-level calibration/test split.")
+    args = ap.parse_args()
+    v4_run = Path(args.v4_three_run).resolve()
+    if not v4_run.exists():
+        raise SystemExit(f"{v4_run} does not exist")
+
+    # Load per-paradigm predictions.
+    paradigms = {
+        "acoustic":   _load_pipeline(v4_run / "v4_acoustic"),
+        "vibration":  _load_pipeline(v4_run / "v4_vibration"),
+        "vibration_tdoa_only_legacy": _load_pipeline(v4_run / "v4_vibration_tdoa_only_legacy"),
+        "fusion":     _load_pipeline(v4_run / "v4_fusion"),
+    }
+    missing = [k for k, v in paradigms.items() if v is None]
+    if missing:
+        print(f"[rq3-3p] WARNING: missing predictions for {missing} (training failed?)")
+
+    # Build rows.
+    rows: list[_ParadigmRow] = []
+    for name, p in paradigms.items():
+        if p is None:
+            continue
+        errors = _per_window_errors(p["predictions"], p["targets"])
+        paradigm = "Unimodal" if name in ("acoustic", "vibration",
+                                          "vibration_tdoa_only_legacy") else "Intermediate Fusion"
+        rows.append(_row(paradigm, f"V4-{name}", errors))
+
+    # Late Fusion — only when both unimodal pipelines exist + share window
+    # geometry.  We assume the same precomputed sample list was used to
+    # train every paradigm in the same orchestrator run, so the val splits
+    # are identical (same seed, same recording-level split).  Sanity-check
+    # by comparing target arrays element-wise.
+    p_a = paradigms["acoustic"]
+    p_v = paradigms["vibration"]
+    lf_rows, late_fusion_summary = _in_sample_late_fusion(p_a, p_v)
+    rows.extend(lf_rows)
+
+    # -----------------------------------------------------------------
+    # Held-out LF calibration/test split (recording-level)
+    # -----------------------------------------------------------------
+    # The in-sample LF-weighted row above is an upper bound.  This block
+    # splits the V4 val cohort BY RECORDING into a calibration subset
+    # (fit LF weights) and a test subset (report MAE), so the headline
+    # LF-weighted number is defensible: the weights never see the test
+    # windows.  Recording-level (not window-level) split prevents
+    # window-level leakage from shared recording noise / geometry.
+    holdout_rows, holdout_summary = _held_out_late_fusion(
+        p_a, p_v, paradigms,
+        calibration_ratio=args.holdout_calibration_ratio,
+        seed=args.holdout_seed,
+    )
 
     # -----------------------------------------------------------------
     # Leave-one-recording-out cross-validation (the DEFENSIBLE headline)

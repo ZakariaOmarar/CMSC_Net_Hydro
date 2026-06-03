@@ -107,7 +107,7 @@ class V3Config:
     #     scale where ASP-σ still has ≥ 30 post-MaxPool frames at hop=43)
     #     and 3.0 s on D1/D2 (which cannot go below 1.5 s).
     # Default ``None`` keeps V3 backwards-compatible (inherits v2_cfg
-    # window).  The orchestrator (full_run._v3_cfg) sets the publication
+    # window).  The orchestrator (full_run.v3_config) sets the publication
     # per-dataset dict from `WINDOWING.v3_window_seconds_override`.
     window_seconds_override: float | dict[str, float] | None = None
 
@@ -169,7 +169,7 @@ class V3Config:
 
     # CNF coupling MLP dropout — defends against the +56 % train/val NLL gap
     # the audit identified.  Default 0.0 keeps the dataclass byte-equivalent
-    # to pre-fix behaviour; the orchestrator `_v3_cfg` builder sets 0.1.
+    # to pre-fix behaviour; the orchestrator `v3_config` builder sets 0.1.
     dropout_p: float = 0.0
 
     # System

@@ -1,5 +1,7 @@
 # CMSC_Net_Hydro
 
+[![CI](https://github.com/Zakaria08/CMSC_Net_Hydro/actions/workflows/ci.yml/badge.svg)](https://github.com/Zakaria08/CMSC_Net_Hydro/actions/workflows/ci.yml)
+
 Multimodal acoustic + vibration anomaly detection and source localization for
 reversible Francis pump-turbines. This is the implementation accompanying a
 Master's thesis; it realizes the chained **V0 → V5** label-free pipeline.
@@ -155,16 +157,23 @@ Tests that exercise the real recordings are marked `@pytest.mark.requires_data`
 and skip cleanly on a checkout without a `data/` directory (see
 [`tests/conftest.py`](tests/conftest.py)).
 
-## Linting
+## Linting & type-checking
 
 ```bash
-ruff check
+make check       # ruff + pyright + the data-free test suite (what CI runs)
+ruff check       # lint only
+pyright          # type-check src/ only
 ```
 
-The rule set is configured in `[tool.ruff]` in `pyproject.toml` and is
-deliberately scoped: `pep8-naming` is left off because the modelling code uses
-maths/ML conventions (`X`, `W`, `B, T, C = x.shape`), and a few rules are
-ignored with inline rationale. The tree is kept clean.
+`ruff` (config in `[tool.ruff]`) is deliberately scoped: `pep8-naming` is left
+off because the modelling code uses maths/ML conventions (`X`, `W`,
+`B, T, C = x.shape`), and a few rules are ignored with inline rationale.
+
+The package ships `py.typed` and is type-checked with `pyright` in *basic* mode
+(config in `[tool.pyright]`); a handful of numpy/torch-driven categories are
+relaxed with documented reasons. Lint, type-check, and the data-free tests all
+run in [CI](.github/workflows/ci.yml) on every push. See
+[`CONTRIBUTING.md`](CONTRIBUTING.md) for the developer workflow.
 
 ## Notes on the previous repo state
 

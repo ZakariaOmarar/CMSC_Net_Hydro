@@ -92,7 +92,7 @@ class V4Config:
     # Conditioning
     scada_dim: int = 0  # 0 → no SCADA slot; V5.1/V5.2 set this.
     unconditional: bool = False  # A3 ablation
-    # Channel-ablation modes (A5 in REVIEW.md sixth-pass audit):
+    # Channel-ablation modes (the A5 localization ablation):
     #   - "both": full V4 architecture (acoustic SRP + structure-borne TDOA).
     #   - "srp_only": zero the TDOA tokens at inference and training, so the
     #     head must regress from the SRP volume + FiLM(c) alone.
@@ -128,7 +128,7 @@ class V4Config:
     #   * a ``float`` — single override applied to every dataset,
     #   * a ``dict[dataset_id, float]`` — per-dataset override.
     # Default ``None`` keeps V4 backwards-compatible (inherits v2_cfg
-    # window).  The orchestrator (full_run._v4_cfg) sets the publication
+    # window).  The orchestrator (full_run.v4_config) sets the publication
     # per-dataset dict from `WINDOWING.v4_window_seconds_override`.
     window_seconds_override: float | dict[str, float] | None = None
 
@@ -153,7 +153,7 @@ class V4Config:
     # Head dropout — defends against the +1236 % train/val gap the audit
     # identified.  Threads into the residual MLP via V4LocalizationHead.
     # Default 0.0 keeps the dataclass byte-equivalent to pre-fix behaviour;
-    # the orchestrator `_v4_cfg` builder sets 0.1.
+    # the orchestrator `v4_config` builder sets 0.1.
     head_dropout_p: float = 0.0
 
     # Early stopping on val total loss.  Patience=5 (vs V1/V2's 3) because V4
@@ -575,7 +575,7 @@ class V4Result:
     train_recording_ids: list[str]
     val_recording_ids: list[str]
     unconditional: bool
-    # Diagnostics for Chapter 6 / REVIEW.md analysis.
+    # Diagnostics for the Chapter 6 analysis.
     val_init_xyz: np.ndarray  # (n_val, 3) — pure soft-argmax output
     val_residuals: np.ndarray  # (n_val, 3) — FiLM-residual contribution
     val_recording_breakdown: dict  # recording_id -> {n, mae, target, pred_mean}

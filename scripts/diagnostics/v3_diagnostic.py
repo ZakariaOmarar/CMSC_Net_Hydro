@@ -32,12 +32,12 @@ from src.modeling.anomaly.cnf_head import ConditionalRealNVP
 from src.modeling.anomaly.threshold import PerClusterThresholds
 from src.modeling.context.v2_fusion import V2FusionEncoder
 from src.modeling.context.v2_ssl import _gather_paired_segments
-from src.modeling.localization.v4_features import GridSpec
+from src.modeling.localization.v4_features import V4_CANDIDATE_GRID
 from src.modeling.localization.v4_trainer import precompute_v4_samples
 from src.modeling.orchestration.full_run import (
     _d3_spatial_overrides,
-    _resolved_loader,
-    _v2_cfg,
+    resolved_loader,
+    v2_config,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -45,7 +45,7 @@ RESULTS = REPO_ROOT / "results" / "full_run"
 
 
 def _load_v2() -> V2FusionEncoder:
-    cfg = _v2_cfg(quick=False)
+    cfg = v2_config(quick=False)
     enc = V2FusionEncoder(
         feature_dim=cfg.feature_dim,
         embed_dim=cfg.embed_dim,
@@ -89,21 +89,21 @@ def _summary_stats(scores: np.ndarray) -> dict:
 
 
 def main() -> dict:
-    v2_cfg = _v2_cfg(quick=False)
+    v2_cfg = v2_config(quick=False)
     enc = _load_v2()
     flow, thresholds = _load_v3()
 
     print("Loading data ...")
-    D1 = _resolved_loader("d1.yaml")
-    D2 = _resolved_loader("d2.yaml")
-    D3 = _resolved_loader("d3.yaml")
-    D4 = _resolved_loader("d4.yaml")
+    D1 = resolved_loader("d1.yaml")
+    D2 = resolved_loader("d2.yaml")
+    D3 = resolved_loader("d3.yaml")
+    D4 = resolved_loader("d4.yaml")
 
     # Healthy held-out (sanity baseline) — every is_anomaly=False segment
     # across all four campaigns.  At p95 the alert rate should be ~ 5 %.
     print("Scoring healthy cohort ...")
     healthy_segs = _gather_paired_segments([D1, D2, D3, D4], v2_cfg)
-    grid = GridSpec(lo=(-0.22, -0.22, -0.02), hi=(0.40, 0.42, 0.30), n=(32, 32, 16))
+    grid = V4_CANDIDATE_GRID
 
     # Anomaly cohorts — run the V4 sample precompute machinery for a
     # convenient (x, c) extraction since precompute_v4_samples already

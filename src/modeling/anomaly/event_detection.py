@@ -269,7 +269,7 @@ def sliding_window_v3_inference(
     inference_stride_s: float = 0.25,
     xt_pool=None,
     device: str = "auto",
-):
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Run V3 on a single paired segment at a finer-than-training stride.
 
     The training-time V2 / V3 pipeline uses ``window_seconds = 2.0``
@@ -385,6 +385,7 @@ def v3_real_anomaly_detection(
     onset_errors: list[float] = []
     n_recordings_scored = 0
     n_recordings_no_gt = 0
+    n_recordings_inference_failed = 0
 
     for s in segments:
         gt = derive_knock_events(s)
@@ -401,6 +402,10 @@ def v3_real_anomaly_detection(
                 xt_pool=xt_pool, device=dev,
             )
         except Exception:
+            # Best-effort per recording: a single failed inference skips that
+            # recording rather than aborting the whole evaluation. The count is
+            # surfaced below so the skip is visible, not silent.
+            n_recordings_inference_failed += 1
             continue
         if scores.size == 0:
             continue
@@ -459,6 +464,7 @@ def v3_real_anomaly_detection(
         "median_onset_error_s": float(np.median(onset_errors)) if onset_errors else float("nan"),
         "n_recordings_scored": int(n_recordings_scored),
         "n_recordings_no_weak_gt": int(n_recordings_no_gt),
+        "n_recordings_inference_failed": int(n_recordings_inference_failed),
         "percentile": int(percentile),
     }
 

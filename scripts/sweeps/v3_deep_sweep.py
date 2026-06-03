@@ -52,10 +52,10 @@ from src.modeling.context.v2_fusion import V2FusionEncoder
 from src.modeling.encoders import PerModalityEncoder
 from src.modeling.orchestration.full_run import (
     REPO_ROOT,
-    _resolved_loader,
-    _v1_cfg,
-    _v2_cfg,
-    _v3_cfg,
+    resolved_loader,
+    v1_config,
+    v2_config,
+    v3_config,
 )
 
 _DROPOUT_LEVELS = {"d0": 0.0, "d1": 0.1, "d2": 0.2, "d3": 0.3}
@@ -188,9 +188,9 @@ def main() -> None:
         raise SystemExit(f"v2/encoder.pt not found under {encoder_run}")
 
     cells = [args.cell] if args.cell else _all_cells()
-    v1_cfg = _v1_cfg(args.quick)
-    v2_cfg = _v2_cfg(args.quick)
-    base_v3 = _v3_cfg(args.quick)
+    v1_cfg = v1_config(args.quick)
+    v2_cfg = v2_config(args.quick)
+    base_v3 = v3_config(args.quick)
     for cid in cells:  # fail fast on typos
         _apply_cell(cid, base_v3)
 
@@ -200,7 +200,7 @@ def main() -> None:
     anom_loaders = []
     for d in anom_ids:
         try:
-            anom_loaders.append(_resolved_loader(f"{d}.yaml"))
+            anom_loaders.append(resolved_loader(f"{d}.yaml"))
         except Exception as e:
             print(f"  skip {d}: {e}")
     anom_segments = [s for L in anom_loaders for s in L.list_segments() if s.is_anomaly]

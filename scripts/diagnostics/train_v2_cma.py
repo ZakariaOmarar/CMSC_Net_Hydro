@@ -22,7 +22,7 @@ from pathlib import Path
 import torch
 
 from src.modeling.context.v2_ssl import V2SSLConfig, train_v2_fusion
-from src.modeling.orchestration.full_run import _resolved_loader, _v2_cfg
+from src.modeling.orchestration.full_run import resolved_loader, v2_config
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -31,7 +31,7 @@ def main() -> dict:
     out_dir = REPO_ROOT / "results" / "full_run" / "v2_cma"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    base_cfg = _v2_cfg(quick=False)
+    base_cfg = v2_config(quick=False)
     # Two CMA weights: a small one (0.5×) and a parity one (1.0×) relative to SimCLR.
     cfgs = {
         "cma_w0_5": V2SSLConfig(**{**asdict(base_cfg), "cma_weight": 0.5}),
@@ -43,8 +43,8 @@ def main() -> dict:
     v1_vibration_sd = torch.load(v1_root / "vibration.pt", map_location="cpu")
 
     print("Loading D1, D2 ...")
-    D1 = _resolved_loader("d1.yaml")
-    D2 = _resolved_loader("d2.yaml")
+    D1 = resolved_loader("d1.yaml")
+    D2 = resolved_loader("d2.yaml")
 
     results: dict = {}
     for name, cfg in cfgs.items():

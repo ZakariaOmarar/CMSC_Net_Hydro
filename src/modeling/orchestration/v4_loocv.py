@@ -51,6 +51,7 @@ from ...config import resolve_device
 from ..context.v2_fusion import V2FusionEncoder
 from ..eval import percentile_bootstrap_ci
 from ..localization import (
+    V4_CANDIDATE_GRID,
     GridSpec,
     V4Config,
     precompute_v4_samples,
@@ -58,9 +59,9 @@ from ..localization import (
 from .full_run import (
     REPO_ROOT,
     _d3_spatial_overrides,
-    _resolved_loader,
-    _v2_cfg,
-    _v4_cfg,
+    resolved_loader,
+    v2_config,
+    v4_config,
 )
 
 
@@ -87,10 +88,10 @@ def run_loocv(
     """Run V4 LOOCV using an existing V2 encoder + V3 thresholds.
 
     Args:
-      quick: pass through to `_v4_cfg(quick=...)` for fast smoke runs.
+      quick: pass through to `v4_config(quick=...)` for fast smoke runs.
       burst_aware_srp: use the burst-aware SRP precompute (default True
         — matches the headline configuration).
-      epochs_override: override V4 epochs (default uses `_v4_cfg`'s
+      epochs_override: override V4 epochs (default uses `v4_config`'s
         value, which is 30 for the full profile).
       out_dir: directory for the JSON summary.  Defaults to
         `results/full_run/`.
@@ -108,25 +109,17 @@ def run_loocv(
         )
 
     print(f"V4 LOOCV: loading V2 encoder from {v2_path}")
-    v2_cfg = _v2_cfg(quick)
-    v4_cfg = _v4_cfg(quick)
+    v2_cfg = v2_config(quick)
+    v4_cfg = v4_config(quick)
     if epochs_override is not None:
         v4_cfg = V4Config(**{**asdict(v4_cfg), "epochs": int(epochs_override)})
 
-    encoder = V2FusionEncoder(
-        feature_dim=v2_cfg.feature_dim,
-        embed_dim=v2_cfg.embed_dim,
-        n_heads=v2_cfg.n_heads,
-        context_mode=v2_cfg.context_mode,
-        num_context_seeds=v2_cfg.num_context_seeds,
-    )
-    encoder.load_state_dict(torch.load(v2_path, map_location="cpu"))
-    encoder.eval()
+    encoder = V2FusionEncoder.from_checkpoint(v2_path, v2_cfg)
 
     print("V4 LOOCV: gathering labeled segments ...")
-    D2 = _resolved_loader("d2.yaml")
-    D3 = _resolved_loader("d3.yaml")
-    D4 = _resolved_loader("d4.yaml")
+    D2 = resolved_loader("d2.yaml")
+    D3 = resolved_loader("d3.yaml")
+    D4 = resolved_loader("d4.yaml")
     d2_labeled = [
         s for s in D2.list_segments()
         if s.is_anomaly and s.spatial_label is not None and s.mode_label is not None
@@ -143,7 +136,7 @@ def run_loocv(
         f"total={len(all_labeled)} labeled recordings"
     )
 
-    grid = GridSpec(lo=(-0.22, -0.22, -0.02), hi=(0.40, 0.42, 0.30), n=(32, 32, 16))
+    grid = V4_CANDIDATE_GRID
     print("V4 LOOCV: precomputing samples once (used in every fold) ...")
     t0 = time.time()
     samples = precompute_v4_samples(

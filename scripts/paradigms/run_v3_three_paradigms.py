@@ -50,7 +50,7 @@ from src.modeling.context.v1_ssl import V1SSLConfig
 from src.modeling.context.v2_fusion import V2FusionEncoder
 from src.modeling.context.v2_ssl import V2SSLConfig
 from src.modeling.encoders.per_modality import PerModalityEncoder
-from src.modeling.orchestration.full_run import _resolved_loader, _v1_cfg, _v2_cfg, _v3_cfg
+from src.modeling.orchestration.full_run import resolved_loader, v1_config, v2_config, v3_config
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -151,15 +151,15 @@ def main() -> None:
     log(f"src_run = {src_run}")
     log(f"out_dir = {out_dir}")
 
-    v1_cfg = _v1_cfg(args.quick)
-    v2_cfg = _v2_cfg(args.quick)
-    v3_cfg = _v3_cfg(args.quick)
+    v1_cfg = v1_config(args.quick)
+    v2_cfg = v2_config(args.quick)
+    v3_cfg = v3_config(args.quick)
     log(f"V1 config: epochs={v1_cfg.epochs}, acoustic_cnn_width_mult={v1_cfg.acoustic_cnn_width_mult}")
     log(f"V2 config: cma_weight={v2_cfg.cma_weight}, context_mode={v2_cfg.context_mode}")
     log(f"V3 config: epochs={v3_cfg.epochs}, n_threshold_clusters={v3_cfg.n_threshold_clusters}")
 
     log("Loading D1+D2+D3+D4 SSL loaders ...")
-    SSL_LOADERS = [_resolved_loader(f"{d}.yaml") for d in ("d1", "d2", "d3", "d4")]
+    SSL_LOADERS = [resolved_loader(f"{d}.yaml") for d in ("d1", "d2", "d3", "d4")]
 
     # Load encoders from the source run.
     log("Building + loading V1 acoustic encoder ...")

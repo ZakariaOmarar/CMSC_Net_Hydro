@@ -147,7 +147,7 @@ class FiLMResidualHead(nn.Module):
        The previous ±0.05 m cap was insufficient to correct the soft-argmax
        centre-bias on corner positions of the V4 cohort
        (e.g. ground-truth `(-0.20, 0, 0)` vs. soft-argmax pulling inward by
-       ~ 10–15 cm); see REVIEW.md fourth-pass note.  The tanh squash keeps
+       ~ 10–15 cm).  The tanh squash keeps
        the residual from blowing up while allowing full grid-extent
        corrections when warranted.
 

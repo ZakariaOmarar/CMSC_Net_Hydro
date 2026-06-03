@@ -30,7 +30,7 @@ from src.modeling.context.v2_ssl import (
     _PairedGroupedBatchSampler,
     _PairedWindowedDataset,
 )
-from src.modeling.orchestration.full_run import _resolved_loader, _v2_cfg
+from src.modeling.orchestration.full_run import resolved_loader, v2_config
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RESULTS = REPO_ROOT / "results" / "full_run"
@@ -71,8 +71,8 @@ def _gather_healthy_only(cfg: V2SSLConfig):
     introspection of the trained representation, not held-out generalisation.
     """
     cfg_clean = V2SSLConfig(**{**asdict(cfg), "healthy_modes": HEALTHY_MODES_K3})
-    D1 = _resolved_loader("d1.yaml")
-    D2 = _resolved_loader("d2.yaml")
+    D1 = resolved_loader("d1.yaml")
+    D2 = resolved_loader("d2.yaml")
     segs = _gather_paired_segments([D1, D2], cfg_clean)
     return cfg_clean, segs
 
@@ -100,7 +100,7 @@ def _purity_k3(encoder: V2FusionEncoder, val_segs, cfg: V2SSLConfig) -> dict:
 
 
 def main() -> dict:
-    cfg = _v2_cfg(quick=False)
+    cfg = v2_config(quick=False)
     cfg_clean, all_healthy = _gather_healthy_only(cfg)
 
     rec_counts: dict[str, int] = {}

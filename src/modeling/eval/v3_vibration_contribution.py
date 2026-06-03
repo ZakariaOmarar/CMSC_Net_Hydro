@@ -80,7 +80,7 @@ def _loader(name: str) -> TestDatasetLoader:
     return TestDatasetLoader(spec)
 
 
-def _v2_cfg() -> V2SSLConfig:
+def v2_config() -> V2SSLConfig:
     return V2SSLConfig(
         window_seconds=2.0, window_stride_seconds=1.0, feature_dim=64, embed_dim=64,
         n_heads=4, proj_dim=32, epochs=12, batch_size=16, lr=1e-3, weight_decay=1e-5,
@@ -97,7 +97,7 @@ def _v2_cfg() -> V2SSLConfig:
 
 
 def _load_v2() -> V2FusionEncoder:
-    cfg = _v2_cfg()
+    cfg = v2_config()
     enc = V2FusionEncoder(
         feature_dim=cfg.feature_dim, embed_dim=cfg.embed_dim,
         n_heads=cfg.n_heads, context_mode=cfg.context_mode,
@@ -450,7 +450,7 @@ def _write_report(
 
 
 def main() -> None:
-    cfg = _v2_cfg()
+    cfg = v2_config()
     print(f"[v3-vib] Loading V2 from {V2_WEIGHTS} and V3 from {V3_FLOW} ...")
     encoder = _load_v2()
     # Probe c dim from one forward pass.

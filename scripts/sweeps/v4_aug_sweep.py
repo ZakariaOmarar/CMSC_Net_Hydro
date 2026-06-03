@@ -39,13 +39,17 @@ from pathlib import Path
 import torch
 
 from src.modeling.context.v2_fusion import V2FusionEncoder
-from src.modeling.localization import GridSpec, precompute_v4_samples, train_v4_localization
+from src.modeling.localization import (
+    V4_CANDIDATE_GRID,
+    precompute_v4_samples,
+    train_v4_localization,
+)
 from src.modeling.orchestration.full_run import (
     REPO_ROOT,
     _d3_spatial_overrides,
-    _resolved_loader,
-    _v2_cfg,
-    _v4_cfg,
+    resolved_loader,
+    v2_config,
+    v4_config,
 )
 
 # Augmentation level dicts — pos = target_pos_noise_m, srp = srp_volume_noise_std.
@@ -115,28 +119,19 @@ def main() -> None:
     for cid in cells:
         # Trigger ValueError early for typos so we don't pay sample-precompute
         # cost to discover a bad cell id at the very end.
-        _apply_v4_aug_cell(cid, _v4_cfg(False))
+        _apply_v4_aug_cell(cid, v4_config(False))
 
     # Build V2 encoder + load weights from baseline.  v2_cfg dims must match
     # baseline; we read the orchestrator default which is what baseline_v2 ran.
-    v2_cfg = _v2_cfg(False)
-    v4_cfg = _v4_cfg(False)
-    encoder = V2FusionEncoder(
-        feature_dim=v2_cfg.feature_dim,
-        embed_dim=v2_cfg.embed_dim,
-        n_heads=v2_cfg.n_heads,
-        context_mode=v2_cfg.context_mode,
-        num_context_seeds=v2_cfg.num_context_seeds,
-        acoustic_cnn_width_mult=v2_cfg.acoustic_cnn_width_mult,
-    )
-    encoder.load_state_dict(torch.load(v2_state, map_location="cpu"))
-    encoder.eval()
+    v2_cfg = v2_config(False)
+    v4_cfg = v4_config(False)
+    encoder = V2FusionEncoder.from_checkpoint(v2_state, v2_cfg)
 
     # Loaders + spatial-label resolution + V4 sample precompute (shared
     # across all cells in this invocation).
     print("Loading D2/D3/D4 loaders and precomputing V4 samples ...")
     t0 = time.time()
-    LOADERS = {dsid: _resolved_loader(f"{dsid}.yaml") for dsid in ("d2", "d3", "d4")}
+    LOADERS = {dsid: resolved_loader(f"{dsid}.yaml") for dsid in ("d2", "d3", "d4")}
     d2_labeled = [
         s for s in LOADERS["d2"].list_segments()
         if s.is_anomaly and s.spatial_label is not None and s.mode_label is not None
@@ -147,7 +142,7 @@ def main() -> None:
     d4_labeled = [
         s for s in LOADERS["d4"].list_segments() if s.is_anomaly and s.spatial_label is not None
     ]
-    grid = GridSpec(lo=(-0.22, -0.22, -0.02), hi=(0.40, 0.42, 0.30), n=(32, 32, 16))
+    grid = V4_CANDIDATE_GRID
     v4_samples = precompute_v4_samples(
         encoder, d2_labeled + d3_labeled + d4_labeled,
         v2_cfg=v2_cfg, grid=grid,

@@ -48,9 +48,9 @@ def _override_seed(seed: int) -> dict:
     """Hot-patch the orchestrator's `_v*_cfg` helpers to use this seed."""
     import src.modeling.orchestration.full_run as fr
 
-    original_v1 = fr._v1_cfg
-    original_v2 = fr._v2_cfg
-    original_v3 = fr._v3_cfg
+    original_v1 = fr.v1_config
+    original_v2 = fr.v2_config
+    original_v3 = fr.v3_config
 
     def v1(quick: bool):
         cfg = original_v1(quick)
@@ -64,18 +64,18 @@ def _override_seed(seed: int) -> dict:
         cfg = original_v3(quick)
         return cfg.__class__(**{**asdict(cfg), "seed": seed})
 
-    fr._v1_cfg = v1
-    fr._v2_cfg = v2
-    fr._v3_cfg = v3
+    fr.v1_config = v1
+    fr.v2_config = v2
+    fr.v3_config = v3
     return {"v1": original_v1, "v2": original_v2, "v3": original_v3}
 
 
 def _restore(originals: dict) -> None:
     import src.modeling.orchestration.full_run as fr
 
-    fr._v1_cfg = originals["v1"]
-    fr._v2_cfg = originals["v2"]
-    fr._v3_cfg = originals["v3"]
+    fr.v1_config = originals["v1"]
+    fr.v2_config = originals["v2"]
+    fr.v3_config = originals["v3"]
 
 
 def main(seeds: list[int], quick: bool = False) -> dict:

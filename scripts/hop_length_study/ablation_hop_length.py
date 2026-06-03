@@ -77,10 +77,10 @@ from src.modeling.context.v2_ssl import (
     train_v2_fusion,
 )
 from src.modeling.orchestration.full_run import (
-    _resolved_loader,
-    _v1_cfg,
-    _v2_cfg,
-    _v3_cfg,
+    resolved_loader,
+    v1_config,
+    v2_config,
+    v3_config,
 )
 
 REPO = Path(__file__).resolve().parents[2]
@@ -165,9 +165,9 @@ def _run_one(
     cond_spec = CONDITIONS[condition]
     hop, nfft = cond_spec["hop_length"], cond_spec["n_fft"]
 
-    base_v1 = _v1_cfg(quick)
-    base_v2 = _v2_cfg(quick)
-    base_v3 = _v3_cfg(quick)
+    base_v1 = v1_config(quick)
+    base_v2 = v2_config(quick)
+    base_v3 = v3_config(quick)
     v1_cfg = _override_v1_cfg(base_v1, hop, nfft, seed)
     v2_cfg = _override_v2_cfg(base_v2, hop, nfft, seed)
     v3_cfg = _override_v3_cfg(base_v3, seed)
@@ -178,7 +178,7 @@ def _run_one(
         f"epochs V1={v1_cfg.epochs} V2={v2_cfg.epochs} V3={v3_cfg.epochs}"
     )
 
-    loaders = [_resolved_loader(y) for y in dataset_yamls]
+    loaders = [resolved_loader(y) for y in dataset_yamls]
     log(f"[{condition} seed={seed}] datasets: {[L.spec.id for L in loaders]}")
 
     # ---------- V1 acoustic ----------

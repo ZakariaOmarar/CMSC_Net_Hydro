@@ -68,7 +68,7 @@ from ..context.v2_ssl import (
     _precompute_paired,
 )
 from ..encoders.per_modality import PerModalityEncoder
-from ..orchestration.full_run import _v1_cfg, _v2_cfg
+from ..orchestration.full_run import v1_config, v2_config
 
 REPO = Path(__file__).resolve().parents[3]
 
@@ -303,8 +303,8 @@ def main() -> None:
     if not v3_run.exists() or not src_run.exists():
         raise SystemExit(f"missing run dir: {v3_run} or {src_run}")
 
-    v1_cfg = _v1_cfg(False)
-    v2_cfg = _v2_cfg(False)
+    v1_cfg = v1_config(False)
+    v2_cfg = v2_config(False)
     embed = int(v1_cfg.embed_dim)
 
     # Build + load encoders.

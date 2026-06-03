@@ -23,7 +23,8 @@ embeddings from the cross-attention output.
 
 from __future__ import annotations
 
-from typing import Literal
+from pathlib import Path
+from typing import TYPE_CHECKING, Literal
 
 import torch
 import torch.nn as nn
@@ -31,6 +32,9 @@ import torch.nn as nn
 from ...config.architecture import ENCODER
 from ..encoders import PMA, PerModalityEncoder
 from ..fusion import BidirectionalCrossAttention
+
+if TYPE_CHECKING:
+    from .v2_ssl import V2SSLConfig
 
 ContextMode = Literal["joint_pma", "skip", "dual_pma"]
 
@@ -109,6 +113,33 @@ class V2FusionEncoder(nn.Module):
             )
         self.mask_token = nn.Parameter(torch.randn(embed_dim) * 0.02)
         self.embed_dim = embed_dim
+
+    @classmethod
+    def from_checkpoint(
+        cls,
+        checkpoint_path: str | Path,
+        cfg: V2SSLConfig,
+        *,
+        map_location: str = "cpu",
+    ) -> V2FusionEncoder:
+        """Build an encoder sized from ``cfg`` and load its weights, in eval mode.
+
+        Shared constructor for the post-hoc V4 analyses (the cross-validation
+        drivers and the augmentation sweep) that all reuse a V2 encoder trained
+        by ``full_run``. Sizing the encoder from ``cfg`` in one place keeps those
+        callers from drifting out of sync with the orchestrator's V2 config.
+        """
+        encoder = cls(
+            feature_dim=cfg.feature_dim,
+            embed_dim=cfg.embed_dim,
+            n_heads=cfg.n_heads,
+            context_mode=cfg.context_mode,
+            num_context_seeds=cfg.num_context_seeds,
+            acoustic_cnn_width_mult=cfg.acoustic_cnn_width_mult,
+        )
+        encoder.load_state_dict(torch.load(checkpoint_path, map_location=map_location))
+        encoder.eval()
+        return encoder
 
     # -- weight loading ----------------------------------------------------
 

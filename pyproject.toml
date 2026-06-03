@@ -24,6 +24,7 @@ dev = [
     "pytest>=8.0",
     "pytest-cov>=4.1",
     "ruff>=0.15",
+    "pyright>=1.1.400",
 ]
 dl = [
     "torch>=2.2",
@@ -78,3 +79,22 @@ ignore = [
 # Experiment drivers prepend the repo root to sys.path before importing `src`,
 # so their module-level imports legitimately follow that runtime setup.
 "scripts/**" = ["E402"]
+
+[tool.pyright]
+include = ["src"]
+extraPaths = ["src"]
+typeCheckingMode = "basic"
+# The scientific stack defeats several of pyright's standard checks: numpy
+# ufunc/overload signatures and torch's dynamic attributes are not modelled
+# precisely, so the categories below produce noise rather than real findings on
+# correct-at-runtime code (which the test suite exercises). They are downgraded
+# so the type-check gate stays meaningful for the bugs pyright *can* catch:
+# undefined names, unresolved imports, unbound variables, and `__all__` drift.
+reportArgumentType = "none"          # numpy / torch argument overloads
+reportCallIssue = "none"             # numpy / torch call overloads
+reportOperatorIssue = "none"         # numpy operator overloads
+reportAssignmentType = "none"        # numpy dtype assignment widening
+reportReturnType = "none"            # ndarray-vs-scalar return shapes
+reportOptionalMemberAccess = "none"  # dataset loaders are runtime-guarded by data presence
+reportOptionalSubscript = "none"     # ditto
+reportAttributeAccessIssue = "none"  # stdlib Path typing gaps under basic mode

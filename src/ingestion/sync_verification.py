@@ -667,8 +667,7 @@ def apply_sync_correction(
         return mic_data, accel_data, 0, 0, 0.0, 0.0
 
     # Sign convention recap (verified empirically by
-    # `test_known_offset_vibration_leads` and reasoned through in the
-    # SYNC-CORRECTION-DIRECTION derivation in `docs/REVIEW.md`):
+    # `test_known_offset_vibration_leads`, and stated explicitly below):
     #
     #   offset_s > 0 ⇒ vibration leads acoustic
     #             ⇔ at the same physical event the vib-stream's

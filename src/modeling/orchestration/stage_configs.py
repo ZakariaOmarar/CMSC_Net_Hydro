@@ -1,14 +1,14 @@
 """V1-V4 stage hyperparameter builders — the single source of truth.
 
-Each ``_vN_cfg(quick)`` returns the trainer config for one pipeline stage. The
+Each ``vN_config(quick)`` returns the trainer config for one pipeline stage. The
 orchestrator (``full_run``) and every experiment driver under ``scripts/``
 import these, so a hyperparameter is defined in exactly one place; change a
 value here, never at a call site.
 
 The builders are re-exported from ``full_run`` (``from .stage_configs import
-_v1_cfg, ...``) so that ``full_run.main()`` resolves them from its own module
+v1_config, ...``) so that ``full_run.main()`` resolves them from its own module
 namespace. That keeps the multi-seed and hop-length drivers' monkeypatching of
-``full_run._vN_cfg`` working: reassigning the name on the orchestrator module
+``full_run.vN_config`` working: reassigning the name on the orchestrator module
 still overrides what ``main()`` calls.
 
 The leading underscore marks these as research configuration rather than a
@@ -29,7 +29,7 @@ from ..context.v2_ssl import V2SSLConfig
 from ..localization import V4Config
 
 
-def _v1_cfg(quick: bool) -> V1SSLConfig:
+def v1_config(quick: bool) -> V1SSLConfig:
     return V1SSLConfig(
         window_seconds=2.0,
         window_stride_seconds=1.0,
@@ -45,13 +45,11 @@ def _v1_cfg(quick: bool) -> V1SSLConfig:
         epochs=3 if quick else 12,
         batch_size=16,
         lr=1e-3,
-        # Bumped 1e-5 → 1e-4 (2026-05-22 baseline_v2 shift).  The prior value
-        # was one order below the standard SimCLR / AdamW convention; combined
-        # with the lack of early stopping (now wired in) this was the dominant
-        # contributor to the overfitting audit's train/val gaps.  Same bump
-        # applied to V1/V2/V3/V4 builders.  The dataclass default still reads
-        # 1e-5 so older import-sites remain byte-reproducible — change this
-        # literal here only, not at the dataclass.
+        # 1e-4 matches the standard SimCLR / AdamW convention. The dataclass
+        # default of 1e-5 is one order too low and was the dominant contributor
+        # to the overfitting audit's train/val gaps (it predates early stopping).
+        # Set on every V1-V4 builder here, not at the dataclass, so older
+        # import-sites stay byte-reproducible.
         weight_decay=1e-4,
         temperature=0.1,
         val_ratio=0.3,
@@ -104,7 +102,7 @@ def _v1_cfg(quick: bool) -> V1SSLConfig:
     )
 
 
-def _v2_cfg(quick: bool) -> V2SSLConfig:
+def v2_config(quick: bool) -> V2SSLConfig:
     return V2SSLConfig(
         window_seconds=2.0,
         window_stride_seconds=1.0,
@@ -119,19 +117,17 @@ def _v2_cfg(quick: bool) -> V2SSLConfig:
         epochs=3 if quick else 12,
         batch_size=16,
         lr=1e-3,
-        # Bumped 1e-5 → 1e-4 (2026-05-22 baseline_v2 shift).  The prior value
-        # was one order below the standard SimCLR / AdamW convention; combined
-        # with the lack of early stopping (now wired in) this was the dominant
-        # contributor to the overfitting audit's train/val gaps.  Same bump
-        # applied to V1/V2/V3/V4 builders.  The dataclass default still reads
-        # 1e-5 so older import-sites remain byte-reproducible — change this
-        # literal here only, not at the dataclass.
+        # 1e-4 matches the standard SimCLR / AdamW convention. The dataclass
+        # default of 1e-5 is one order too low and was the dominant contributor
+        # to the overfitting audit's train/val gaps (it predates early stopping).
+        # Set on every V1-V4 builder here, not at the dataclass, so older
+        # import-sites stay byte-reproducible.
         weight_decay=1e-4,
         temperature=0.1,
         val_ratio=0.3,
-        # n_mels / n_fft / hop_length inherited from `ACOUSTIC_FEATURES` — see _v1_cfg note above.
+        # n_mels / n_fft / hop_length inherited from `ACOUSTIC_FEATURES` — see v1_config note above.
         cwt_n_scales=32,
-        # CWT enabled — see _v1_cfg note.
+        # CWT enabled — see v1_config note.
         use_cwt=True,
         # Multi-scale window cadence — sourced from the dataset registry
         # (configs/datasets/d*.yaml). V1 and V2 MUST use the same dict
@@ -143,8 +139,8 @@ def _v2_cfg(quick: bool) -> V2SSLConfig:
         window_stride_ratio=WINDOWING.window_stride_ratio,
         # Vibration channel-2: physical-time defaults inherited from
         # `compute_vibration_input_stack` (kurtosis on D4 raw; crest factor
-        # on D1/D2/D3 peak streams).  See _v1_cfg above for justification.
-        # R1b — augmentation parity with V1.  See V1 _v1_cfg note above.
+        # on D1/D2/D3 peak streams).  See v1_config above for justification.
+        # R1b — augmentation parity with V1.  See V1 v1_config note above.
         gain_jitter_db=9.0,
         channel_dropout_p=0.2,
         spec_augment_freq_mask=12,
@@ -172,13 +168,13 @@ def _v2_cfg(quick: bool) -> V2SSLConfig:
         # Two PMA seeds in the context pool — one summary is bottlenecked
         # for a 9–14-token fused sequence.
         num_context_seeds=2,
-        # R1a REVERTED — see `_v1_cfg` note.  Match V1's narrow CNN.
+        # R1a REVERTED — see `v1_config` note.  Match V1's narrow CNN.
         acoustic_cnn_width_mult=1,
         seed=42,
     )
 
 
-def _v3_cfg(quick: bool) -> V3Config:
+def v3_config(quick: bool) -> V3Config:
     return V3Config(
         n_layers=6,
         hidden_dim=64,
@@ -186,21 +182,18 @@ def _v3_cfg(quick: bool) -> V3Config:
         epochs=8 if quick else 15,
         batch_size=32,
         lr=1e-3,
-        # Bumped 1e-5 → 1e-4 (2026-05-22 baseline_v2 shift).  The prior value
-        # was one order below the standard SimCLR / AdamW convention; combined
-        # with the lack of early stopping (now wired in) this was the dominant
-        # contributor to the overfitting audit's train/val gaps.  Same bump
-        # applied to V1/V2/V3/V4 builders.  The dataclass default still reads
-        # 1e-5 so older import-sites remain byte-reproducible — change this
-        # literal here only, not at the dataclass.
+        # 1e-4 matches the standard SimCLR / AdamW convention. The dataclass
+        # default of 1e-5 is one order too low and was the dominant contributor
+        # to the overfitting audit's train/val gaps (it predates early stopping).
+        # Set on every V1-V4 builder here, not at the dataclass, so older
+        # import-sites stay byte-reproducible.
         weight_decay=1e-4,
         val_ratio=0.3,
         unconditional=False,
-        # K = 3 matches the 3-mode hypothesis (Pump / Standstill / Turbine);
-        # see REVIEW.md fix (A).
+        # K = 3 matches the 3-mode hypothesis (Pump / Standstill / Turbine).
         n_threshold_clusters=3,
         # p95 = lower-FPR-tolerant operating point that's still defensible
-        # vs healthy variance; see REVIEW.md fix (C) and §3.4.6.
+        # vs healthy variance (chapter 3 §3.4.6).
         threshold_percentile=95,
         # Per-stage V3 window override — sourced from the dataset registry
         # (configs/datasets/d*.yaml::v3_window_seconds).  Chapter 3 §3.4.4 +
@@ -220,7 +213,7 @@ def _v3_cfg(quick: bool) -> V3Config:
     )
 
 
-def _v4_cfg(quick: bool, scada_dim: int = 0, unconditional: bool = False) -> V4Config:
+def v4_config(quick: bool, scada_dim: int = 0, unconditional: bool = False) -> V4Config:
     return V4Config(
         cnn_feature_dim=64,
         tdoa_feature_dim=32,
@@ -238,22 +231,18 @@ def _v4_cfg(quick: bool, scada_dim: int = 0, unconditional: bool = False) -> V4C
         epochs=15 if quick else 30,
         batch_size=8,
         lr=1e-3,
-        # Bumped 1e-5 → 1e-4 (2026-05-22 baseline_v2 shift).  The prior value
-        # was one order below the standard SimCLR / AdamW convention; combined
-        # with the lack of early stopping (now wired in) this was the dominant
-        # contributor to the overfitting audit's train/val gaps.  Same bump
-        # applied to V1/V2/V3/V4 builders.  The dataclass default still reads
-        # 1e-5 so older import-sites remain byte-reproducible — change this
-        # literal here only, not at the dataclass.
+        # 1e-4 matches the standard SimCLR / AdamW convention. The dataclass
+        # default of 1e-5 is one order too low and was the dominant contributor
+        # to the overfitting audit's train/val gaps (it predates early stopping).
+        # Set on every V1-V4 builder here, not at the dataclass, so older
+        # import-sites stay byte-reproducible.
         weight_decay=1e-4,
         val_ratio=0.3,
         seed=42,
         # Soft-argmax / residual / loss / augmentation: see V4Config defaults.
-        # Residual half-range = 20 cm (was 5 cm).  The 2026-05-11 retrain
-        # showed soft-argmax centre-bias of 10–15 cm on corner-of-grid
-        # ground-truth positions (e.g. D4 `(-20, 0, 0)`); the prior cap
-        # could not correct it, producing 0.192 m MAE vs the prior dense
-        # regressor's 0.160 m.  See REVIEW.md fourth-pass audit.
+        # Residual half-range = 20 cm. Soft-argmax has a centre-bias of 10–15 cm
+        # on corner-of-grid positions (e.g. D4 `(-20, 0, 0)`); a tighter cap
+        # cannot correct it (0.192 m MAE vs a dense regressor's 0.160 m).
         residual_scale_m=0.20,
         soft_argmax_temperature=1.0,
         train_in_centimetres=True,

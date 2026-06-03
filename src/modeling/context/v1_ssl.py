@@ -158,7 +158,7 @@ class V1SSLConfig:
     acoustic_cnn_width_mult: int = ENCODER.acoustic_cnn_width_mult
 
     # Augmentations (applied in feature space) — per-experiment knobs;
-    # the orchestrator's `_v1_cfg(quick)` overrides to publication values.
+    # the orchestrator's `v1_config(quick)` overrides to publication values.
     gain_jitter_db: float = 6.0
     channel_dropout_p: float = 0.2
     spec_augment_freq_mask: int = 6
@@ -699,7 +699,7 @@ def _split_segments_by_recording(
       segment.  This guarantees the mode appears in val for the K = 3
       sanity-gate (the alternative — putting the single recording
       entirely in train — was the structural reason Standstill never
-      appeared in val before this fix; see REVIEW.md fifth-pass note).
+      appeared in val before this fix).
       The temporal-correlation cost is the same as any within-recording
       split in the CBM literature and is documented as a known limit.
 

@@ -37,30 +37,18 @@ import json
 import time
 from dataclasses import asdict, replace
 from pathlib import Path
-from typing import Literal
 
 import numpy as np
-import torch
 
 from ..context.v2_fusion import V2FusionEncoder
 from ..eval import percentile_bootstrap_ci
 from ..localization import (
-    GridSpec,
-    precompute_v4_samples,
+    V4_CANDIDATE_GRID,
     train_v4_localization,
 )
 from ..localization.v4_trainer import _position_key
-from .full_run import (
-    REPO_ROOT,
-    _d3_spatial_overrides,
-    _resolved_loader,
-    _v2_cfg,
-    _v4_cfg,
-)
-
-_CHANNEL_MODES: tuple[Literal["both", "srp_only", "tdoa_only", "vibration_only_learned"], ...] = (
-    "both", "srp_only", "tdoa_only", "vibration_only_learned",
-)
+from .full_run import REPO_ROOT, v2_config, v4_config
+from .v4_cv_common import CHANNEL_MODES, load_or_precompute_cv_samples
 
 
 def _qualify_position(s) -> tuple[float, float, float]:
@@ -96,68 +84,19 @@ def run_lopo(
     out_dir = out_dir or (REPO_ROOT / "results" / "lopo")
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    v2_cfg = _v2_cfg(quick)
-    v4_cfg = _v4_cfg(quick)
+    v2_cfg = v2_config(quick)
+    v4_cfg = v4_config(quick)
 
     print(f"V4 LOPO: loading V2 encoder from {encoder_run}/v2/encoder.pt")
-    encoder = V2FusionEncoder(
-        feature_dim=v2_cfg.feature_dim, embed_dim=v2_cfg.embed_dim,
-        n_heads=v2_cfg.n_heads, context_mode=v2_cfg.context_mode,
-        num_context_seeds=v2_cfg.num_context_seeds,
-        acoustic_cnn_width_mult=v2_cfg.acoustic_cnn_width_mult,
+    encoder = V2FusionEncoder.from_checkpoint(encoder_run / "v2" / "encoder.pt", v2_cfg)
+
+    samples = load_or_precompute_cv_samples(
+        encoder, v2_cfg,
+        samples_cache=samples_cache,
+        burst_aware_srp=burst_aware_srp,
+        log_prefix="V4 LOPO",
     )
-    encoder.load_state_dict(torch.load(encoder_run / "v2" / "encoder.pt", map_location="cpu"))
-    encoder.eval()
-
-    samples: list | None = None
-    if samples_cache is not None and Path(samples_cache).exists():
-        import pickle
-        with Path(samples_cache).open("rb") as fh:
-            samples = pickle.load(fh)
-        print(f"V4 LOPO: loaded {len(samples)} cached V4 samples from {samples_cache}")
-
-    if samples is None:
-        print("V4 LOPO: gathering labeled segments + precomputing V4 samples ...")
-        D2 = _resolved_loader("d2.yaml")
-        D3 = _resolved_loader("d3.yaml")
-        D4 = _resolved_loader("d4.yaml")
-        D5 = _resolved_loader("d5.yaml")
-        d2_labeled = [
-            s for s in D2.list_segments()
-            if s.is_anomaly and s.spatial_label is not None and s.mode_label is not None
-        ]
-        d3_segs = D3.list_segments()
-        overrides = _d3_spatial_overrides(d3_segs)
-        d3_labeled = [s for s in d3_segs if s.recording_id in overrides]
-        d4_labeled = [
-            s for s in D4.list_segments() if s.is_anomaly and s.spatial_label is not None
-        ]
-        d5_labeled = [
-            s for s in D5.list_segments() if s.is_anomaly and s.spatial_label is not None
-        ]
-        all_labeled = d2_labeled + d3_labeled + d4_labeled + d5_labeled
-        print(
-            f"  D2={len(d2_labeled)}, D3={len(d3_labeled)}, D4={len(d4_labeled)}, "
-            f"D5={len(d5_labeled)}, total={len(all_labeled)} labeled recordings"
-        )
-        grid = GridSpec(lo=(-0.22, -0.22, -0.02), hi=(0.40, 0.42, 0.30), n=(32, 32, 16))
-        t0 = time.time()
-        samples = precompute_v4_samples(
-            encoder, all_labeled,
-            v2_cfg=v2_cfg, grid=grid,
-            spatial_label_overrides=overrides,
-            burst_aware_srp=burst_aware_srp, burst_seconds=0.10,
-            restrict_to_knock_intervals=True,
-        )
-        print(f"  precomputed {len(samples)} V4 samples in {time.time() - t0:.1f}s")
-        if samples_cache is not None:
-            import pickle
-            with Path(samples_cache).open("wb") as fh:
-                pickle.dump(samples, fh)
-
-    # Grid must match what was used at precompute (matches the v4_deep_sweep
-    # default + v4_loocv default).
-    grid = GridSpec(lo=(-0.22, -0.22, -0.02), hi=(0.40, 0.42, 0.30), n=(32, 32, 16))
+    grid = V4_CANDIDATE_GRID
 
     # Unique positions = fold keys.  Skip positions with too few windows to
     # produce a meaningful val MAE.
@@ -169,7 +108,7 @@ def run_lopo(
     print(f"V4 LOPO: {len(fold_keys)} folds ({len(skipped)} positions skipped "
           f"with < {min_fold_windows} windows)")
 
-    modes = list(_CHANNEL_MODES) if all_channel_modes else ["both"]
+    modes = list(CHANNEL_MODES) if all_channel_modes else ["both"]
 
     folds_path = out_dir / "folds.jsonl"
     folds_path.write_text("")  # truncate

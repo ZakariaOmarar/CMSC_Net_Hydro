@@ -98,8 +98,8 @@ def _loader(name: str) -> TestDatasetLoader:
     return TestDatasetLoader(spec)
 
 
-def _v2_cfg() -> V2SSLConfig:
-    """Mirror `full_run._v2_cfg(quick=False)` so we feed the encoder the same
+def v2_config() -> V2SSLConfig:
+    """Mirror `full_run.v2_config(quick=False)` so we feed the encoder the same
     feature pipeline it was trained on.  Any drift here would invalidate the
     diagnostic."""
     return V2SSLConfig(
@@ -656,7 +656,7 @@ def _write_report(
 
 
 def main() -> None:
-    cfg = _v2_cfg()
+    cfg = v2_config()
     print(f"[forensics] Loading V2 weights from {V2_WEIGHTS} ...")
     encoder = _load_v2_encoder(V2_WEIGHTS, cfg)
 

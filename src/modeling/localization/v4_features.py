@@ -58,6 +58,14 @@ class GridSpec:
         return np.stack([ax_x[idx[..., 0]], ax_y[idx[..., 1]], ax_z[idx[..., 2]]], axis=-1)
 
 
+# Canonical V4 SRP-PHAT candidate volume: a 32×32×16 grid (~2 cm spacing)
+# covering the union of the D2/D3/D4/D5 rig footprints in metres. Used by the
+# orchestrator, every cross-validation driver, and the V4 sweep scripts — keep
+# it as the single source so a precompute grid never silently drifts from the
+# grid a downstream `soft_argmax` expects.
+V4_CANDIDATE_GRID = GridSpec(lo=(-0.22, -0.22, -0.02), hi=(0.40, 0.42, 0.30), n=(32, 32, 16))
+
+
 def _all_pairs(n: int) -> list[tuple[int, int]]:
     return [(i, j) for i in range(n) for j in range(i + 1, n)]
 

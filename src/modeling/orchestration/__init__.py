@@ -5,7 +5,7 @@ defines the canonical run:
 
   * ``full_run``      — the end-to-end thesis orchestrator (Stages 0–9) and the
                         single source of truth for the per-stage configs
-                        (``_v1_cfg``, ``_v2_cfg``, … reused by ``scripts/``).
+                        (``v1_config``, ``v2_config``, … reused by ``scripts/``).
   * ``multi_seed``    — multi-seed driver that aggregates ``full_run`` into the
                         mean ± std numbers reported in the thesis tables.
   * ``archive``       — archives each run's ``metrics.json`` into the timestamped

@@ -55,7 +55,7 @@ from src.modeling.anomaly_baselines.srp_phat_baseline import (
 from src.modeling.context.v2_fusion import V2FusionEncoder
 from src.modeling.context.v2_ssl import V2SSLConfig
 from src.modeling.localization.multilateration import accel_tdoa_multilateration_v0
-from src.modeling.localization.v4_features import GridSpec
+from src.modeling.localization.v4_features import V4_CANDIDATE_GRID, GridSpec
 from src.modeling.localization.v4_trainer import (
     V4Config,
     V4Sample,
@@ -64,9 +64,9 @@ from src.modeling.localization.v4_trainer import (
 )
 from src.modeling.orchestration.full_run import (
     _d3_spatial_overrides,
-    _resolved_loader,
-    _v2_cfg,
-    _v4_cfg,
+    resolved_loader,
+    v2_config,
+    v4_config,
 )
 
 REPO = Path(__file__).resolve().parents[2]
@@ -176,13 +176,13 @@ def main() -> None:
     log(f"src_run = {src_run}")
     log(f"out_dir = {out_dir}")
 
-    v2_cfg = _v2_cfg(args.quick)
-    v4_cfg = _v4_cfg(args.quick)
+    v2_cfg = v2_config(args.quick)
+    v4_cfg = v4_config(args.quick)
 
     log("Loading loaders ...")
-    D2 = _resolved_loader("d2.yaml")
-    D3 = _resolved_loader("d3.yaml")
-    D4 = _resolved_loader("d4.yaml")
+    D2 = resolved_loader("d2.yaml")
+    D3 = resolved_loader("d3.yaml")
+    D4 = resolved_loader("d4.yaml")
 
     log("Loading V2 encoder ...")
     v2_encoder = _build_v2(v2_cfg)
@@ -201,7 +201,7 @@ def main() -> None:
     d4_labeled = [s for s in D4.list_segments() if s.is_anomaly and s.spatial_label is not None]
     log(f"  D2 labeled: {len(d2_labeled)} | D3 labeled: {len(d3_labeled)} | D4 labeled: {len(d4_labeled)}")
 
-    grid = GridSpec(lo=(-0.22, -0.22, -0.02), hi=(0.40, 0.42, 0.30), n=(32, 32, 16))
+    grid = V4_CANDIDATE_GRID
 
     log("Precomputing V4 samples (one pass; multilat included per R3.3) ...")
     t0 = time.time()

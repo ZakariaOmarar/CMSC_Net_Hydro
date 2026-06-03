@@ -1,7 +1,7 @@
 """Regression test for the 2026-05-18 orchestrator-sync fix.
 
 Before the fix:
-  ``full_run._resolved_loader`` returned a vanilla TestDatasetLoader,
+  ``full_run.resolved_loader`` returned a vanilla TestDatasetLoader,
   and the orchestrator's sync-correction block called
   ``s.segment.mic_data = mic_corr`` post-load.  Because DataSegment is
   ``@dataclass(frozen=True)``, that assignment raised
@@ -11,16 +11,16 @@ Before the fix:
   the V0/V1/V2/V3/V4 downstream stages all consumed unaligned data.
 
 After the fix:
-  ``_resolved_loader`` constructs the loader with
+  ``resolved_loader`` constructs the loader with
   ``sync_correct=True`` so the adapter applies the four-gate sync
   correction at load time (before the frozen DataSegment is built),
   and the orchestrator's audit loop just reads
   ``segment.metadata['sync_correction']``.  No post-load mutation.
 
 This test pins both invariants:
-  1. ``_resolved_loader`` propagates ``vibration_format`` (so D4's
+  1. ``resolved_loader`` propagates ``vibration_format`` (so D4's
      ``"raw"`` format isn't silently demoted to ``"peak"``).
-  2. ``_resolved_loader`` returns a loader whose loaded segments
+  2. ``resolved_loader`` returns a loader whose loaded segments
      carry a populated ``metadata['sync_correction']`` payload — i.e.
      sync correction was actually attempted (applied or gated, but
      never silently skipped).
@@ -66,18 +66,18 @@ def _write_peak_vibration_csv(path: Path, n_rows: int = 16) -> None:
 
 
 def test_resolved_loader_propagates_vibration_format_and_sync_correct() -> None:
-    """The fix in ``full_run._resolved_loader``: sync_correct=True is on by
+    """The fix in ``full_run.resolved_loader``: sync_correct=True is on by
     default, with the orchestrator's historical four-gate thresholds, and
     ``vibration_format`` is preserved when the spec is reconstructed.
     """
-    from src.modeling.orchestration.full_run import _resolved_loader
+    from src.modeling.orchestration.full_run import resolved_loader
 
-    # D4 is the dataset where the old `_resolved_loader` silently dropped
+    # D4 is the dataset where the old `resolved_loader` silently dropped
     # the raw-vibration format and fell back to peak. Under the new
     # `vibration_format: auto` policy, the YAML declares "auto" and the
     # adapter resolves it to "raw" at file-read time (since D4 ships only
     # `vibration_raw_*.csv`). Both invariants matter — pin both.
-    L = _resolved_loader("d4.yaml")
+    L = resolved_loader("d4.yaml")
     assert L.spec.vibration_format == "auto"
     from src.ingestion.adapters import resolve_vibration_format
     # Verify the resolution policy lands on "raw" for D4's actual CSVs.

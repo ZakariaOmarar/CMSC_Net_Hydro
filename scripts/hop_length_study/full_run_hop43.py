@@ -11,7 +11,7 @@ head-to-head against the existing ``results/full_run/metrics.json`` baseline.
 Controlled variables
 --------------------
 * All V1/V2/V3 epoch counts, batch sizes, LRs, augmentation strengths kept
-  at their canonical values via ``_v1_cfg(quick=False)`` / ``_v2_cfg`` / etc.
+  at their canonical values via ``v1_config(quick=False)`` / ``v2_config`` / etc.
 * SpecAugment time-mask width is rescaled from 16 frames at hop=512 to
   ~191 frames at hop=43 so the masked physical duration stays at ~512 ms.
   Without this, hop=43 would mask only ~43 ms — a confound that changes
@@ -64,8 +64,8 @@ N_FFT_NEW = 1024
 ANCHOR_HOP = 512  # the hop the canonical time_mask=16 was tuned for
 
 
-_orig_v1_cfg = fr._v1_cfg
-_orig_v2_cfg = fr._v2_cfg
+_orig_v1_cfg = fr.v1_config
+_orig_v2_cfg = fr.v2_config
 
 
 def _patched_v1_cfg(quick: bool):
@@ -124,9 +124,9 @@ def main() -> None:
         shutil.rmtree(run_dir)
 
     # ---- 2. Monkey-patch the config builders ----
-    print(f"[hop43-wrapper] Patching _v1_cfg / _v2_cfg: hop_length={HOP_NEW}, n_fft={N_FFT_NEW}", flush=True)
-    fr._v1_cfg = _patched_v1_cfg
-    fr._v2_cfg = _patched_v2_cfg
+    print(f"[hop43-wrapper] Patching v1_config / v2_config: hop_length={HOP_NEW}, n_fft={N_FFT_NEW}", flush=True)
+    fr.v1_config = _patched_v1_cfg
+    fr.v2_config = _patched_v2_cfg
     sample_v1 = _patched_v1_cfg(args.quick)
     print(
         f"[hop43-wrapper] V1 cfg: hop={sample_v1.hop_length}, n_fft={sample_v1.n_fft}, "

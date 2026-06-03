@@ -45,7 +45,7 @@ from src.modeling.anomaly.cnf_head import ConditionalRealNVP
 from src.modeling.anomaly.threshold import PerClusterThresholds
 from src.modeling.context.v2_fusion import V2FusionEncoder
 from src.modeling.localization import (
-    GridSpec,
+    V4_CANDIDATE_GRID,
     precompute_v4_samples,
     split_samples_by_position,
     train_v4_localization,
@@ -54,10 +54,10 @@ from src.modeling.orchestration.full_run import (
     REPO_ROOT,
     V4_HOLDOUT_POSITIONS_M,
     _d3_spatial_overrides,
-    _resolved_loader,
-    _v2_cfg,
-    _v3_cfg,
-    _v4_cfg,
+    resolved_loader,
+    v2_config,
+    v3_config,
+    v4_config,
 )
 
 _DROPOUT_LEVELS = {"hd0": 0.0, "hd1": 0.1, "hd2": 0.2, "hd3": 0.3}
@@ -260,9 +260,9 @@ def main() -> None:
                          "select training windows).")
 
     cells = [args.cell] if args.cell else _all_cells()
-    v2_cfg = _v2_cfg(args.quick)
-    v3_cfg = _v3_cfg(args.quick)
-    base_v4 = _v4_cfg(args.quick)
+    v2_cfg = v2_config(args.quick)
+    v3_cfg = v3_config(args.quick)
+    base_v4 = v4_config(args.quick)
     for cid in cells:  # fail fast
         _apply_cell(cid, base_v4)
 
@@ -277,7 +277,7 @@ def main() -> None:
     )
     encoder.load_state_dict(torch.load(encoder_run / "v2" / "encoder.pt", map_location="cpu"))
     encoder.eval()
-    grid = GridSpec(lo=(-0.22, -0.22, -0.02), hi=(0.40, 0.42, 0.30), n=(32, 32, 16))
+    grid = V4_CANDIDATE_GRID
 
     # Mode-specific cache so 'impulse' / 'v3gated' / 'all' training-window
     # selections never collide (they produce different sample sets).
@@ -304,7 +304,7 @@ def main() -> None:
     if v4_samples is None:
         print(f"Loading D2/D3/D4/D5 loaders, precomputing V4 samples "
               f"(train_select={args.train_select}) ...")
-        loaders = {d: _resolved_loader(f"{d}.yaml") for d in ("d2", "d3", "d4", "d5")}
+        loaders = {d: resolved_loader(f"{d}.yaml") for d in ("d2", "d3", "d4", "d5")}
         d2_labeled = [s for s in loaders["d2"].list_segments()
                       if s.is_anomaly and s.spatial_label is not None and s.mode_label is not None]
         d3_segs = loaders["d3"].list_segments()
