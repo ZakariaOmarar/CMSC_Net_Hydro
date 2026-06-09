@@ -33,12 +33,24 @@ from sklearn.feature_selection import mutual_info_classif
 # The Allg_M1 catalog uses German labels — ``Druck`` (pressure), ``Temp``
 # (temperature), ``Durchfluss``/``Q`` (flow), etc.  When a channel doesn't
 # match any keyword we tag it as ``other`` so the report stays honest.
+# Order matters: the first matching family wins, so the more specific keys
+# (e.g. the ``druck`` pressure channels, the ``p_ist``/``lfr`` power-control
+# channels) are listed before broad fallbacks.  The Allg_M1 ``1_P_Ist`` /
+# ``1_P_Soll`` / ``1_P-Regler`` channels are *active power* (Leistung) in the
+# load-frequency-control loop (LFR = Leistungs-Frequenz-Regelung), not pressure;
+# the earlier ``_p_`` pressure key mis-tagged them, so it was removed.
 _PHYSICAL_FAMILY_KEYWORDS: dict[str, tuple[str, ...]] = {
-    "pressure": ("druck", "pressure", "_p_", "_p1", "_p2", "p_t", "p_e"),
-    "thermal": ("temp", "temperatur", "_t_", "_t1", "_t2"),
-    "hydraulic": ("durchfluss", "flow", "level", "fuell", "q_", "_q1", "_q2"),
-    "rotational": ("drehzahl", "rpm", "speed", "_n_", "frequenz"),
-    "electrical": ("leistung", "power", "spannung", "voltage", "strom", "current"),
+    "electrical": (
+        "leistung", "power", "spannung", "voltage", "strom", "current",
+        "p_ist", "p_soll", "p-regler", "p_regler", "lfr", "erregerstrom", "kv",
+    ),
+    "pressure": ("druck", "pressure"),
+    "thermal": ("temp", "temperatur", "_t1", "_t2"),
+    "hydraulic": (
+        "durchfluss", "flow", "pegel", "level", "fuell", "leitapparat",
+        "q_", "_q1", "_q2",
+    ),
+    "rotational": ("drehzahl", "rpm", "upm", "speed", "_n_", "frequenz"),
     "vibration": ("vib", "schwing"),
 }
 

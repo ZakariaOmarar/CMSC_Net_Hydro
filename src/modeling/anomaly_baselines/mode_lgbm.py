@@ -454,9 +454,85 @@ def predict_modes(
     return out
 
 
+@dataclass
+class ModeFloorResult:
+    """Unsupervised clustering quality of hand-engineered features vs mode.
+
+    The RQ1 *lower bound*: how much of the operating mode is recoverable by
+    clustering the same hand-engineered features the supervised
+    :func:`train_v0_mode_lgbm` ceiling uses, with no representation learning and
+    no labels.  The label-free encoder (V1/V2) must beat this floor to justify
+    its complexity, and approach the supervised ceiling from below.
+    """
+
+    nmi: float
+    ari: float
+    purity: float
+    n_windows: int
+    n_recordings: int
+    label_set: tuple[str, ...]
+    n_clusters: int
+
+
+def cluster_mode_floor(
+    loaders: TestDatasetLoader | Iterable[TestDatasetLoader],
+    cfg: V0ModeConfig | None = None,
+    *,
+    n_clusters: int = 3,
+) -> ModeFloorResult:
+    """K-means on hand-engineered features, scored against the mode labels.
+
+    Pools the labelled (D1/D2) recordings of one or more loaders, standardises
+    the per-window features, clusters them with K-means(``n_clusters``), and
+    scores the assignment against the recorded mode with NMI / ARI / Hungarian
+    purity — the same metrics Chapter 6 uses for the learned context, so the
+    floor, the learned encoder, and the supervised ceiling all live on one axis.
+    """
+    from sklearn.preprocessing import StandardScaler
+
+    from ..context.cluster_metric import cluster_purity_and_nmi
+
+    cfg = cfg or V0ModeConfig()
+    if not isinstance(loaders, (list, tuple)):
+        loaders = [loaders]
+
+    feats: list[np.ndarray] = []
+    labels: list[str] = []
+    rec_keys: set[str] = set()
+    valid = set(cfg.target_classes)
+    for loader in loaders:
+        for s in loader.list_segments():
+            if (s.mode_label or "") not in valid:
+                continue
+            f, _ = extract_mode_features(s, cfg)
+            if f.shape[0] == 0:
+                continue
+            feats.append(f)
+            labels.extend([s.mode_label] * f.shape[0])
+            rec_keys.add(f"{s.dataset_id}::{Path(s.source_dir).name}/{s.recording_id}")
+    if not feats:
+        raise RuntimeError("no labelled (D1/D2) windows found for the RQ1 floor")
+
+    x = np.concatenate(feats, axis=0)
+    x = StandardScaler().fit_transform(x)
+    k = max(1, min(n_clusters, len(set(labels))))
+    m = cluster_purity_and_nmi(x, labels, n_clusters=k, seed=cfg.seed)
+    return ModeFloorResult(
+        nmi=float(m["nmi"]),
+        ari=float(m["ari"]),
+        purity=float(m["purity"]),
+        n_windows=int(x.shape[0]),
+        n_recordings=len(rec_keys),
+        label_set=tuple(m["label_set"]),
+        n_clusters=k,
+    )
+
+
 __all__ = [
+    "ModeFloorResult",
     "ModeTrainResult",
     "V0ModeConfig",
+    "cluster_mode_floor",
     "extract_mode_features",
     "predict_modes",
     "train_v0_mode_lgbm",

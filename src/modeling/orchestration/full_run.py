@@ -5,7 +5,8 @@ Chapter 6 paradigm-comparison tables need under one timestamped output
 directory ``results/runs/<ts>__full_pipeline_b5_cma/``:
 
   Stage 0  cross-modal sync verification + correction audit
-  Stage 1  V0 baselines per dataset (LightGBM mode, LSTM-AE, SRP-PHAT)
+  Stage 1  V0 baselines: RQ2 anomaly reference (Khamaisi trio + KDE, pooled,
+             acoustic + vibration) plus per-dataset LightGBM mode + SRP-PHAT
   Stage 2  V1 + V2 trained with the ``b5_cma`` intervention
              (cma_weight=0.5, cma_temperature=0.1)
              + V2 A1 ablation (drop_vibration) + modality-balance probe
@@ -70,10 +71,14 @@ from ..anomaly.threshold import per_cluster_alert_breakdown
 from ..anomaly.v3_per_modality import V3AcousticOnlyAdapter, V3VibrationOnlyAdapter
 from ..anomaly.v3_trainer import encoder_level_transition_fpr, precompute_paired
 from ..anomaly_baselines import (
+    ALL_MODELS,
+    MODALITIES,
     SRPConfig,
     V0Config,
     V0ModeConfig,
+    cluster_mode_floor,
     evaluate_srp_phat,
+    evaluate_v0_anomaly,
     summarise,
     train_v0_lstm_ae,
     train_v0_mode_lgbm,
@@ -443,6 +448,44 @@ def _run_v0(loaders: list, log: Callable[[str], None]) -> dict:
             except Exception as e:
                 log(f"  V0 SRP-PHAT ({ds_name}) skipped: {type(e).__name__}: {e}")
                 out[f"v0_srp_phat_{ds_name}"] = {"skipped": f"{type(e).__name__}: {e}"}
+
+    # RQ1 context floor — unsupervised K-means on hand-engineered features,
+    # scored against the mode label (NMI / ARI / purity).  The lower bound the
+    # label-free encoder must beat; the LightGBM rows above are the supervised
+    # upper bound it approaches from below.
+    try:
+        floor = cluster_mode_floor(loaders, V0ModeConfig())
+        log(f"  V0 RQ1 mode-floor (K-means/handcrafted): NMI={floor.nmi:.3f} "
+            f"ARI={floor.ari:.3f} purity={floor.purity:.3f} "
+            f"({floor.n_windows} win / {floor.n_recordings} rec)")
+        out["v0_mode_floor"] = {
+            "nmi": floor.nmi, "ari": floor.ari, "purity": floor.purity,
+            "n_windows": floor.n_windows, "n_recordings": floor.n_recordings,
+            "label_set": list(floor.label_set), "n_clusters": floor.n_clusters,
+        }
+    except Exception as e:
+        log(f"  V0 RQ1 mode-floor skipped: {type(e).__name__}: {e}")
+        out["v0_mode_floor"] = {"skipped": f"{type(e).__name__}: {e}"}
+
+    # RQ2 anomaly reference — the full Khamaisi trio + KDE, pooled across all
+    # campaigns (like the V3 training cohort) and scored on the same protocol the
+    # conditional head reports: within-campaign healthy-vs-anomaly ROC-AUC plus
+    # the in-distribution-vs-domain-shift false-positive-rate contrast.  This is
+    # the credible prior-work reference V3 must improve on for RQ2.
+    out["v0_anomaly_rq2"] = {}
+    for modality in MODALITIES:
+        for model in ALL_MODELS:
+            cell = f"{modality}/{model}"
+            try:
+                t0 = time.time()
+                res = evaluate_v0_anomaly(loaders, model, modality, V0Config())
+                out["v0_anomaly_rq2"][cell] = res.to_dict()
+                log(f"  V0 RQ2 {cell} {time.time()-t0:.0f}s — "
+                    f"ROC-AUC={res.roc_auc:.3f} FPR(in-dist={res.fpr_in_distribution:.3f} "
+                    f"shift={res.fpr_domain_shift:.3f})")
+            except Exception as e:
+                log(f"  V0 RQ2 {cell} skipped: {type(e).__name__}: {e}")
+                out["v0_anomaly_rq2"][cell] = {"skipped": f"{type(e).__name__}: {e}"}
     return out
 
 
@@ -693,7 +736,7 @@ def main(
         _stage_done("stage_0_sync")
 
     if run_v0_baselines:
-        log("=== Stage 1 — V0 baselines (LSTM-AE / LightGBM / SRP-PHAT) ===")
+        log("=== Stage 1 — V0 baselines (RQ2 anomaly trio+KDE / LightGBM / SRP-PHAT) ===")
         metrics["stages"]["v0"] = _run_v0(SSL_LOADERS, log)
         _stage_done("stage_1_v0")
 
@@ -1159,6 +1202,9 @@ def main(
         v2_cfg=v2_cfg, grid=grid,
         spatial_label_overrides=overrides,
         burst_aware_srp=True, burst_seconds=0.10,
+        # Pool `x_for_v3` with V3's pooling so gating-time NLL matches the
+        # manifold the flow was trained on (avoids the PMA-2/mean saturation).
+        v3_xt_pool=getattr(v3, "xt_pool", None),
     )
     log(f"  {len(v4_samples)} V4 samples in {time.time()-t0:.0f}s")
     n_with_multilat = sum(1 for s in v4_samples if s.multilat_xyz is not None)
@@ -1251,27 +1297,23 @@ def main(
             ))
             log(f"  holdout MAE (ungated) = {res_sh.val_mae_3d:.4f} m")
 
-            # V3-gated holdout: keep holdout predictions whose window overlaps
-            # a V3-detected event in their recording.
+            # V3-gated holdout: keep holdout windows V3 flags as anomalous,
+            # scored directly on each sample's cached x_for_v3 + context (the
+            # direct-path gate).  Replaces the legacy interval-overlap matching
+            # (`_v3_event_intervals_for_recordings` → `window_overlaps_any`),
+            # whose recording-id collisions + timeline drift produced
+            # n_holdout_gated=0.  See `..localization.v3_gating`.
             gated_v4_eval = True
             if gated_v4_eval and "fusion" in v3_results:
                 try:
-                    intervals = _v3_event_intervals_for_recordings(
-                        holdout_pos, LOADERS_BY_ID, v2.encoder,
-                        v3_results["fusion"], v2_cfg, v3_cfg,
+                    from ..localization.v3_gating import gate_samples_by_v3
+                    v3f = v3_results["fusion"]
+                    gres = gate_samples_by_v3(
+                        v3f.flow, v3f.thresholds, holdout_pos,
+                        percentile=(99 if int(v3_cfg.threshold_percentile) >= 99 else 95),
                     )
-                    from ..anomaly.weak_labels import window_overlaps_any
-                    win_s = float(v2_cfg.window_seconds)
-                    # res_sh.val_* are aligned to holdout_pos order (explicit split
-                    # preserves order within val).  Recompute per-sample error.
-                    keep_mask = []
-                    for s in holdout_pos:
-                        ivs = intervals.get(s.recording_id, [])
-                        keep_mask.append(
-                            bool(ivs) and window_overlaps_any(
-                                s.window_start_s, s.window_start_s + win_s, ivs)
-                        )
-                    keep = np.asarray(keep_mask, dtype=bool)
+                    keep = gres.keep_mask
+                    sh["v3_gating_diagnostic"] = gres.per_recording
                     if keep.shape[0] == res_sh.val_predictions.shape[0] and keep.any():
                         err = np.linalg.norm(
                             res_sh.val_predictions[keep] - res_sh.val_targets[keep], axis=-1)

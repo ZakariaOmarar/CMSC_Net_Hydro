@@ -220,6 +220,7 @@ def precompute_v4_samples(
     burst_seconds: float = 0.10,
     restrict_to_knock_intervals: bool = True,
     knock_intervals_override: dict[str, list[tuple[float, float]]] | None = None,
+    v3_xt_pool: torch.nn.Module | None = None,
     device: torch.device | str = "auto",
 ) -> list[V4Sample]:
     """Walk segments, slice labeled anomaly windows, build `V4Sample`s.
@@ -244,6 +245,14 @@ def precompute_v4_samples(
     v2_encoder = v2_encoder.to(device).eval()
     for p in v2_encoder.parameters():
         p.requires_grad_(False)
+    # `x_for_v3` is the input the V3 flow scores at gating time, so it must be
+    # pooled the way V3 was trained.  When V3 used the learned PMA-2 pool
+    # (`xt_pool="pma2"`), mean-pooling here yields an off-distribution `x` and
+    # the flow's NLL saturates (~1e6) — the cause of the historical
+    # n_holdout_gated=0/"flag everything" behaviour.  Pool with the V3 xt_pool
+    # when supplied; otherwise fall back to the legacy mean (V3 `xt_pool="mean"`).
+    if v3_xt_pool is not None:
+        v3_xt_pool = v3_xt_pool.to(device).eval()
 
     def _per_segment_window_s(dataset_id: str) -> float:
         if window_seconds is None:
@@ -367,11 +376,16 @@ def precompute_v4_samples(
             with torch.no_grad():
                 out = v2_encoder(ac_win, ac_xyz, vib_win, vib_xyz, ds_idx, mask_p=0.0)
             c_t = out["context"].squeeze(0).cpu().numpy().astype(np.float32)
-            # V3's flow input: mean-pool of fused tokens (the same `x` V3
-            # consumes during training).  Cached on the V4Sample so V3-
-            # gated cohort assembly doesn't have to re-run the encoder.
+            # V3's flow input, pooled exactly as V3 consumes it during training
+            # (PMA-2 when supplied, else mean — see `_extract_xc`).  Cached on
+            # the V4Sample so V3-gated cohort assembly doesn't re-run the encoder.
             fused = torch.cat([out["a_fused"], out["v_fused"]], dim=1)
-            x_for_v3 = fused.mean(dim=1).squeeze(0).cpu().numpy().astype(np.float32)
+            if v3_xt_pool is not None:
+                with torch.no_grad():
+                    x_t = v3_xt_pool(fused)
+            else:
+                x_t = fused.mean(dim=1)
+            x_for_v3 = x_t.squeeze(0).cpu().numpy().astype(np.float32)
 
             # Front-end features on the raw waveform window.  Burst-aware
             # SRP crops to the highest-energy ~100 ms sub-window before

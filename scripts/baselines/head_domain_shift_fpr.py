@@ -1,0 +1,241 @@
+"""Compute the V3 head's domain-shift healthy FPR on the V0 protocol.
+
+The three-paradigm V3 artifacts do NOT persist the learned ``xt_pool`` (pma2),
+so a saved flow cannot be re-scored (NLL blows up; see
+``scripts/diagnostics/probe_v3_score_scale.py``).  This script therefore
+*retrains* the three V3 pipelines (acoustic / vibration / fusion) from the
+frozen V1+V2 encoders of ``--from-run`` and, while ``xt_pool`` is still live in
+memory, scores the healthy cohort and computes the same two calibration regimes
+``evaluate_v0_anomaly`` reports for the baselines:
+
+  * **FPR in-dist** — threshold fit + evaluated on the same held-out conditions
+    (window-parity split).
+  * **FPR shift**   — threshold fit on one set of held-out healthy *conditions*
+    and evaluated on a disjoint set (recording-level split) — the regime that
+    sends the acoustic OC-SVM to 0.95.
+
+Reported for V3-acoustic, V3-vibration, the late-fusion AND of the two, and
+V3-fusion, so the head sits on the *identical* axis as
+``tab:res_v0_anomaly``'s FPR-shift column.
+
+Run::
+
+    python -m scripts.baselines.head_domain_shift_fpr --from-run results/runs/<id>            # full, seed 42
+    python -m scripts.baselines.head_domain_shift_fpr --from-run results/runs/<id> --quick     # 3-epoch smoke
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as _dt
+import json
+import sys
+from pathlib import Path
+
+import numpy as np
+
+REPO = Path(__file__).resolve().parents[2]
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+
+from src.config import resolve_device  # noqa: E402
+from src.modeling.anomaly.threshold import PerClusterThresholds  # noqa: E402
+from src.modeling.anomaly.v3_per_modality import (  # noqa: E402
+    V3AcousticOnlyAdapter,
+    V3VibrationOnlyAdapter,
+)
+from src.modeling.anomaly.v3_trainer import score_segments, train_v3_cnf  # noqa: E402
+from src.modeling.anomaly_baselines.v0_evaluation import _plain_split, _wilson_interval  # noqa: E402
+from src.modeling.context.v2_ssl import _precompute_paired  # noqa: E402
+from src.modeling.orchestration.full_run import (  # noqa: E402
+    resolved_loader,
+    v1_config,
+    v2_config,
+    v3_config,
+)
+from scripts.paradigms.run_v3_three_paradigms import (  # noqa: E402
+    _build_v1_encoder,
+    _build_v2_encoder,
+    _load_state,
+)
+
+DATASETS = ("d1", "d2", "d3", "d4")
+PERCENTILE = 95
+N_CLUSTERS = 3
+
+
+def _log(msg: str) -> None:
+    line = f"[{_dt.datetime.now():%H:%M:%S}] {msg}"
+    try:
+        print(line, flush=True)
+    except UnicodeEncodeError:
+        print(line.encode("ascii", "replace").decode("ascii"), flush=True)
+
+
+def _score_healthy_per_recording(encoder, flow, xt_pool, loaders, v2_cfg, device, win_override):
+    """Score every healthy window under one pipeline, tagged by dataset+recording.
+
+    Returns ``(scores, contexts, rec_key, ds_id)`` aligned per window.  Each
+    recording is scored on its own so its windows carry a single rec id.
+
+    ``win_override`` is V3's per-dataset ``window_seconds_override`` — it MUST be
+    threaded through so the scored windows match the ones the flow trained on
+    (otherwise NLL blows up exactly like the legacy mean-pool mismatch).
+    """
+    scores_all, ctx_all, rec_all, ds_all = [], [], [], []
+    for L in loaders:
+        for seg in L.list_segments():
+            if seg.is_anomaly:
+                continue
+            ps = _precompute_paired(seg, v2_cfg)
+            if ps is None:
+                continue
+            s, c, _ = score_segments(
+                encoder, flow, [ps], v2_cfg=v2_cfg, xt_pool=xt_pool, device=device,
+                window_seconds_override=win_override,
+            )
+            if s.size == 0:
+                continue
+            key = f"{seg.dataset_id}::{seg.recording_id}"
+            scores_all.append(np.asarray(s, dtype=np.float64))
+            ctx_all.append(np.asarray(c, dtype=np.float64))
+            rec_all.extend([key] * s.size)
+            ds_all.extend([seg.dataset_id] * s.size)
+    return (
+        np.concatenate(scores_all) if scores_all else np.zeros(0),
+        np.concatenate(ctx_all) if ctx_all else np.zeros((0, 1)),
+        np.array(rec_all, dtype=object),
+        np.array(ds_all, dtype=object),
+    )
+
+
+def _fpr(thr: PerClusterThresholds, ctx, scores) -> float:
+    alerts, _ = thr.alert(ctx, scores, percentile=PERCENTILE)
+    return float(alerts.mean()) if alerts.size else float("nan")
+
+
+def _alerts(thr: PerClusterThresholds, ctx, scores) -> np.ndarray:
+    a, _ = thr.alert(ctx, scores, percentile=PERCENTILE)
+    return a.astype(bool)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--from-run", required=True, help="run dir with v1/ + v2/ encoders")
+    ap.add_argument("--quick", action="store_true", help="3-epoch smoke")
+    ap.add_argument("--seed", type=int, default=42)
+    args = ap.parse_args()
+
+    src = Path(args.from_run).resolve()
+    if not src.exists():
+        raise SystemExit(f"--from-run {src} not found")
+
+    device = resolve_device("auto")
+    v1_cfg, v2_cfg, v3_cfg = v1_config(args.quick), v2_config(args.quick), v3_config(args.quick)
+    _log(f"device={device}  xt_pool={v3_cfg.xt_pool}  v3.epochs={v3_cfg.epochs}  seed={args.seed}")
+
+    _log("loading frozen V1/V2 encoders ...")
+    v1_a = _build_v1_encoder("acoustic", v1_cfg); _load_state(src / "v1" / "acoustic.pt", v1_a, "V1-a")
+    v1_v = _build_v1_encoder("vibration", v1_cfg); _load_state(src / "v1" / "vibration.pt", v1_v, "V1-v")
+    v2 = _build_v2_encoder(v2_cfg); _load_state(src / "v2" / "encoder.pt", v2, "V2")
+
+    _log("loading SSL loaders (d1-d4) ...")
+    loaders = [resolved_loader(f"{d}.yaml") for d in DATASETS]
+
+    pipelines = {
+        "acoustic": V3AcousticOnlyAdapter(v1_a),
+        "vibration": V3VibrationOnlyAdapter(v1_v),
+        "fusion": v2,
+    }
+
+    # Train all three; keep flow + live xt_pool, then score healthy.
+    scored: dict[str, dict] = {}
+    for name, enc in pipelines.items():
+        _log(f"training V3-{name} ...")
+        res = train_v3_cnf(enc, loaders, v2_cfg=v2_cfg, v3_cfg=v3_cfg)
+        _log(f"  V3-{name} val NLL final = {res.val_nll[-1]:+.2f}  (xt_pool={'yes' if res.xt_pool is not None else 'mean'})")
+        s, c, rec, ds = _score_healthy_per_recording(
+            enc, res.flow, res.xt_pool, loaders, v2_cfg, device, v3_cfg.window_seconds_override,
+        )
+        _log(f"  scored {s.size} healthy windows; NLL p50={np.percentile(s,50):+.1f} p95={np.percentile(s,95):+.1f}")
+        scored[name] = {"scores": s, "ctx": c, "rec": rec, "ds": ds}
+
+    # Shared recording-level split (same conditions for every pipeline so AND aligns).
+    rec_keys = sorted(set(scored["acoustic"]["rec"].tolist()))
+    shift_fit_recs, shift_eval_recs = _plain_split(rec_keys, 0.5, args.seed + 1)
+    _log(f"\nshift split: fit on {len(shift_fit_recs)} recs, eval on {len(shift_eval_recs)} recs")
+    _log(f"  shift_eval recordings: {sorted(shift_eval_recs)}")
+
+    def _mask(rec, ids):
+        return np.array([r in ids for r in rec], dtype=bool)
+
+    # Per-pipeline thresholds fit on shift_fit conditions.
+    thr = {}
+    for name in ("acoustic", "vibration", "fusion"):
+        d = scored[name]
+        fm = _mask(d["rec"], shift_fit_recs)
+        k = max(1, min(N_CLUSTERS, int(fm.sum())))
+        thr[name] = PerClusterThresholds.fit(d["ctx"][fm], d["scores"][fm], n_clusters=k, seed=args.seed)
+
+    # In-dist (window-parity split within shift_fit conditions) for reference.
+    rows = {}
+    for name in ("acoustic", "vibration", "fusion"):
+        d = scored[name]
+        fm = np.where(_mask(d["rec"], shift_fit_recs))[0]
+        em = _mask(d["rec"], shift_eval_recs)
+        in_fit, in_eval = fm[0::2], fm[1::2]
+        k = max(1, min(N_CLUSTERS, int(in_fit.size)))
+        thr_in = PerClusterThresholds.fit(d["ctx"][in_fit], d["scores"][in_fit], n_clusters=k, seed=args.seed)
+        fpr_in = _fpr(thr_in, d["ctx"][in_eval], d["scores"][in_eval])
+        fpr_shift = _fpr(thr[name], d["ctx"][em], d["scores"][em])
+        n_eval = int(em.sum())
+        ci = _wilson_interval(int(round(fpr_shift * n_eval)), n_eval)
+        rows[name] = {"fpr_in_dist": fpr_in, "fpr_shift": fpr_shift,
+                      "n_shift_eval": n_eval, "shift_ci95": list(ci)}
+
+    # Late-fusion AND on the shift_eval cohort (each modality under its shift threshold).
+    da, dv = scored["acoustic"], scored["vibration"]
+    em_a, em_v = _mask(da["rec"], shift_eval_recs), _mask(dv["rec"], shift_eval_recs)
+    and_alert = _alerts(thr["acoustic"], da["ctx"][em_a], da["scores"][em_a]) & \
+                _alerts(thr["vibration"], dv["ctx"][em_v], dv["scores"][em_v])
+    # in-dist AND
+    fa = np.where(_mask(da["rec"], shift_fit_recs))[0]
+    ia_fit, ia_eval = fa[0::2], fa[1::2]
+    ka = max(1, min(N_CLUSTERS, int(ia_fit.size)))
+    thr_a_in = PerClusterThresholds.fit(da["ctx"][ia_fit], da["scores"][ia_fit], n_clusters=ka, seed=args.seed)
+    thr_v_in = PerClusterThresholds.fit(dv["ctx"][ia_fit], dv["scores"][ia_fit], n_clusters=ka, seed=args.seed)
+    and_in = _alerts(thr_a_in, da["ctx"][ia_eval], da["scores"][ia_eval]) & \
+             _alerts(thr_v_in, dv["ctx"][ia_eval], dv["scores"][ia_eval])
+    rows["AND"] = {"fpr_in_dist": float(and_in.mean()) if and_in.size else float("nan"),
+                   "fpr_shift": float(and_alert.mean()) if and_alert.size else float("nan"),
+                   "n_shift_eval": int(em_a.sum()), "shift_ci95": None}
+
+    # Per-dataset shift_eval composition (transparency: which campaign is the shift).
+    ds_eval = da["ds"][em_a]
+    comp = {str(u): int((ds_eval == u).sum()) for u in sorted(set(ds_eval.tolist()))}
+
+    out = {
+        "generated": _dt.datetime.now().strftime("%Y%m%d_%H%M%S"),
+        "from_run": str(src.relative_to(REPO)), "seed": args.seed, "quick": args.quick,
+        "protocol": "V0 domain-shift mirror: per-cluster p95 threshold fit on shift_fit "
+                    "healthy conditions, evaluated on disjoint shift_eval conditions.",
+        "shift_eval_datasets": comp,
+        "rows": rows,
+    }
+    _log("\n=== HEAD healthy FPR (same axis as tab:res_v0_anomaly) ===")
+    _log(f"{'pipeline':<12} {'FPR in-dist':>12} {'FPR shift':>12} {'n_eval':>8}")
+    for name in ("acoustic", "vibration", "AND", "fusion"):
+        r = rows[name]
+        _log(f"{name:<12} {r['fpr_in_dist']:>12.3f} {r['fpr_shift']:>12.3f} {r['n_shift_eval']:>8d}")
+    _log(f"shift_eval composition by dataset: {comp}")
+
+    out_dir = REPO / "results" / "v0_anomaly"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    suffix = "_quick" if args.quick else ""
+    out_path = out_dir / f"head_domain_shift_{out['generated']}{suffix}.json"
+    out_path.write_text(json.dumps(out, indent=2), encoding="utf-8")
+    _log(f"wrote {out_path.relative_to(REPO)}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

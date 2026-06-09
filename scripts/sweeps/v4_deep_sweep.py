@@ -50,6 +50,7 @@ from src.modeling.localization import (
     split_samples_by_position,
     train_v4_localization,
 )
+from src.modeling.localization.v3_gating import gate_samples_by_v3
 from src.modeling.orchestration.full_run import (
     REPO_ROOT,
     V4_HOLDOUT_POSITIONS_M,
@@ -334,6 +335,10 @@ def main() -> None:
             burst_aware_srp=True, burst_seconds=0.10,
             restrict_to_knock_intervals=restrict,
             knock_intervals_override=override,
+            # Pool `x_for_v3` with V3's own pooling so gating-time NLL is on the
+            # same manifold the flow was trained on (avoids the PMA-2/mean
+            # mismatch that saturated the flow → trivial gating).
+            v3_xt_pool=(v3_holder.xt_pool if v3_holder is not None else None),
         )
         print(f"Precomputed {len(v4_samples)} V4 samples ({args.train_select}) "
               f"in {time.time()-t0:.0f}s")
@@ -351,87 +356,29 @@ def main() -> None:
                          f"{len(holdout_pos)} holdout (train_select={args.train_select})")
     print(f"Spatial split: {len(train_pos)} train / {len(holdout_pos)} holdout samples")
 
-    # Precompute V3-gated keep-mask ONCE per holdout cohort (mode-independent —
-    # gating depends on V3 + the V4Sample's cached features, not on the V4
-    # channel mode).
-    #
-    # DIRECT PATH (the fix for the n_holdout_gated=0 bug):  every V4Sample
-    # already carries its own `x_for_v3` + `context` (cached at precompute
-    # time from the V2 encoder at exactly the V4 window).  So we score each
-    # holdout V4Sample directly with V3 and use `PerClusterThresholds.alert`
-    # — the same gate `gate_samples_by_alert` uses everywhere else in the
-    # codebase.  The legacy interval-overlap path
-    # (`_v3_event_intervals_for_recordings` → `window_overlaps_any`) ran
-    # V3 again over the whole recording via sliding-window inference and
-    # then tried to match V4 windows by (recording_id, time-overlap); that
-    # path has two silent failure modes (recording_id collisions across
-    # D4 speed{1,2,3} subfolders that share a position folder name, and
-    # time-coordinate drift between V3's stride-0.25 timeline and V4's
-    # impulse-burst window placement) and was producing n_holdout_gated=0
-    # on every cell of the deepc_20260526_155457 campaign even under
-    # `--train-select impulse`, despite V3 firing correctly on the
-    # training-distribution real_anomaly metric (F1 ~ 0.94).
+    # V3-gated keep-mask for the holdout cohort (mode-independent — gating
+    # depends on V3 + the cached V4Sample features, not the V4 channel mode).
+    # The direct-path gate scores each holdout V4Sample in place with V3 and
+    # applies the per-cluster percentile alert rule; it replaces the legacy
+    # interval-overlap matching that produced n_holdout_gated=0 (recording-id
+    # collisions across D4 speed{1,2,3} + V3/V4 timeline drift).  See
+    # `src/modeling/localization/v3_gating.py`.
     gate_keep = None
     gating_diag: dict = {}
     if v3_holder is not None:
         try:
-            import torch as _t
-            xs = _t.from_numpy(np.stack([s.x_for_v3 for s in holdout_pos], axis=0)).float()
-            cs = _t.from_numpy(np.stack([s.context for s in holdout_pos], axis=0)).float()
-            with _t.no_grad():
-                v3_holder.flow.eval()
-                scores = v3_holder.flow.anomaly_score(xs, cs).cpu().numpy()
-            contexts_np = np.stack([s.context for s in holdout_pos], axis=0)
-            percentile = 99 if int(v3_cfg.threshold_percentile) >= 99 else 95
-            alerts, _clusters = v3_holder.thresholds.alert(
-                contexts_np, scores, percentile=percentile)
-            gate_keep = alerts.astype(bool)
-
-            # Per-recording diagnostics + opt-in per-recording fallback:
-            # if `--gating-min-events > 0` and a recording fires fewer
-            # alerts than this, pick the top `(1 - q)` of in-recording
-            # scores as the permissive gate (so V4 always has at least N
-            # gated windows per holdout recording).
-            rec_to_idx: dict = {}
-            for i, s in enumerate(holdout_pos):
-                rec_to_idx.setdefault(s.recording_id, []).append(i)
-            n_fallback_used = 0
-            for rid, idxs in rec_to_idx.items():
-                rec_scores = scores[idxs]
-                rec_alerts = gate_keep[idxs]
-                used_fb = False
-                fb_high = None
-                fb_n = None
-                strict_n = int(rec_alerts.sum())
-                if (
-                    int(args.gating_min_events) > 0
-                    and strict_n < int(args.gating_min_events)
-                    and rec_scores.size > 0
-                ):
-                    q = float(np.quantile(rec_scores, float(args.gating_fallback_quantile)))
-                    fb_mask = rec_scores > q
-                    if int(fb_mask.sum()) >= int(args.gating_min_events):
-                        for j, keep in zip(idxs, fb_mask):
-                            gate_keep[j] = bool(keep)
-                        used_fb = True
-                        fb_high = q
-                        fb_n = int(fb_mask.sum())
-                        n_fallback_used += 1
-                gating_diag[rid] = {
-                    "dataset_id": holdout_pos[idxs[0]].dataset_id,
-                    "n_windows": len(idxs),
-                    "score_min": float(rec_scores.min()) if rec_scores.size else None,
-                    "score_p50": float(np.quantile(rec_scores, 0.50)) if rec_scores.size else None,
-                    "score_p95": float(np.quantile(rec_scores, 0.95)) if rec_scores.size else None,
-                    "score_max": float(rec_scores.max()) if rec_scores.size else None,
-                    "strict_n_alerts": strict_n,
-                    "used_fallback": used_fb,
-                    "fallback_high": fb_high,
-                    "fallback_n_alerts": fb_n,
-                }
+            gres = gate_samples_by_v3(
+                v3_holder.flow, v3_holder.thresholds, holdout_pos,
+                percentile=(99 if int(v3_cfg.threshold_percentile) >= 99 else 95),
+                min_events=int(args.gating_min_events),
+                fallback_quantile=float(args.gating_fallback_quantile),
+            )
+            gate_keep = gres.keep_mask
+            gating_diag = gres.per_recording
             print(f"  V3 gating (direct): {len(gating_diag)} holdout recordings, "
-                  f"fallback used on {n_fallback_used}, "
-                  f"gate_keep.sum()={int(gate_keep.sum())}/{gate_keep.size}")
+                  f"fallback used on {gres.n_fallback_recordings}, "
+                  f"gate_keep.sum()={gres.n_final}/{gate_keep.size} "
+                  f"(strict {gres.n_strict})")
         except Exception as e:
             print(f"  V3 gating precompute skipped: {type(e).__name__}: {e}")
             gate_keep = None

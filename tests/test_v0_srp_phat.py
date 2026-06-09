@@ -32,21 +32,10 @@ pytestmark = pytest.mark.requires_data
 
 
 def _resolved_spec(name: str) -> DatasetSpec:
-    spec = DatasetSpec.from_yaml(REPO_ROOT / "configs" / "datasets" / f"{name}.yaml")
-    return DatasetSpec(
-        id=spec.id,
-        root=REPO_ROOT / spec.root,
-        n_mics=spec.n_mics,
-        n_vibrations=spec.n_vibrations,
-        accel_target_sr=spec.accel_target_sr,
-        position_source=(
-            REPO_ROOT / spec.position_source
-            if spec.position_source not in ("default", "rowii")
-            else spec.position_source
-        ),
-        label_scheme=spec.label_scheme,
-        extra=spec.extra,
-    )
+    # `from_yaml` already resolves root + position_path to absolute paths, so the
+    # spec is used as-is.  (The earlier hand-reconstruction dropped position_path,
+    # which broke D3, whose position_source="d3_position_json" requires it.)
+    return DatasetSpec.from_yaml(REPO_ROOT / "configs" / "datasets" / f"{name}.yaml")
 
 
 def _truncated_loader(name: str, max_seconds: float = 3.0):

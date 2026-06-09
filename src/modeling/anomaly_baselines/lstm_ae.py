@@ -310,6 +310,8 @@ def train_v0_lstm_ae(
     loader: TestDatasetLoader,
     cfg: V0Config | None = None,
     extract_fn=extract_log_mel_windows,
+    *,
+    split: tuple[set[str], set[str]] | None = None,
 ) -> TrainResult:
     """Train the V0 LSTM-AE on healthy recordings of one dataset.
 
@@ -319,17 +321,45 @@ def train_v0_lstm_ae(
     using the same trainer + model.  The model's input dim follows
     ``cfg.effective_feature_dim`` so the caller must set
     ``cfg.feature_dim = 3`` when using the vibration extractor.
+
+    ``split`` (optional): an explicit ``(train_recording_ids,
+    val_recording_ids)`` pair.  When supplied it overrides the internal
+    recording split, so a caller (e.g. the RQ2 harness in `v0_evaluation`)
+    can train the AE on exactly the same fit pool the other V0 scorers and
+    the threshold use — avoiding cross-model leakage.
+    """
+    cfg = cfg or V0Config()
+    segments = loader.list_segments()
+    windows, rec_ids = _gather_healthy_windows(segments, cfg, extract_fn=extract_fn)
+    return fit_lstm_ae_on_windows(windows, rec_ids, cfg, split=split)
+
+
+def fit_lstm_ae_on_windows(
+    windows: np.ndarray,
+    rec_ids: list[str],
+    cfg: V0Config | None = None,
+    *,
+    split: tuple[set[str], set[str]] | None = None,
+) -> TrainResult:
+    """Train the V0 LSTM-AE on a pre-extracted ``(windows, rec_ids)`` corpus.
+
+    Splitting :func:`train_v0_lstm_ae` into "gather" and "fit" lets the RQ2
+    harness pool healthy windows across *several* datasets (the way the
+    proposed head is trained on `ANOM_LOADERS`) and feed them here with an
+    explicit recording split, while the single-loader entry point stays a thin
+    wrapper.  ``windows`` is ``(N, T, F)`` with ``F == cfg.effective_feature_dim``.
     """
     cfg = cfg or V0Config()
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
 
-    segments = loader.list_segments()
-    windows, rec_ids = _gather_healthy_windows(segments, cfg, extract_fn=extract_fn)
     if windows.shape[0] == 0:
         raise RuntimeError("no healthy windows found for V0 training")
 
-    train_ids, val_ids = _split_by_recording(rec_ids, cfg.val_ratio, cfg.seed)
+    if split is not None:
+        train_ids, val_ids = set(split[0]), set(split[1])
+    else:
+        train_ids, val_ids = _split_by_recording(rec_ids, cfg.val_ratio, cfg.seed)
     train_mask = np.array([r in train_ids for r in rec_ids], dtype=bool)
     val_mask = np.array([r in val_ids for r in rec_ids], dtype=bool)
 

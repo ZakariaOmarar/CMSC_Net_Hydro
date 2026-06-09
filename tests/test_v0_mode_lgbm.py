@@ -16,6 +16,7 @@ from src.ingestion.test_dataset_loader import (
 )
 from src.modeling.anomaly_baselines.mode_lgbm import (
     V0ModeConfig,
+    cluster_mode_floor,
     extract_mode_features,
     predict_modes,
     train_v0_mode_lgbm,
@@ -138,3 +139,18 @@ def test_train_and_predict_end_to_end() -> None:
         assert r["probs"].shape == (r["n_windows"], n_present)
         assert r["predicted_class"].shape == (r["n_windows"],)
         assert np.allclose(r["probs"].sum(axis=1), 1.0, atol=1e-3)
+
+
+def test_cluster_mode_floor_end_to_end() -> None:
+    loader, _ = _truncated_loader(max_seconds=5.0)
+    cfg = V0ModeConfig(
+        n_mels=32, n_fft=512, hop_length=256, window_seconds=0.5,
+        window_overlap=0.5, seed=0,
+    )
+    floor = cluster_mode_floor(loader, cfg)
+    # D1 has two labelled modes (Pump, Turbine) → K clamps to 2.
+    assert floor.n_clusters == 2
+    assert floor.n_windows >= 2 and floor.n_recordings >= 2
+    for v in (floor.nmi, floor.ari, floor.purity):
+        assert np.isfinite(v)
+    assert 0.0 <= floor.nmi <= 1.0 and 0.0 <= floor.purity <= 1.0
