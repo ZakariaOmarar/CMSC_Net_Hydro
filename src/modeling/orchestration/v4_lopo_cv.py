@@ -114,6 +114,7 @@ def run_lopo(
     folds_path.write_text("")  # truncate
 
     per_mode_results: dict[str, list[dict]] = {m: [] for m in modes}
+    fold_preds: dict[int, dict[str, tuple]] = {}  # fi -> {mode: (preds, targets)} for #15
 
     for fi, hold in enumerate(fold_keys, start=1):
         tr, va = _split_lopo(samples, hold)
@@ -135,6 +136,8 @@ def run_lopo(
                 })
                 continue
             errs = np.linalg.norm(res.val_predictions - res.val_targets, axis=-1)
+            fold_preds.setdefault(fi, {})[mode] = (
+                np.asarray(res.val_predictions), np.asarray(res.val_targets))
             ci_low, ci_high = float("nan"), float("nan")
             if errs.size >= 2:
                 ci = percentile_bootstrap_ci(errs, n_boot=1000, seed=seed)
@@ -157,6 +160,24 @@ def run_lopo(
             print(f"  fold {fi}/{len(fold_keys)} [{mode}] @ {_position_str(hold)}: "
                   f"MAE={res.val_mae_3d:.3f}m (train MAE={res.train_mae_3d:.3f}m) "
                   f"n_val={len(va)} in {time.time()-t0:.0f}s")
+
+    # #15 — late-fusion paradigm: uniform average of the two unimodal heads'
+    # per-window predictions on each held-out position (guarded; only when both
+    # unimodal modes were run and their val windows align).
+    if "srp_only" in modes and "tdoa_only" in modes:
+        lf_rows: list[dict] = []
+        for fi, mp in fold_preds.items():
+            sp, td = mp.get("srp_only"), mp.get("tdoa_only")
+            if sp is None or td is None or sp[0].shape != td[0].shape or sp[0].size == 0:
+                continue
+            lf_pred = 0.5 * (sp[0] + td[0])
+            lf_err = np.linalg.norm(lf_pred - sp[1], axis=-1)
+            lf_rows.append({"fold": fi, "channel_mode": "late_fusion_uniform",
+                            "val_mae_3d_m": float(lf_err.mean()),
+                            "n_val_windows": int(lf_err.size)})
+        if lf_rows:
+            per_mode_results["late_fusion_uniform"] = lf_rows
+            modes = modes + ["late_fusion_uniform"]
 
     aggregate: dict[str, dict] = {}
     for mode, rows in per_mode_results.items():

@@ -44,6 +44,7 @@ from src.modeling.anomaly.v3_per_modality import (  # noqa: E402
     V3VibrationOnlyAdapter,
 )
 from src.modeling.anomaly.v3_trainer import score_segments, train_v3_cnf  # noqa: E402
+from src.modeling.anomaly.event_detection import v3_real_anomaly_detection  # noqa: E402
 from src.modeling.anomaly_baselines.v0_evaluation import _plain_split, _wilson_interval  # noqa: E402
 from src.modeling.context.v2_ssl import _precompute_paired  # noqa: E402
 from src.modeling.orchestration.full_run import (  # noqa: E402
@@ -147,8 +148,12 @@ def main() -> int:
         "fusion": v2,
     }
 
+    # Anomaly segments for the event-level fifth axis (#16).
+    anom_segs = [s for L in loaders for s in L.list_segments() if s.is_anomaly]
+
     # Train all three; keep flow + live xt_pool, then score healthy.
     scored: dict[str, dict] = {}
+    event_f1: dict[str, dict] = {}
     for name, enc in pipelines.items():
         _log(f"training V3-{name} ...")
         res = train_v3_cnf(enc, loaders, v2_cfg=v2_cfg, v3_cfg=v3_cfg)
@@ -158,6 +163,18 @@ def main() -> int:
         )
         _log(f"  scored {s.size} healthy windows; NLL p50={np.percentile(s,50):+.1f} p95={np.percentile(s,95):+.1f}")
         scored[name] = {"scores": s, "ctx": c, "rec": rec, "ds": ds}
+        # #16 event-level precision/recall/F1 vs weak envelope labels (guarded —
+        # a failure here must not lose the domain-shift result).
+        try:
+            ev = v3_real_anomaly_detection(
+                enc, res.flow, res.thresholds, anom_segs,
+                v2_cfg=v2_cfg, xt_pool=res.xt_pool, device=device,
+            )
+            event_f1[name] = {k: ev.get(k) for k in ("precision", "recall", "f1")}
+            _log(f"  event-level (#16): P={ev.get('precision')} R={ev.get('recall')} F1={ev.get('f1')}")
+        except Exception as e:  # noqa: BLE001
+            event_f1[name] = {"error": f"{type(e).__name__}: {e}"}
+            _log(f"  event-level F1 FAILED ({type(e).__name__}: {e})")
 
     # Shared recording-level split (same conditions for every pipeline so AND aligns).
     rec_keys = sorted(set(scored["acoustic"]["rec"].tolist()))
@@ -220,6 +237,7 @@ def main() -> int:
                     "healthy conditions, evaluated on disjoint shift_eval conditions.",
         "shift_eval_datasets": comp,
         "rows": rows,
+        "event_f1": event_f1,
     }
     _log("\n=== HEAD healthy FPR (same axis as tab:res_v0_anomaly) ===")
     _log(f"{'pipeline':<12} {'FPR in-dist':>12} {'FPR shift':>12} {'n_eval':>8}")
