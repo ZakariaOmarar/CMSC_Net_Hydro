@@ -5,7 +5,14 @@ from __future__ import annotations
 import csv
 import warnings
 from collections.abc import Iterable, Sequence
-from datetime import UTC, datetime
+from datetime import datetime
+
+try:  # ``datetime.UTC`` exists only on Python 3.11+; shim it for 3.10 and earlier.
+    from datetime import UTC
+except ImportError:  # pragma: no cover - exercised on Python <= 3.10
+    from datetime import timezone as _timezone
+
+    UTC = _timezone.utc
 from pathlib import Path
 
 import numpy as np

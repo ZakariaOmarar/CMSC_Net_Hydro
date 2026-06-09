@@ -36,8 +36,15 @@ from __future__ import annotations
 
 import argparse
 import json
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
+
+try:  # ``datetime.UTC`` is Python 3.11+; shim it for 3.10 and earlier.
+    from datetime import UTC
+except ImportError:  # pragma: no cover
+    from datetime import timezone as _timezone
+
+    UTC = _timezone.utc
 
 import numpy as np
 from sklearn.feature_selection import mutual_info_classif

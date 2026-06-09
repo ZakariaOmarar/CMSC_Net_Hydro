@@ -261,18 +261,33 @@ class TestDatasetLoader:
         wanted_modes = None if modes is None else {m.lower() for m in modes}
         groups = self._scan_recursive(self._spec.root)
         segments: list[TestDatasetSegment] = []
+        n_failed = 0
+        first_err: Exception | None = None
         for g in groups:
             try:
                 tds = self._load_one(g)
-            except Exception:
+            except Exception as e:  # noqa: BLE001
                 # Skip recordings that don't match the strict adapter (e.g., a
                 # subfolder that has the wrong channel count for this spec).
+                n_failed += 1
+                if first_err is None:
+                    first_err = e
                 continue
             if wanted_modes is not None:
                 m = (tds.mode_label or "").lower()
                 if m not in wanted_modes:
                     continue
             segments.append(tds)
+        # Every group failing (rather than some) is never "wrong channel count" —
+        # it is a systematic loader bug (e.g. a NameError in the adapter). Surface
+        # it loudly instead of returning an empty list that downstream stages
+        # mis-report as "no healthy/labelled windows".
+        if groups and not segments:
+            raise RuntimeError(
+                f"all {len(groups)} recording group(s) under {self._spec.root} failed "
+                f"to load; first error was "
+                f"{type(first_err).__name__}: {first_err}"
+            ) from first_err
         return segments
 
     def _scan_recursive(self, root: Path) -> list[RecordingGroup]:
