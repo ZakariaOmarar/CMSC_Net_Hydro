@@ -406,8 +406,9 @@ def _audit_sync(loaders: list, log: Callable[[str], None]) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _run_v0(loaders: list, log: Callable[[str], None]) -> dict:
+def _run_v0(loaders: list, log: Callable[[str], None], anom_loaders: list | None = None) -> dict:
     out: dict = {}
+    anom_loaders = anom_loaders if anom_loaders is not None else loaders
     for L in loaders:
         ds_name = L.spec.id
         if ds_name in ("d1", "d2"):
@@ -478,7 +479,7 @@ def _run_v0(loaders: list, log: Callable[[str], None]) -> dict:
             cell = f"{modality}/{model}"
             try:
                 t0 = time.time()
-                res = evaluate_v0_anomaly(loaders, model, modality, V0Config())
+                res = evaluate_v0_anomaly(anom_loaders, model, modality, V0Config())
                 out["v0_anomaly_rq2"][cell] = res.to_dict()
                 log(f"  V0 RQ2 {cell} {time.time()-t0:.0f}s — "
                     f"ROC-AUC={res.roc_auc:.3f} FPR(in-dist={res.fpr_in_distribution:.3f} "
@@ -737,7 +738,7 @@ def main(
 
     if run_v0_baselines:
         log("=== Stage 1 — V0 baselines (RQ2 anomaly trio+KDE / LightGBM / SRP-PHAT) ===")
-        metrics["stages"]["v0"] = _run_v0(SSL_LOADERS, log)
+        metrics["stages"]["v0"] = _run_v0(SSL_LOADERS, log, anom_loaders=ANOM_LOADERS)
         _stage_done("stage_1_v0")
 
     # ================================================================= S2

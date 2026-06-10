@@ -188,9 +188,15 @@ def main(argv: list[str] | None = None) -> int:
     record("7 finalize_results", rc)
 
     # --- Step 8: classical localization baselines with bootstrap CIs (#12) --
-    rc = _run("8/8 localization_baselines_ci (SRP-PHAT + accel-TDOA CIs)",
+    rc = _run("8/9 localization_baselines_ci (SRP-PHAT + accel-TDOA CIs)",
               [PY, "-m", "scripts.baselines.localization_baselines_ci", *q], log)
     record("8 localization_baselines_ci", rc)
+
+    # --- Step 9: multi-seed V0 domain-shift (defensible OC-SVM robustness) ---
+    ms_args = ["--seeds", "42", "1337"] if args.quick else []  # 2-seed smoke when --quick
+    rc = _run("9/9 v0_domain_shift_multiseed (baseline shift-FPR over seeds)",
+              [PY, "-m", "scripts.baselines.v0_domain_shift_multiseed", *ms_args], log)
+    record("9 v0_domain_shift_multiseed", rc)
 
     # --- Summary ------------------------------------------------------------
     print("\n" + "=" * 70)
@@ -198,12 +204,14 @@ def main(argv: list[str] | None = None) -> int:
     for name, status in results:
         print(f"  {name:26} {status}")
     print(f"\n  log: {log_path.relative_to(REPO)}")
-    print("\nAll 11 audit items covered:")
-    print("  backbone consistency #1,#6,#8,#11 (full_run) |per-position #2 + LOPO CIs #4 (finalize)")
+    print("\nAll audit items covered:")
+    print("  backbone #1,#6,#8,#11 (full_run) | per-position #2 + LOPO CIs #4 (finalize)")
     print("  classical baseline+CIs #7,#12 (finalize + localization_baselines_ci)")
-    print("  reg-grid recall #9 (finalize) |late-fusion in LOPO #15 (v4_lopo_cv) ")
-    print("  event-level F1 #16 (head_domain_shift_fpr) |domain-shift #20 (already in thesis)")
-    print("  See results/reports/finalize_results_*.md and the per-step JSON outputs.")
+    print("  reg-grid recall #9 (finalize) | late-fusion in LOPO #15 (v4_lopo_cv)")
+    print("  RQ2 alert table + event-F1 #16 + domain-shift #20 (head_domain_shift_fpr, live xt_pool)")
+    print("  OC-SVM/baseline shift robustness over seeds (v0_domain_shift_multiseed)")
+    print("  Outputs: results/reports/finalize_results_*.md, results/v0_anomaly/head_domain_shift_*.json,")
+    print("           results/v0_anomaly/v0_domain_shift_multiseed_*.json")
     print("=" * 70)
     log.close()
     return 0 if all(s == "OK" or s.startswith("SKIPPED") for _, s in results) else 1

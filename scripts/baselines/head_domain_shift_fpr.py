@@ -72,7 +72,7 @@ def _log(msg: str) -> None:
         print(line.encode("ascii", "replace").decode("ascii"), flush=True)
 
 
-def _score_healthy_per_recording(encoder, flow, xt_pool, loaders, v2_cfg, device, win_override):
+def _score_healthy_per_recording(encoder, flow, xt_pool, loaders, v2_cfg, device, win_override, anomaly: bool = False):
     """Score every healthy window under one pipeline, tagged by dataset+recording.
 
     Returns ``(scores, contexts, rec_key, ds_id)`` aligned per window.  Each
@@ -85,7 +85,7 @@ def _score_healthy_per_recording(encoder, flow, xt_pool, loaders, v2_cfg, device
     scores_all, ctx_all, rec_all, ds_all = [], [], [], []
     for L in loaders:
         for seg in L.list_segments():
-            if seg.is_anomaly:
+            if bool(seg.is_anomaly) != anomaly:  # healthy when anomaly=False, faults when True
                 continue
             ps = _precompute_paired(seg, v2_cfg)
             if ps is None:
@@ -117,6 +117,10 @@ def _fpr(thr: PerClusterThresholds, ctx, scores) -> float:
 def _alerts(thr: PerClusterThresholds, ctx, scores) -> np.ndarray:
     a, _ = thr.alert(ctx, scores, percentile=PERCENTILE)
     return a.astype(bool)
+
+
+def _fmt(x) -> str:
+    return f"{x:.3f}" if isinstance(x, (int, float)) else "n/a"
 
 
 def main() -> int:
@@ -153,6 +157,8 @@ def main() -> int:
 
     # Train all three; keep flow + live xt_pool, then score healthy.
     scored: dict[str, dict] = {}
+    scored_anom: dict[str, dict] = {}
+    deployed_thr: dict[str, PerClusterThresholds] = {}
     event_f1: dict[str, dict] = {}
     for name, enc in pipelines.items():
         _log(f"training V3-{name} ...")
@@ -163,6 +169,16 @@ def main() -> int:
         )
         _log(f"  scored {s.size} healthy windows; NLL p50={np.percentile(s,50):+.1f} p95={np.percentile(s,95):+.1f}")
         scored[name] = {"scores": s, "ctx": c, "rec": rec, "ds": ds}
+        # Anomaly cohorts + the deployed per-cluster threshold, for the RQ2 alert
+        # table (tab:res_rq2_alert) that the degenerate full_run stage-8 cannot
+        # produce (it scores the saved flow without the live xt_pool).
+        deployed_thr[name] = res.thresholds
+        sa, ca, _, dsa = _score_healthy_per_recording(
+            enc, res.flow, res.xt_pool, loaders, v2_cfg, device,
+            v3_cfg.window_seconds_override, anomaly=True,
+        )
+        scored_anom[name] = {"scores": sa, "ctx": ca, "ds": dsa}
+        _log(f"  scored {sa.size} anomaly windows (D2/D3/D4 recall via deployed threshold)")
         # #16 event-level precision/recall/F1 vs weak envelope labels (guarded —
         # a failure here must not lose the domain-shift result).
         try:
@@ -230,6 +246,48 @@ def main() -> int:
     ds_eval = da["ds"][em_a]
     comp = {str(u): int((ds_eval == u).sum()) for u in sorted(set(ds_eval.tolist()))}
 
+    # --- RQ2 per-cohort alert table (tab:res_rq2_alert): healthy FPR + D2/D3/D4
+    #     recall under each pipeline's DEPLOYED per-cluster threshold, plus the
+    #     parameter-free AND / OR late-fusion rules. Guarded so a failure here
+    #     cannot lose the domain-shift / event-F1 results computed above. ---
+    def _dep_alerts(name, ctx, scores):
+        a, _ = deployed_thr[name].alert(np.asarray(ctx), np.asarray(scores), percentile=PERCENTILE)
+        return a.astype(bool)
+
+    def _compute_alert_table() -> dict:
+        cohorts = ("d2", "d3", "d4")
+        tbl: dict[str, dict] = {}
+        for name in ("acoustic", "vibration", "fusion"):
+            h = _dep_alerts(name, scored[name]["ctx"], scored[name]["scores"])
+            row = {"healthy_fpr": float(h.mean()) if h.size else float("nan")}
+            a = scored_anom[name]
+            for c in cohorts:
+                m = a["ds"] == c
+                am = _dep_alerts(name, a["ctx"][m], a["scores"][m]) if m.any() else np.zeros(0, bool)
+                row[c] = float(am.mean()) if am.size else None
+            tbl[name] = row
+        # AND / OR: acoustic and vibration alerts aligned per window (same segments/order).
+        ha = _dep_alerts("acoustic", scored["acoustic"]["ctx"], scored["acoustic"]["scores"])
+        hv = _dep_alerts("vibration", scored["vibration"]["ctx"], scored["vibration"]["scores"])
+        nh = min(ha.size, hv.size)
+        aa, av = scored_anom["acoustic"], scored_anom["vibration"]
+        for rule, op in (("AND", np.logical_and), ("OR", np.logical_or)):
+            row = {"healthy_fpr": float(op(ha[:nh], hv[:nh]).mean()) if nh else float("nan")}
+            for c in cohorts:
+                ma, mv = aa["ds"] == c, av["ds"] == c
+                ca_ = _dep_alerts("acoustic", aa["ctx"][ma], aa["scores"][ma]) if ma.any() else np.zeros(0, bool)
+                cv_ = _dep_alerts("vibration", av["ctx"][mv], av["scores"][mv]) if mv.any() else np.zeros(0, bool)
+                nc = min(ca_.size, cv_.size)
+                row[c] = float(op(ca_[:nc], cv_[:nc]).mean()) if nc else None
+            tbl[rule] = row
+        return tbl
+
+    try:
+        alert_table = _compute_alert_table()
+    except Exception as e:  # noqa: BLE001
+        alert_table = {"error": f"{type(e).__name__}: {e}"}
+        _log(f"RQ2 alert table FAILED ({type(e).__name__}: {e})")
+
     out = {
         "generated": _dt.datetime.now().strftime("%Y%m%d_%H%M%S"),
         "from_run": str(src.relative_to(REPO)), "seed": args.seed, "quick": args.quick,
@@ -238,6 +296,7 @@ def main() -> int:
         "shift_eval_datasets": comp,
         "rows": rows,
         "event_f1": event_f1,
+        "rq2_alert_table": alert_table,
     }
     _log("\n=== HEAD healthy FPR (same axis as tab:res_v0_anomaly) ===")
     _log(f"{'pipeline':<12} {'FPR in-dist':>12} {'FPR shift':>12} {'n_eval':>8}")
@@ -245,6 +304,13 @@ def main() -> int:
         r = rows[name]
         _log(f"{name:<12} {r['fpr_in_dist']:>12.3f} {r['fpr_shift']:>12.3f} {r['n_shift_eval']:>8d}")
     _log(f"shift_eval composition by dataset: {comp}")
+
+    _log("\n=== RQ2 alert table (deployed threshold): healthy FPR + per-cohort recall ===")
+    _log(f"{'rule':<12} {'healthyFPR':>10} {'D2':>7} {'D3':>7} {'D4':>7}")
+    for nm in ("acoustic", "vibration", "AND", "OR", "fusion"):
+        r = alert_table.get(nm, {})
+        _log(f"{nm:<12} {_fmt(r.get('healthy_fpr')):>10} {_fmt(r.get('d2')):>7} "
+             f"{_fmt(r.get('d3')):>7} {_fmt(r.get('d4')):>7}")
 
     out_dir = REPO / "results" / "v0_anomaly"
     out_dir.mkdir(parents=True, exist_ok=True)

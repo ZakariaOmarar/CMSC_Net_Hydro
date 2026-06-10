@@ -137,8 +137,14 @@ def gate_samples_by_v3(
 
     if not samples:
         return GateResult(np.zeros(0, bool), 0, 0, 0, np.zeros(0), {})
-    xs = torch.from_numpy(np.stack([np.asarray(s.x_for_v3) for s in samples], axis=0)).float()
-    cs = torch.from_numpy(np.stack([np.asarray(s.context) for s in samples], axis=0)).float()
+    # Match the flow's device: on a GPU box the flow lives on cuda while these
+    # tensors are built on cpu, which raises a device-mismatch in anomaly_score.
+    try:
+        dev = next(flow.parameters()).device
+    except StopIteration:  # pragma: no cover - flow always has parameters
+        dev = torch.device("cpu")
+    xs = torch.from_numpy(np.stack([np.asarray(s.x_for_v3) for s in samples], axis=0)).float().to(dev)
+    cs = torch.from_numpy(np.stack([np.asarray(s.context) for s in samples], axis=0)).float().to(dev)
     with torch.no_grad():
         flow.eval()
         scores = flow.anomaly_score(xs, cs).cpu().numpy()
