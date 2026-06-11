@@ -123,11 +123,77 @@ def _fmt(x) -> str:
     return f"{x:.3f}" if isinstance(x, (int, float)) else "n/a"
 
 
+def _compute_shift_rows(scored: dict, seed: int) -> tuple[dict, dict]:
+    """One domain-shift evaluation at a given split ``seed``.
+
+    Reuses the per-window NLL scores (which are seed-independent); only the
+    held-in/held-out recording partition and the per-cluster k-means depend on
+    ``seed``. This makes a multi-seed sweep over the shift split nearly free
+    once the three flows are trained and scored. Returns ``(rows, comp)`` where
+    ``rows`` carries fpr_in_dist / fpr_shift for acoustic/vibration/fusion/AND
+    and ``comp`` is the per-dataset composition of the shift-eval cohort.
+    """
+    rec_keys = sorted(set(scored["acoustic"]["rec"].tolist()))
+    shift_fit_recs, shift_eval_recs = _plain_split(rec_keys, 0.5, seed + 1)
+
+    def _mask(rec, ids):
+        return np.array([r in ids for r in rec], dtype=bool)
+
+    # Per-pipeline thresholds fit on shift_fit conditions.
+    thr = {}
+    for name in ("acoustic", "vibration", "fusion"):
+        d = scored[name]
+        fm = _mask(d["rec"], shift_fit_recs)
+        k = max(1, min(N_CLUSTERS, int(fm.sum())))
+        thr[name] = PerClusterThresholds.fit(d["ctx"][fm], d["scores"][fm], n_clusters=k, seed=seed)
+
+    # In-dist (window-parity split within shift_fit conditions) for reference.
+    rows = {}
+    for name in ("acoustic", "vibration", "fusion"):
+        d = scored[name]
+        fm = np.where(_mask(d["rec"], shift_fit_recs))[0]
+        em = _mask(d["rec"], shift_eval_recs)
+        in_fit, in_eval = fm[0::2], fm[1::2]
+        k = max(1, min(N_CLUSTERS, int(in_fit.size)))
+        thr_in = PerClusterThresholds.fit(d["ctx"][in_fit], d["scores"][in_fit], n_clusters=k, seed=seed)
+        fpr_in = _fpr(thr_in, d["ctx"][in_eval], d["scores"][in_eval])
+        fpr_shift = _fpr(thr[name], d["ctx"][em], d["scores"][em])
+        n_eval = int(em.sum())
+        ci = _wilson_interval(int(round(fpr_shift * n_eval)), n_eval)
+        rows[name] = {"fpr_in_dist": fpr_in, "fpr_shift": fpr_shift,
+                      "n_shift_eval": n_eval, "shift_ci95": list(ci)}
+
+    # Late-fusion AND on the shift_eval cohort (each modality under its shift threshold).
+    da, dv = scored["acoustic"], scored["vibration"]
+    em_a, em_v = _mask(da["rec"], shift_eval_recs), _mask(dv["rec"], shift_eval_recs)
+    and_alert = _alerts(thr["acoustic"], da["ctx"][em_a], da["scores"][em_a]) & \
+                _alerts(thr["vibration"], dv["ctx"][em_v], dv["scores"][em_v])
+    # in-dist AND
+    fa = np.where(_mask(da["rec"], shift_fit_recs))[0]
+    ia_fit, ia_eval = fa[0::2], fa[1::2]
+    ka = max(1, min(N_CLUSTERS, int(ia_fit.size)))
+    thr_a_in = PerClusterThresholds.fit(da["ctx"][ia_fit], da["scores"][ia_fit], n_clusters=ka, seed=seed)
+    thr_v_in = PerClusterThresholds.fit(dv["ctx"][ia_fit], dv["scores"][ia_fit], n_clusters=ka, seed=seed)
+    and_in = _alerts(thr_a_in, da["ctx"][ia_eval], da["scores"][ia_eval]) & \
+             _alerts(thr_v_in, dv["ctx"][ia_eval], dv["scores"][ia_eval])
+    rows["AND"] = {"fpr_in_dist": float(and_in.mean()) if and_in.size else float("nan"),
+                   "fpr_shift": float(and_alert.mean()) if and_alert.size else float("nan"),
+                   "n_shift_eval": int(em_a.sum()), "shift_ci95": None}
+
+    # Per-dataset shift_eval composition (transparency: which campaign is the shift).
+    ds_eval = da["ds"][em_a]
+    comp = {str(u): int((ds_eval == u).sum()) for u in sorted(set(ds_eval.tolist()))}
+    return rows, comp
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--from-run", required=True, help="run dir with v1/ + v2/ encoders")
     ap.add_argument("--quick", action="store_true", help="3-epoch smoke")
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--seeds", type=int, nargs="+", default=None,
+                    help="If given, also sweep the shift split over these seeds and "
+                         "report mean/range/collapse-count (reuses the one retrain).")
     args = ap.parse_args()
 
     src = Path(args.from_run).resolve()
@@ -192,59 +258,44 @@ def main() -> int:
             event_f1[name] = {"error": f"{type(e).__name__}: {e}"}
             _log(f"  event-level F1 FAILED ({type(e).__name__}: {e})")
 
-    # Shared recording-level split (same conditions for every pipeline so AND aligns).
+    # Primary shift-split table at the headline seed (drives tab:res_rq2_shift).
     rec_keys = sorted(set(scored["acoustic"]["rec"].tolist()))
     shift_fit_recs, shift_eval_recs = _plain_split(rec_keys, 0.5, args.seed + 1)
     _log(f"\nshift split: fit on {len(shift_fit_recs)} recs, eval on {len(shift_eval_recs)} recs")
     _log(f"  shift_eval recordings: {sorted(shift_eval_recs)}")
+    rows, comp = _compute_shift_rows(scored, args.seed)
 
-    def _mask(rec, ids):
-        return np.array([r in ids for r in rec], dtype=bool)
-
-    # Per-pipeline thresholds fit on shift_fit conditions.
-    thr = {}
-    for name in ("acoustic", "vibration", "fusion"):
-        d = scored[name]
-        fm = _mask(d["rec"], shift_fit_recs)
-        k = max(1, min(N_CLUSTERS, int(fm.sum())))
-        thr[name] = PerClusterThresholds.fit(d["ctx"][fm], d["scores"][fm], n_clusters=k, seed=args.seed)
-
-    # In-dist (window-parity split within shift_fit conditions) for reference.
-    rows = {}
-    for name in ("acoustic", "vibration", "fusion"):
-        d = scored[name]
-        fm = np.where(_mask(d["rec"], shift_fit_recs))[0]
-        em = _mask(d["rec"], shift_eval_recs)
-        in_fit, in_eval = fm[0::2], fm[1::2]
-        k = max(1, min(N_CLUSTERS, int(in_fit.size)))
-        thr_in = PerClusterThresholds.fit(d["ctx"][in_fit], d["scores"][in_fit], n_clusters=k, seed=args.seed)
-        fpr_in = _fpr(thr_in, d["ctx"][in_eval], d["scores"][in_eval])
-        fpr_shift = _fpr(thr[name], d["ctx"][em], d["scores"][em])
-        n_eval = int(em.sum())
-        ci = _wilson_interval(int(round(fpr_shift * n_eval)), n_eval)
-        rows[name] = {"fpr_in_dist": fpr_in, "fpr_shift": fpr_shift,
-                      "n_shift_eval": n_eval, "shift_ci95": list(ci)}
-
-    # Late-fusion AND on the shift_eval cohort (each modality under its shift threshold).
-    da, dv = scored["acoustic"], scored["vibration"]
-    em_a, em_v = _mask(da["rec"], shift_eval_recs), _mask(dv["rec"], shift_eval_recs)
-    and_alert = _alerts(thr["acoustic"], da["ctx"][em_a], da["scores"][em_a]) & \
-                _alerts(thr["vibration"], dv["ctx"][em_v], dv["scores"][em_v])
-    # in-dist AND
-    fa = np.where(_mask(da["rec"], shift_fit_recs))[0]
-    ia_fit, ia_eval = fa[0::2], fa[1::2]
-    ka = max(1, min(N_CLUSTERS, int(ia_fit.size)))
-    thr_a_in = PerClusterThresholds.fit(da["ctx"][ia_fit], da["scores"][ia_fit], n_clusters=ka, seed=args.seed)
-    thr_v_in = PerClusterThresholds.fit(dv["ctx"][ia_fit], dv["scores"][ia_fit], n_clusters=ka, seed=args.seed)
-    and_in = _alerts(thr_a_in, da["ctx"][ia_eval], da["scores"][ia_eval]) & \
-             _alerts(thr_v_in, dv["ctx"][ia_eval], dv["scores"][ia_eval])
-    rows["AND"] = {"fpr_in_dist": float(and_in.mean()) if and_in.size else float("nan"),
-                   "fpr_shift": float(and_alert.mean()) if and_alert.size else float("nan"),
-                   "n_shift_eval": int(em_a.sum()), "shift_ci95": None}
-
-    # Per-dataset shift_eval composition (transparency: which campaign is the shift).
-    ds_eval = da["ds"][em_a]
-    comp = {str(u): int((ds_eval == u).sum()) for u in sorted(set(ds_eval.tolist()))}
+    # --- Multi-seed shift sweep: the shift FPR is split-fragile (a single split
+    #     can put an easy or a hard campaign in the eval set), so report the
+    #     mean / range / collapse-count over several split seeds, symmetric with
+    #     v0_domain_shift_multiseed for the baselines. Reuses the one retrain
+    #     above, so this is seconds, not a per-seed retrain. ---
+    shift_multiseed = None
+    if args.seeds:
+        COLLAPSE = 0.20
+        per_pipe: dict[str, list[float]] = {n: [] for n in ("acoustic", "vibration", "fusion", "AND")}
+        per_seed_comp: dict[str, dict] = {}
+        _log(f"\n=== multi-seed shift sweep ({len(args.seeds)} seeds) ===")
+        for s in args.seeds:
+            r_s, c_s = _compute_shift_rows(scored, s)
+            per_seed_comp[str(s)] = c_s
+            for n in per_pipe:
+                per_pipe[n].append(float(r_s[n]["fpr_shift"]))
+            _log(f"  seed {s:<5} " + "  ".join(
+                f"{n}={r_s[n]['fpr_shift']:.3f}" for n in ("acoustic", "vibration", "fusion", "AND")
+            ) + f"  eval={sorted(c_s)}")
+        shift_multiseed = {"collapse_threshold": COLLAPSE, "seeds": list(args.seeds),
+                           "per_seed_eval_composition": per_seed_comp, "pipelines": {}}
+        for n, vals in per_pipe.items():
+            arr = np.asarray(vals, dtype=float)
+            shift_multiseed["pipelines"][n] = {
+                "shift_fpr": [float(v) for v in vals],
+                "mean": float(np.nanmean(arr)),
+                "min": float(np.nanmin(arr)),
+                "max": float(np.nanmax(arr)),
+                "collapse_count": int((arr > COLLAPSE).sum()),
+                "n_seeds": int(arr.size),
+            }
 
     # --- RQ2 per-cohort alert table (tab:res_rq2_alert): healthy FPR + D2/D3/D4
     #     recall under each pipeline's DEPLOYED per-cluster threshold, plus the
@@ -297,6 +348,7 @@ def main() -> int:
         "rows": rows,
         "event_f1": event_f1,
         "rq2_alert_table": alert_table,
+        "rq2_shift_multiseed": shift_multiseed,
     }
     _log("\n=== HEAD healthy FPR (same axis as tab:res_v0_anomaly) ===")
     _log(f"{'pipeline':<12} {'FPR in-dist':>12} {'FPR shift':>12} {'n_eval':>8}")
@@ -311,6 +363,14 @@ def main() -> int:
         r = alert_table.get(nm, {})
         _log(f"{nm:<12} {_fmt(r.get('healthy_fpr')):>10} {_fmt(r.get('d2')):>7} "
              f"{_fmt(r.get('d3')):>7} {_fmt(r.get('d4')):>7}")
+
+    if shift_multiseed is not None:
+        _log("\n=== RQ2 shift FPR across split seeds (head, symmetric with V0 multiseed) ===")
+        _log(f"{'pipeline':<12} {'shiftMean':>10} {'min':>7} {'max':>7} {'collapse':>9}")
+        for nm in ("acoustic", "vibration", "fusion", "AND"):
+            p = shift_multiseed["pipelines"][nm]
+            _log(f"{nm:<12} {p['mean']:>10.3f} {p['min']:>7.3f} {p['max']:>7.3f} "
+                 f"{p['collapse_count']:>5}/{p['n_seeds']:<3}")
 
     out_dir = REPO / "results" / "v0_anomaly"
     out_dir.mkdir(parents=True, exist_ok=True)

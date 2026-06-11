@@ -165,10 +165,14 @@ def main(argv: list[str] | None = None) -> int:
     else:
         results.append(("3 v4_cross_dataset", "SKIPPED (summary.json exists)"))
 
-    # --- Step 4: head domain-shift FPR --------------------------------------
-    rc = _run("4/6 head_domain_shift_fpr (RQ2 domain-shift)",
+    # --- Step 4: head domain-shift FPR (+ multi-seed shift sweep) ------------
+    # The shift split is fragile (one split can land an easy/hard campaign in the
+    # eval set), so sweep several split seeds for a mean/range -- symmetric with
+    # step 9's V0 multiseed. The sweep reuses the single retrain, so it is free.
+    head_seeds = ["42", "1337"] if args.quick else ["42", "1337", "2024", "7", "99"]
+    rc = _run("4/6 head_domain_shift_fpr (RQ2 domain-shift + multi-seed sweep)",
               [PY, "-m", "scripts.baselines.head_domain_shift_fpr",
-               "--from-run", str(enc), "--seed", "42", *q], log)
+               "--from-run", str(enc), "--seed", "42", "--seeds", *head_seeds, *q], log)
     record("4 head_domain_shift_fpr", rc)
 
     # --- Step 5: V0 anomaly baselines ---------------------------------------
@@ -208,7 +212,8 @@ def main(argv: list[str] | None = None) -> int:
     print("  backbone #1,#6,#8,#11 (full_run) | per-position #2 + LOPO CIs #4 (finalize)")
     print("  classical baseline+CIs #7,#12 (finalize + localization_baselines_ci)")
     print("  reg-grid recall #9 (finalize) | late-fusion in LOPO #15 (v4_lopo_cv)")
-    print("  RQ2 alert table + event-F1 #16 + domain-shift #20 (head_domain_shift_fpr, live xt_pool)")
+    print("  RQ2 alert table + event-F1 #16 + domain-shift #20 + head multi-seed shift sweep")
+    print("       (head_domain_shift_fpr, live xt_pool)")
     print("  OC-SVM/baseline shift robustness over seeds (v0_domain_shift_multiseed)")
     print("  Outputs: results/reports/finalize_results_*.md, results/v0_anomaly/head_domain_shift_*.json,")
     print("           results/v0_anomaly/v0_domain_shift_multiseed_*.json")
