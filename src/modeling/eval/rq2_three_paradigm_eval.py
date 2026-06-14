@@ -105,18 +105,33 @@ def _load_state(path: Path, module: torch.nn.Module) -> None:
     module.load_state_dict(sd, strict=False)
 
 
-def _load_v3(pipeline_dir: Path, x_dim: int, c_dim: int) -> tuple[ConditionalRealNVP, PerClusterThresholds]:
+def _load_v3(pipeline_dir: Path, x_dim: int, c_dim: int):
     flow = ConditionalRealNVP(
         dim=x_dim, c_dim=c_dim, n_layers=6, hidden_dim=64, n_hidden_per_net=2, scale_max=2.0,
     )
     _load_state(pipeline_dir / "flow.pt", flow)
     flow.eval()
+    # Load the persisted learnable channel-token pool (pma2) so x_t reproduces
+    # what the flow was trained on.  Legacy runs without xt_pool.pt fall back to
+    # mean-pooling (xt_pool=None) -- which is the degenerate path that blows the
+    # NLL up; the warning makes that fallback visible rather than silent.
+    xt_pool = None
+    xt_path = pipeline_dir / "xt_pool.pt"
+    if xt_path.exists():
+        from ..anomaly import V3Config
+        from ..anomaly.v3_trainer import _XtPool
+        xt_pool = _XtPool(embed_dim=x_dim, num_heads=V3Config().xt_pool_num_heads)
+        _load_state(xt_path, xt_pool)
+        xt_pool.eval()
+    else:
+        print(f"[rq2-3p] WARNING: no xt_pool.pt in {pipeline_dir.name}; "
+              f"falling back to mean-pool (NLL may be miscalibrated).")
     th_npz = np.load(pipeline_dir / "thresholds.npz")
     th = PerClusterThresholds(
         centroids=th_npz["centroids"], p95=th_npz["p95"], p99=th_npz["p99"],
         n_per_cluster=th_npz["n_per_cluster"], seed=42,
     )
-    return flow, th
+    return flow, th, xt_pool
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +145,7 @@ class _PipelineState:
     encoder: torch.nn.Module
     flow: ConditionalRealNVP
     thresholds: PerClusterThresholds
+    xt_pool: torch.nn.Module | None = None
 
 
 def _score_cohort_three_paradigms(
@@ -151,7 +167,9 @@ def _score_cohort_three_paradigms(
                 p.encoder.eval()
                 d = p.encoder(ac, ac_xyz, vib, vib_xyz, ds, mask_p=0.0)
                 fused = torch.cat([d["a_fused"], d["v_fused"]], dim=1)
-                x = fused.mean(dim=1)
+                # Reproduce the flow's training-time x_t: the learnable pma2 pool
+                # when persisted, otherwise the legacy mean-pool.
+                x = p.xt_pool(fused) if p.xt_pool is not None else fused.mean(dim=1)
                 c = d["context"]
                 scores = p.flow.anomaly_score(x, c).cpu().numpy()
                 c_np = c.cpu().numpy()
@@ -320,13 +338,13 @@ def main() -> None:
     v2.eval()
 
     # Build the three pipeline states.
-    flow_a, th_a = _load_v3(v3_run / "v3_acoustic", x_dim=embed, c_dim=embed)
-    flow_v, th_v = _load_v3(v3_run / "v3_vibration", x_dim=embed, c_dim=embed)
-    flow_f, th_f = _load_v3(v3_run / "v3_fusion", x_dim=embed, c_dim=embed)
+    flow_a, th_a, xt_a = _load_v3(v3_run / "v3_acoustic", x_dim=embed, c_dim=embed)
+    flow_v, th_v, xt_v = _load_v3(v3_run / "v3_vibration", x_dim=embed, c_dim=embed)
+    flow_f, th_f, xt_f = _load_v3(v3_run / "v3_fusion", x_dim=embed, c_dim=embed)
     pipelines = [
-        _PipelineState("acoustic", V3AcousticOnlyAdapter(v1_a), flow_a, th_a),
-        _PipelineState("vibration", V3VibrationOnlyAdapter(v1_v), flow_v, th_v),
-        _PipelineState("fusion", v2, flow_f, th_f),
+        _PipelineState("acoustic", V3AcousticOnlyAdapter(v1_a), flow_a, th_a, xt_a),
+        _PipelineState("vibration", V3VibrationOnlyAdapter(v1_v), flow_v, th_v, xt_v),
+        _PipelineState("fusion", v2, flow_f, th_f, xt_f),
     ]
 
     print("[rq2-3p] Gathering cohorts ...")

@@ -91,6 +91,12 @@ def main(argv: list[str] | None = None) -> int:
                     help="Existing full_pipeline run dir (v1/ + v2/); skips step 1.")
     ap.add_argument("--force", action="store_true", help="Re-run steps even if outputs exist.")
     ap.add_argument("--quick", action="store_true", help="Pass --quick to every stage (smoke).")
+    ap.add_argument(
+        "--seeds", type=int, nargs="+", default=None,
+        help="If given (>1 seed), also run the headline multi-seed sweep "
+             "(mean +/- std for the stability numbers in section 6.7). "
+             "Heavy: one full pipeline run per seed. Example: --seeds 42 1337 2024 7 99.",
+    )
     args = ap.parse_args(argv)
 
     # Make this driver's own console output encoding-proof on a cp1252 terminal.
@@ -142,6 +148,13 @@ def main(argv: list[str] | None = None) -> int:
             log.close(); return 1
         results.append(("1 full_run", f"SKIPPED (reusing {enc.name})"))
     print(f"\nUsing encoder run: {enc}", flush=True); log.write(f"encoder_run={enc}\n")
+
+    # --- Step 1b: strict RQ1 NMI (the Chapter-6 headline, not the sanity gate) ---
+    # The in-pipeline NMI is the model-selection sanity cohort; this reports the
+    # strict number on all labelled D1+D2 windows -> <enc>/rq1_strict_nmi.json.
+    rc = _run("1b rq1_strict_nmi (strict RQ1 NMI headline)",
+              [PY, "-m", "scripts.baselines.rq1_strict_nmi", "--run-dir", str(enc)], log)
+    record("1b rq1_strict_nmi", rc)
 
     # --- Step 2: leave-one-position-out CV ----------------------------------
     lopo_out = enc / "lopo"
@@ -201,6 +214,17 @@ def main(argv: list[str] | None = None) -> int:
     rc = _run("9/9 v0_domain_shift_multiseed (baseline shift-FPR over seeds)",
               [PY, "-m", "scripts.baselines.v0_domain_shift_multiseed", *ms_args], log)
     record("9 v0_domain_shift_multiseed", rc)
+
+    # --- Step 10 (optional): headline multi-seed sweep (section 6.7 mean+/-std) ---
+    # Heavy: re-runs the full pipeline once per seed.  The shift-FPR multi-seed
+    # (step 4) and the V0 shift multi-seed (step 9) are already done above; this
+    # adds the stability spread of the headline metrics (RQ1 NMI, RQ2 F1, RQ3 MAE)
+    # into results/runs/multi_seed_summary.json.
+    if args.seeds and len(args.seeds) > 1:
+        rc = _run("10/10 multi_seed (headline mean+/-std over seeds)",
+                  [PY, "-m", "src.modeling.orchestration.multi_seed",
+                   "--seeds", *[str(s) for s in args.seeds], *q], log)
+        record("10 multi_seed", rc)
 
     # --- Summary ------------------------------------------------------------
     print("\n" + "=" * 70)

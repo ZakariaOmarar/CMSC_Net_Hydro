@@ -78,8 +78,8 @@ def _restore(originals: dict) -> None:
     fr.v3_config = originals["v3"]
 
 
-def main(seeds: list[int], quick: bool = False) -> dict:
-    print(f"Multi-seed sweep: seeds={seeds}, quick={quick}")
+def main(seeds: list[int], quick: bool = False, run_v0_baselines: bool = False) -> dict:
+    print(f"Multi-seed sweep: seeds={seeds}, quick={quick}, v0_baselines={run_v0_baselines}")
     per_seed_headlines: list[dict] = []
     per_seed_metrics: list[dict] = []
     sweep_start = time.time()
@@ -89,7 +89,12 @@ def main(seeds: list[int], quick: bool = False) -> dict:
         t0 = time.time()
         originals = _override_seed(seed)
         try:
-            metrics = full_run_main(quick=quick)
+            # V0 reference baselines are deterministic references, not part of the
+            # per-seed stability story, so run them only on the first seed (their
+            # own shift-robustness sweep is `v0_domain_shift_multiseed`).
+            metrics = full_run_main(
+                quick=quick, run_v0_baselines=(run_v0_baselines and i == 0)
+            )
         finally:
             _restore(originals)
         elapsed_min = (time.time() - t0) / 60.0
@@ -152,5 +157,10 @@ if __name__ == "__main__":
         "--quick", action="store_true",
         help="Use the --quick (halved-epoch) profile in each run.",
     )
+    parser.add_argument(
+        "--v0-baselines", action="store_true",
+        help="Also run the V0 reference baselines on the first seed (reference "
+             "rows for the RQ2 baseline tables).",
+    )
     args = parser.parse_args()
-    main(seeds=args.seeds, quick=args.quick)
+    main(seeds=args.seeds, quick=args.quick, run_v0_baselines=args.v0_baselines)

@@ -571,6 +571,12 @@ def _train_one_v3(
     pipe_dir = out_dir / f"v3_{name}"
     pipe_dir.mkdir(parents=True, exist_ok=True)
     torch.save(res.flow.state_dict(), pipe_dir / "flow.pt")
+    # Persist the learnable channel-token pool (pma2) alongside the flow.  Without
+    # it, downstream re-scoring (rq2_three_paradigm_eval) cannot reproduce the
+    # x_t the flow was trained on and silently falls back to mean-pooling, which
+    # makes the NLL blow up and the healthy FPR degenerate to 1.0.
+    if getattr(res, "xt_pool", None) is not None:
+        torch.save(res.xt_pool.state_dict(), pipe_dir / "xt_pool.pt")
     np.savez(
         pipe_dir / "thresholds.npz",
         centroids=res.thresholds.centroids,
@@ -896,7 +902,7 @@ def main(
     # them at the expected path.
     if "fusion" in v3_results:
         import shutil
-        for fname in ("flow.pt", "thresholds.npz", "val_eval.npz"):
+        for fname in ("flow.pt", "xt_pool.pt", "thresholds.npz", "val_eval.npz"):
             src = out_dir / "v3_fusion" / fname
             if src.exists():
                 shutil.copy2(src, out_dir / "v3" / fname)
