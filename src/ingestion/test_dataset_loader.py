@@ -368,7 +368,8 @@ def _sensor_id(filename: str, prefix: str) -> str:
     """Extract sensor ID from `<prefix>_<sensor>[_<extra>].(wav|csv)`.
 
     If the trailing token equals one of the four known mode names (D1
-    convention), it is dropped.  If the first tail token is the literal
+    convention, matched case-insensitively so the ``StandStill`` file
+    casing is handled), it is dropped.  If the first tail token is the literal
     `raw` (D4 raw-vibration files: `vibration_raw_D.csv`), it is stripped
     before joining so the position registry sees just `D`.  Otherwise the
     entire tail is the sensor ID (D3 stereo: `recorded_D_l.wav` → `D_l`).
@@ -380,7 +381,7 @@ def _sensor_id(filename: str, prefix: str) -> str:
     tail = parts[1:]
     if tail and tail[0] == "raw":
         tail = tail[1:]
-    if len(tail) >= 2 and tail[-1] in _KNOWN_MODES:
+    if len(tail) >= 2 and tail[-1].lower() in {m.lower() for m in _KNOWN_MODES}:
         tail = tail[:-1]
     return "_".join(tail)
 
