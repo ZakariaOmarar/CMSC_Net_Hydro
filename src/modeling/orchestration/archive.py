@@ -161,8 +161,13 @@ def _extract_headline(stages: dict) -> dict:
         headline["v2_nmi"] = stages["v2"].get("rq1_nmi")
     if "v2_a1_drop_vibration" in stages:
         headline["v2_a1_purity"] = stages["v2_a1_drop_vibration"].get("rq1_purity")
-    if "v3" in stages:
-        headline["v3_val_nll"] = stages["v3"].get("val_nll_final")
+    # V3/V4 stage names: the orchestrator reports the per-paradigm stages
+    # `v3_three_paradigms` / `v4_four_paradigms`; the fusion paradigm is the
+    # headline.  (Older runs used flat `v3`/`v4`; support both.)
+    v3 = stages.get("v3_three_paradigms", stages.get("v3"))
+    if isinstance(v3, dict):
+        fus = v3.get("fusion", v3)
+        headline["v3_val_nll"] = fus.get("val_nll_final")
     if "v3_a2_unconditional" in stages:
         headline["v3_a2_val_nll"] = stages["v3_a2_unconditional"].get("val_nll_final")
     if "v3_rq2_transition_fpr" in stages:
@@ -171,9 +176,11 @@ def _extract_headline(stages: dict) -> dict:
         headline["v3_cohort_alerts"] = {
             k: v.get("alert_rate") for k, v in stages["v3_cohort_validation"].items()
         }
-    if "v4" in stages:
-        headline["v4_mae_3d"] = stages["v4"].get("val_mae_3d")
-        headline["v4_p95_3d"] = stages["v4"].get("val_p95_3d")
+    v4 = stages.get("v4_four_paradigms", stages.get("v4"))
+    if isinstance(v4, dict):
+        fus = v4.get("fusion", v4)
+        headline["v4_mae_3d"] = fus.get("val_mae_3d")
+        headline["v4_p95_3d"] = fus.get("val_p95_3d")
     if "v4_a3_unconditional" in stages:
         headline["v4_a3_mae_3d"] = stages["v4_a3_unconditional"].get("val_mae_3d")
     if "v5_1" in stages:

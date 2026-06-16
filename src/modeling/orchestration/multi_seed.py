@@ -101,12 +101,14 @@ def main(seeds: list[int], quick: bool = False, run_v0_baselines: bool = False) 
         print(f"Seed {seed} finished in {elapsed_min:.1f} min")
 
         per_seed_metrics.append(metrics)
-        # Read the just-archived index entry for the headline.
-        from .archive import list_runs
+        # Build the headline directly from the metrics full_run returned.  Do NOT
+        # read it back via list_runs(): full_run writes its run dir without
+        # updating results/runs/index.json, so the index is stale and
+        # `list_runs()[0]` is not this seed's run.
+        from .archive import _extract_headline
 
-        runs = list_runs()
-        if runs:
-            per_seed_headlines.append({"seed": seed, **runs[0]["headline"]})
+        headline = _extract_headline(metrics.get("stages", {}))
+        per_seed_headlines.append({"seed": seed, **headline})
 
         # Running aggregate.
         if len(per_seed_headlines) > 1:
