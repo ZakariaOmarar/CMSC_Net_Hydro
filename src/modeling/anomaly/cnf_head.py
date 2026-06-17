@@ -138,9 +138,27 @@ class FiLMCoupling(nn.Module):
 class ConditionalRealNVP(nn.Module):
     """Conditional Normalizing Flow on a fixed-size latent x, FiLM-conditioned on c.
 
-    Base distribution: standard normal in `dim` dimensions.
-    Anomaly score: ``-log p(x|c) = -[log p_z(z) + log|det J|]``.
+    Base distribution: standard normal ``N(0, I)``, or — when
+    ``conditional_base=True`` — a **context-conditional** Gaussian
+    ``N(μ(c), diag(σ(c)²))`` whose location/scale are a small MLP of `c`.
+    The conditional base lets the "centre of normal" move with the operating
+    regime, so the score ``-log p(x|c)`` is regime-normalised by construction
+    instead of leaking each regime's offset into the score.  This is the fix
+    for the cross-regime confound that masked single-regime faults (e.g. D2's
+    continuous knock separated at fusion-AUC 0.80 against the pooled healthy
+    baseline but 0.93 against its own regime; the FiLM-only coupling barely
+    moved off the unconditional flow, ΔNLL≈0.055).  The base head is zero-init
+    so it starts *exactly* at ``N(0, I)``: training only adds regime structure,
+    and a `flow.pt` saved without the head loads (strict=False) back to the
+    plain ``N(0, I)`` behaviour.
+
+    Anomaly score: ``-log p(x|c) = -[log p_z(z|c) + log|det J|]``.
     """
+
+    # Defensive bound on the conditional log-σ so the base can't collapse
+    # (σ→0 ⇒ exploding NLL) or flatten (σ→∞ ⇒ vanishing sensitivity).
+    _LOG_SIGMA_MIN = -3.0
+    _LOG_SIGMA_MAX = 3.0
 
     def __init__(
         self,
@@ -151,6 +169,7 @@ class ConditionalRealNVP(nn.Module):
         n_hidden_per_net: int = 2,
         scale_max: float = 2.0,
         dropout_p: float = 0.0,
+        conditional_base: bool = True,
     ) -> None:
         super().__init__()
         if n_layers < 1:
@@ -158,6 +177,7 @@ class ConditionalRealNVP(nn.Module):
         self.dim = dim
         self.c_dim = c_dim
         self.scale_max = float(scale_max)
+        self.conditional_base = bool(conditional_base)
         self.layers = nn.ModuleList()
         for i in range(n_layers):
             mask = torch.zeros(dim)
@@ -169,6 +189,18 @@ class ConditionalRealNVP(nn.Module):
                     dropout_p=dropout_p,
                 )
             )
+        if self.conditional_base:
+            # c → (μ, log σ); LayerNorm(c) mirrors the FiLM conditioner so the
+            # head is robust to the upstream PMA pool's output-norm drift.
+            self.base_net = nn.Sequential(
+                nn.LayerNorm(c_dim),
+                nn.Linear(c_dim, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, 2 * dim),
+            )
+            # Zero-init the output projection ⇒ μ=0, log σ=0 ⇒ N(0, I) at init.
+            nn.init.zeros_(self.base_net[-1].weight)
+            nn.init.zeros_(self.base_net[-1].bias)
 
     def forward(
         self, x: torch.Tensor, c: torch.Tensor
@@ -180,12 +212,26 @@ class ConditionalRealNVP(nn.Module):
             log_det = log_det + ld
         return z, log_det
 
+    def _base_params(self, c: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Per-window base mean/log-σ from the conditioner (clamped)."""
+        mu, log_sigma = self.base_net(c).chunk(2, dim=-1)
+        return mu, log_sigma.clamp(self._LOG_SIGMA_MIN, self._LOG_SIGMA_MAX)
+
     def log_prob(self, x: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
         z, log_det = self.forward(x, c)
-        log_p_z = (
-            -0.5 * (z * z).sum(dim=-1)
-            - 0.5 * self.dim * math.log(2.0 * math.pi)
-        )
+        if self.conditional_base:
+            mu, log_sigma = self._base_params(c)
+            u = (z - mu) * torch.exp(-log_sigma)
+            log_p_z = (
+                -0.5 * (u * u).sum(dim=-1)
+                - log_sigma.sum(dim=-1)
+                - 0.5 * self.dim * math.log(2.0 * math.pi)
+            )
+        else:
+            log_p_z = (
+                -0.5 * (z * z).sum(dim=-1)
+                - 0.5 * self.dim * math.log(2.0 * math.pi)
+            )
         return log_p_z + log_det
 
     def anomaly_score(self, x: torch.Tensor, c: torch.Tensor) -> torch.Tensor:

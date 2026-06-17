@@ -295,6 +295,12 @@ class _V3Anomaly:
     xt_pool: Literal["pma2", "mean"] = "pma2"
     xt_pool_num_heads: int = 4
 
+    # Context-conditional base distribution N(μ(c), σ(c)²) for the CNF.  Lets
+    # the "centre of normal" move with the operating regime so -log p(x|c) is
+    # regime-normalised by construction (fixes the cross-regime confound that
+    # masked single-regime faults).  Zero-init ⇒ identical to N(0,I) at init.
+    conditional_base: bool = True
+
 
 V3_ANOMALY = _V3Anomaly()
 

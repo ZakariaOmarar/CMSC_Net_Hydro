@@ -124,6 +124,7 @@ class V3Config:
     hidden_dim: int = V3_ANOMALY.hidden_dim
     n_hidden_per_net: int = 2   # CNF coupling MLP depth; not centralised
     scale_max: float = V3_ANOMALY.scale_max
+    conditional_base: bool = V3_ANOMALY.conditional_base
 
     # Training schedule — per-experiment, not centralised.
     epochs: int = 30
@@ -518,6 +519,7 @@ def train_v3_cnf(
         n_hidden_per_net=v3_cfg.n_hidden_per_net,
         scale_max=v3_cfg.scale_max,
         dropout_p=v3_cfg.dropout_p,
+        conditional_base=v3_cfg.conditional_base,
     ).to(device)
     # Co-optimise the flow with `_XtPool` when present (publication default).
     trainable_params: list[torch.nn.Parameter] = list(flow.parameters())
