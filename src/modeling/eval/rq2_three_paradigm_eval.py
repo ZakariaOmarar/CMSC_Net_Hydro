@@ -323,6 +323,9 @@ def main() -> None:
                     help="Run dir produced by scripts/paradigms/run_v3_three_paradigms.py")
     ap.add_argument("--source-run", required=True,
                     help="V1+V2 weights source run (same one used to seed the V3 paradigms run)")
+    ap.add_argument("--target-fpr", type=float, default=0.05,
+                    help="healthy false-alarm rate the dynamic per-modality "
+                         "threshold is calibrated to (default 0.05 = 95th pct)")
     args = ap.parse_args()
 
     v3_run = Path(args.v3_three_run).resolve()
@@ -398,14 +401,30 @@ def main() -> None:
     thr_combined_p95 = float(np.percentile(healthy_combined, 95))
     thr_max_p95 = float(np.percentile(healthy_max, 95))
 
+    # Dynamic per-modality operating point: threshold each modality at the
+    # (1 - target_fpr) quantile of its OWN healthy hold-out scores.  This pins
+    # the healthy false-alarm rate to `target_fpr` by construction and is
+    # robust to the tight, near-degenerate CNF score scale -- unlike the frozen
+    # per-cluster val_fit p95 baked into thresholds.npz, whose realised FPR
+    # drifts 1.4%-30% across seeds (see scripts/diagnostics/probe_v3_separation
+    # .py).  All per-cohort alert rows + the AND/OR audit below use this
+    # operating point so the rates are comparable and seed-stable.
+    q = 100.0 * (1.0 - args.target_fpr)
+    thr_dyn = {
+        m: float(np.percentile(healthy_scores[m]["scores"], q))
+        for m in ("acoustic", "vibration", "fusion")
+    }
+    print(f"  dynamic per-modality thresholds (target FPR={args.target_fpr:.0%}): "
+          + ", ".join(f"{m}={t:+.2f}" for m, t in thr_dyn.items()))
+
     rows: list[_ParadigmRow] = []
     audit: dict[str, dict] = {}
 
     def _add_cohort(name: str, cohort_scores: dict) -> None:
         n = cohort_scores["acoustic"]["scores"].size
-        a = cohort_scores["acoustic"]["alerts"]
-        v = cohort_scores["vibration"]["alerts"]
-        f = cohort_scores["fusion"]["alerts"]
+        a = cohort_scores["acoustic"]["scores"] > thr_dyn["acoustic"]
+        v = cohort_scores["vibration"]["scores"] > thr_dyn["vibration"]
+        f = cohort_scores["fusion"]["scores"] > thr_dyn["fusion"]
         sa = cohort_scores["acoustic"]["scores"]
         sv = cohort_scores["vibration"]["scores"]
         sf = cohort_scores["fusion"]["scores"]
@@ -468,10 +487,11 @@ def main() -> None:
             "late_fusion_weights": {"w_a": w_a, "w_v": w_v, "b": b,
                                      "thr_combined_p95": thr_combined_p95,
                                      "thr_max_p95": thr_max_p95},
+            "dynamic_thresholds": {"target_fpr": args.target_fpr, **thr_dyn},
             "rows": [asdict(r) for r in rows],
             "significance": sig,
             "specificity_audit": audit,
-            "method": "rq2_three_paradigm_comparison_2026_05_16",
+            "method": "rq2_three_paradigm_dynamic_fpr_2026_06_17",
         }, fh, indent=2)
 
     with out_audit.open("w", encoding="utf-8") as fh:

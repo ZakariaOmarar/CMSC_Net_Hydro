@@ -79,58 +79,58 @@ def main() -> int:
         _PipelineState("fusion", v2, flow_f, th_f, xt_f),
     ]
 
+    # Score each dataset's HEALTHY and ANOMALY partitions separately, so we can
+    # compare an anomaly cohort against (a) the GLOBAL healthy baseline and
+    # (b) its OWN-dataset healthy baseline.  If a dataset runs in a different
+    # operating regime, the global baseline confounds "anomalous" with "different
+    # regime"; the own-dataset baseline is the regime-matched, label-free
+    # reference the conditional flow is meant to use.
     loaders = [_loader(d) for d in ("d1", "d2", "d3", "d4")]
     print("gathering cohorts ...")
-    healthy = _segments_for(loaders[:2], v2_cfg, healthy=True)
-    cohorts = {"healthy": healthy}
-    for key, idx in (("d2_anom", 1), ("d3_anom", 2), ("d4_anom", 3)):
-        segs = _segments_for([loaders[idx]], v2_cfg, healthy=False)
-        if segs:
-            cohorts[key] = segs
-    scored = {}
-    for k, v in cohorts.items():
-        print(f"scoring {k} ({len(v)} segs) ...", flush=True)
-        scored[k] = _score_cohort_three_paradigms(pipelines, _build_loader(v, v2_cfg))
+    ds_names = ["d1", "d2", "d3", "d4"]
+    scored_h: dict[str, dict] = {}
+    scored_a: dict[str, dict] = {}
+    for i, dn in enumerate(ds_names):
+        h = _segments_for([loaders[i]], v2_cfg, healthy=True)
+        a = _segments_for([loaders[i]], v2_cfg, healthy=False)
+        if h:
+            print(f"scoring {dn} HEALTHY ({len(h)} segs) ...", flush=True)
+            scored_h[dn] = _score_cohort_three_paradigms(pipelines, _build_loader(h, v2_cfg))
+        if a:
+            print(f"scoring {dn} ANOMALY ({len(a)} segs) ...", flush=True)
+            scored_a[dn] = _score_cohort_three_paradigms(pipelines, _build_loader(a, v2_cfg))
 
+    # AUC is threshold-FREE separability; det@p99 uses a LABEL-FREE boundary
+    # (99th percentile of the relevant healthy scores).  "_glob" = global
+    # healthy baseline (all datasets' healthy); "_own" = same-dataset healthy.
     for mod in ("acoustic", "vibration", "fusion"):
-        h_s = scored["healthy"][mod]["scores"]
-        h_c = scored["healthy"][mod]["contexts"]
+        glob_h = np.concatenate([scored_h[dn][mod]["scores"] for dn in scored_h])
+        t_glob99 = float(np.percentile(glob_h, 99))
         print(f"\n========== {mod} ==========")
-        print(f"healthy NLL: p50={np.percentile(h_s,50):.1f} p95={np.percentile(h_s,95):.1f} "
-              f"max={h_s.max():.1f}  (n={h_s.size})")
-
-        # Three threshold strategies, all fit on the EVAL healthy hold-out.
-        th_saved = pipelines[("acoustic", "vibration", "fusion").index(mod)].thresholds
-        th_pc = PerClusterThresholds.fit(h_c, h_s, n_clusters=3, seed=42)
-        glob_thr = float(np.percentile(h_s, 95))
-
-        def rates(scores, ctx):
-            a_saved = (th_saved.alert(ctx, scores, percentile=95)[0]).mean()
-            a_pc = (th_pc.alert(ctx, scores, percentile=95)[0]).mean()
-            a_glob = (scores > glob_thr).mean()
-            return a_saved, a_pc, a_glob
-
-        print(f"{'cohort':<10} {'AUC':>6} | {'saved':>7} {'fresh_pc':>9} {'fresh_glob':>11}")
-        for ck in cohorts:
-            s = scored[ck][mod]["scores"]; c = scored[ck][mod]["contexts"]
-            auc = _auc(h_s, s) if ck != "healthy" else float("nan")
-            a_saved, a_pc, a_glob = rates(s, c)
-            tag = "(FPR)" if ck == "healthy" else ""
-            print(f"{ck:<10} {auc:>6.3f} | {a_saved:>7.3f} {a_pc:>9.3f} {a_glob:>11.3f} {tag}")
-
-    # --- combined rules at the dynamic 5%-FPR per-modality operating point ---
-    # Each modality thresholded at the global p95 of its OWN eval-healthy scores
-    # (FPR pinned to 5% by construction), then AND / OR over the per-window masks.
-    print("\n========== combined (per-modality threshold = eval-healthy p95) ==========")
-    thr_a = float(np.percentile(scored["healthy"]["acoustic"]["scores"], 95))
-    thr_v = float(np.percentile(scored["healthy"]["vibration"]["scores"], 95))
-    print(f"{'cohort':<10} {'AND':>6} {'OR':>6} {'acoustic':>9} {'vibration':>10}")
-    for ck in cohorts:
-        am = scored[ck]["acoustic"]["scores"] > thr_a
-        vm = scored[ck]["vibration"]["scores"] > thr_v
-        tag = "(FPR)" if ck == "healthy" else ""
-        print(f"{ck:<10} {(am & vm).mean():>6.3f} {(am | vm).mean():>6.3f} "
-              f"{am.mean():>9.3f} {vm.mean():>10.3f} {tag}")
+        print(f"global-healthy NLL: p50={np.percentile(glob_h,50):.2f} "
+              f"p99={t_glob99:.2f} (n={glob_h.size})")
+        # Per-dataset healthy FPR at the GLOBAL p99 boundary (should be ~1% if
+        # the global baseline is regime-fair; >>1% on a dataset means that
+        # dataset's healthy already looks anomalous globally = regime shift).
+        print("  per-dataset healthy FPR @ global-p99: "
+              + ", ".join(f"{dn}={(scored_h[dn][mod]['scores']>t_glob99).mean():.3f}"
+                          for dn in scored_h))
+        print(f"{'anom ds':<8} {'AUCvsGlob':>9} {'AUCvsOwn':>9} | "
+              f"{'det@glob99':>10} {'det@own99':>9} {'ownFPR99':>9}")
+        for dn in scored_a:
+            a_s = scored_a[dn][mod]["scores"]
+            auc_g = _auc(glob_h, a_s)
+            own_h = scored_h[dn][mod]["scores"] if dn in scored_h else None
+            if own_h is not None and own_h.size:
+                t_own99 = float(np.percentile(own_h, 99))
+                auc_o = _auc(own_h, a_s)
+                det_o = float((a_s > t_own99).mean())
+                own_fpr = float((own_h > t_own99).mean())
+            else:
+                auc_o = det_o = own_fpr = float("nan")
+            det_g = float((a_s > t_glob99).mean())
+            print(f"{dn:<8} {auc_g:>9.3f} {auc_o:>9.3f} | "
+                  f"{det_g:>10.3f} {det_o:>9.3f} {own_fpr:>9.3f}")
     return 0
 
 
