@@ -131,6 +131,44 @@ def main() -> int:
             det_g = float((a_s > t_glob99).mean())
             print(f"{dn:<8} {auc_g:>9.3f} {auc_o:>9.3f} | "
                   f"{det_g:>10.3f} {det_o:>9.3f} {own_fpr:>9.3f}")
+
+    # === Option 1: context-local score normalization (post-hoc, label-free) ===
+    # residual(x) = score(x) - mean_H( scores of the k nearest POOLED-healthy
+    # windows to x in context space ).  One global model + one global threshold,
+    # no campaign label: the regime is read off the (already-computed) context
+    # vector, not the dataset id.  This is a proxy for "what perfect context
+    # conditioning would buy" -- if D2's residual-AUC against POOLED healthy
+    # jumps toward the own-healthy AUC, then strengthening the flow's
+    # conditioning (thesis Option 3) should separate it with a single global
+    # baseline.  rawAUC repeats AUCvsGlob above for side-by-side comparison.
+    from sklearn.neighbors import NearestNeighbors
+    K = 128
+    print(f"\n########## context-local normalized residual "
+          f"(k={K}, own-pipeline context) ##########")
+    for mod in ("acoustic", "vibration", "fusion"):
+        base_c = np.concatenate([scored_h[dn][mod]["contexts"] for dn in scored_h])
+        base_s = np.concatenate([scored_h[dn][mod]["scores"] for dn in scored_h])
+        nn = NearestNeighbors(n_neighbors=K + 1).fit(base_c)
+
+        def _resid(ctx: np.ndarray, scr: np.ndarray, drop_self: bool) -> np.ndarray:
+            _, idx = nn.kneighbors(ctx)
+            idx = idx[:, 1:] if drop_self else idx[:, :K]
+            return scr - base_s[idx].mean(axis=1)
+
+        h_res = {dn: _resid(scored_h[dn][mod]["contexts"],
+                            scored_h[dn][mod]["scores"], True) for dn in scored_h}
+        all_h_res = np.concatenate(list(h_res.values()))
+        thr = float(np.percentile(all_h_res, 99))
+        print(f"\n[{mod}] pooled-healthy residual: p50={np.median(all_h_res):.3f} "
+              f"p99={thr:.3f}  FPR@p99={(all_h_res > thr).mean():.3f}")
+        print(f"{'anom ds':<8} {'rawAUC':>7} {'residAUC':>9} {'det@residp99':>13}")
+        for dn in scored_a:
+            a_res = _resid(scored_a[dn][mod]["contexts"],
+                           scored_a[dn][mod]["scores"], False)
+            raw_auc = _auc(base_s, scored_a[dn][mod]["scores"])
+            res_auc = _auc(all_h_res, a_res)
+            det = float((a_res > thr).mean())
+            print(f"{dn:<8} {raw_auc:>7.3f} {res_auc:>9.3f} {det:>13.3f}")
     return 0
 
 

@@ -87,44 +87,6 @@ class PerClusterThresholds:
             seed=seed,
         )
 
-    @classmethod
-    def fit_global_fpr(
-        cls,
-        contexts: np.ndarray,
-        scores: np.ndarray,
-        *,
-        target_fpr: float = 0.05,
-        seed: int = 0,
-    ) -> PerClusterThresholds:
-        """Single global threshold at the ``(1 - target_fpr)`` score quantile.
-
-        This is the robust alternative to the per-cluster :meth:`fit` when the
-        CNF anomaly score is tightly clustered (low variance) on healthy data:
-        a per-cluster percentile on a small fit split then sits on a knife-edge
-        and its realised healthy FPR drifts wildly across seeds (1.4%-30% was
-        observed for the acoustic flow).  A single quantile over the *whole*
-        healthy population pins the healthy false-alarm rate to ``target_fpr``
-        by construction and transfers cleanly.  The threshold is written into
-        both percentile slots and a single centroid (the context mean) is
-        stored so the existing :meth:`alert` / :meth:`assign` path is unchanged.
-        """
-        contexts = np.asarray(contexts, dtype=np.float64)
-        scores = np.asarray(scores, dtype=np.float64).ravel()
-        if contexts.ndim != 2:
-            raise ValueError(f"contexts must be 2-D; got {contexts.shape}")
-        if not 0.0 < target_fpr < 1.0:
-            raise ValueError(f"target_fpr must be in (0, 1); got {target_fpr}")
-        thr = float(np.percentile(scores, 100.0 * (1.0 - target_fpr)))
-        centroid = contexts.mean(axis=0, keepdims=True) if contexts.shape[0] else \
-            np.zeros((1, contexts.shape[1] if contexts.ndim == 2 else 1))
-        return cls(
-            centroids=centroid.astype(np.float64),
-            p95=np.array([thr], dtype=np.float64),
-            p99=np.array([thr], dtype=np.float64),
-            n_per_cluster=np.array([scores.size], dtype=np.int64),
-            seed=seed,
-        )
-
     def assign(self, contexts: np.ndarray) -> np.ndarray:
         contexts = np.asarray(contexts, dtype=np.float64)
         # Pairwise Euclidean distance via the (a-b)^2 = a^2 - 2ab + b^2 expansion
