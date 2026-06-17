@@ -112,20 +112,29 @@ def _load_v3(pipeline_dir: Path, x_dim: int, c_dim: int):
     _load_state(pipeline_dir / "flow.pt", flow)
     flow.eval()
     # Load the persisted learnable channel-token pool (pma2) so x_t reproduces
-    # what the flow was trained on.  Legacy runs without xt_pool.pt fall back to
-    # mean-pooling (xt_pool=None) -- which is the degenerate path that blows the
-    # NLL up; the warning makes that fallback visible rather than silent.
-    xt_pool = None
+    # what the flow was trained on.  `pma2` is the publication default
+    # (v3_trainer line ~462) and the thresholds in thresholds.npz are fit on
+    # pma2-pooled scores, so mean-pooling at eval time mismatches the flow and
+    # the threshold scale: the anomaly scores blow up past *every* p95 and the
+    # AND/OR rules fire on 100 % of windows (both==1.0 on the healthy hold-out).
+    # That is exactly what the legacy `__full_pipeline_b5_cma` runs missing
+    # xt_pool.pt produced.  Refuse to score such a run rather than silently
+    # emit a degenerate audit that pollutes the multi-seed medians.
     xt_path = pipeline_dir / "xt_pool.pt"
-    if xt_path.exists():
-        from ..anomaly import V3Config
-        from ..anomaly.v3_trainer import _XtPool
-        xt_pool = _XtPool(embed_dim=x_dim, num_heads=V3Config().xt_pool_num_heads)
-        _load_state(xt_path, xt_pool)
-        xt_pool.eval()
-    else:
-        print(f"[rq2-3p] WARNING: no xt_pool.pt in {pipeline_dir.name}; "
-              f"falling back to mean-pool (NLL may be miscalibrated).")
+    if not xt_path.exists():
+        raise FileNotFoundError(
+            f"no xt_pool.pt in {pipeline_dir} -- this run was trained with the "
+            "pma2 channel-token pool but never persisted it, so the flow and "
+            "thresholds cannot be reproduced.  Scoring it would mean-pool the "
+            "fused tokens and fire AND/OR on 100% of windows (both==1.0).  "
+            "Re-run training with the current full_run.py (which saves "
+            "xt_pool.pt) or exclude this run from the multi-seed set."
+        )
+    from ..anomaly import V3Config
+    from ..anomaly.v3_trainer import _XtPool
+    xt_pool = _XtPool(embed_dim=x_dim, num_heads=V3Config().xt_pool_num_heads)
+    _load_state(xt_path, xt_pool)
+    xt_pool.eval()
     th_npz = np.load(pipeline_dir / "thresholds.npz")
     th = PerClusterThresholds(
         centroids=th_npz["centroids"], p95=th_npz["p95"], p99=th_npz["p99"],

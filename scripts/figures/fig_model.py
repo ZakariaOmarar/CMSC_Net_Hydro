@@ -4,8 +4,8 @@
   21  NLL score distributions, healthy vs anomaly cohorts, threshold marked
   24  synthetic mode-crossfade timeline with the AND-rule overlay
 
-Figure 18 only forwards the frozen checkpoints of the headline run
-(results/runs/20260610_122607__full_pipeline_b5_cma).  Figures 21/24 need
+Figure 18 only forwards the frozen checkpoints of the canonical seed-42 run
+(results/runs/20260615_112939__full_pipeline_b5_cma).  Figures 21/24 need
 the learned V3 ``pma2`` window pool, which the run did not persist, so the
 flow is RETRAINED from the frozen V2 encoder at seed 42 — the same
 "seed-42 retrain reaching the headline density fit" protocol the Results
@@ -62,7 +62,9 @@ from src.modeling.encoders import PerModalityEncoder
 from src.modeling.orchestration.full_run import resolved_loader
 from src.modeling.orchestration.stage_configs import v2_config
 
-RUN_DIR = REPO_ROOT / "results" / "runs" / "20260610_122607__full_pipeline_b5_cma"
+# Canonical seed-42 run of the five-seed set the Results tables are built on
+# (the full_run of finalize_results_20260617_042101.json).
+RUN_DIR = REPO_ROOT / "results" / "runs" / "20260615_112939__full_pipeline_b5_cma"
 
 
 def _load_v1(modality: str, cfg) -> PerModalityEncoder:

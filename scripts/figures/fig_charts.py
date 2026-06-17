@@ -36,11 +36,17 @@ from scripts.figures.style import (
     save,
 )
 
-RUN_DIR = REPO_ROOT / "results" / "runs" / "20260610_122607__full_pipeline_b5_cma"
-# LOPO folds of the run whose aggregates match the Results chapter's LOPO
-# table (tdoa-only mean MAE 0.131 m over 16 folds).
-LOPO_RUN_DIR = REPO_ROOT / "results" / "runs" / "20260609_225957__full_pipeline_b5_cma"
+# Canonical seed-42 run of the five-seed set the Results tables are built on
+# (the full_run / lopo_dir of finalize_results_20260617_042101.json).
+RUN_DIR = REPO_ROOT / "results" / "runs" / "20260615_112939__full_pipeline_b5_cma"
+# LOPO folds of that canonical seed-42 run (tdoa-only mean MAE 0.126 m over 16
+# folds; the five-seed median is 0.129 m, Table tab:res_rq3_lopo).
+LOPO_RUN_DIR = RUN_DIR
+# reg_grid lives only in the earlier finalize report (the May sweep was not
+# re-run); the seed strip in panel (b) is read from the canonical five-seed
+# aggregate instead, so it matches the Results robustness table.
 FINALIZE = REPO_ROOT / "results" / "reports" / "finalize_results_20260611_012822.json"
+MULTISEED = REPO_ROOT / "results" / "reports" / "multiseed_complete_20260617_042101.json"
 FORENSICS = REPO_ROOT / "results" / "fusion_forensics_v2_20260515.json"
 
 
@@ -91,8 +97,9 @@ def fig19_acoustic_collapse() -> None:
                  f"{v:.3f}", va="center", ha="right", color="white", fontweight="bold")
 
     fig.suptitle(
-        "Joint-pool fusion ignores vibration: zeroing it leaves $c_t$ unchanged",
-        fontsize=10, y=1.04,
+        "Joint-pool fusion is acoustically driven: zeroing vibration barely moves "
+        "$c_t$ (single reference encoder)",
+        fontsize=9.5, y=1.04,
     )
     fig.tight_layout()
     save(fig, "fig19_acoustic_collapse")
@@ -102,61 +109,63 @@ def fig19_acoustic_collapse() -> None:
 # 20 — threshold-transfer FPR, baselines and heads on one axis
 # ─────────────────────────────────────────────────────────────────────────
 def fig20_threshold_transfer() -> None:
-    # Matched transfer protocol (Results ch., tab:res_rq2_shift): threshold
-    # fitted on one set of healthy operating conditions, FPR evaluated on a
-    # disjoint set.  In-dist rates: baselines calibrate to the 0.05 target.
+    # Matched transfer protocol (Results ch., tab:res_rq2_shift): each per-cluster
+    # threshold is fitted on one set of healthy operating conditions and the
+    # held-out healthy FPR is read on a disjoint set, over five split seeds.
+    # Each method is drawn as its across-seed [min, max] range with the median
+    # marked; the worst-case (max) is what decides whether a method collapses.
     rows = [
-        # (label, in-dist FPR, shift FPR, colour, is_head)
-        ("OC-SVM (ac.)", 0.052, 0.947, CLASSICAL, False),
-        ("LSTM-AE (ac.)", 0.050, 0.022, CLASSICAL, False),
-        ("$k$-means (ac.)", 0.050, 0.005, CLASSICAL, False),
-        ("KDE (ac.)", 0.050, 0.003, CLASSICAL, False),
-        ("OC-SVM (vib.)", 0.050, 0.010, CLASSICAL, False),
-        ("$k$-means (vib.)", 0.050, 0.012, CLASSICAL, False),
-        ("KDE (vib.)", 0.050, 0.015, CLASSICAL, False),
-        ("V3-acoustic", 0.054, 0.060, ACOUSTIC, True),
-        ("V3-vibration", 0.049, 0.014, VIBRATION, True),
-        ("V3-fusion", 0.051, 0.005, INTERMEDIATE, True),
-        ("Late-fusion AND", 0.006, 0.003, LATE_FUSION, True),
+        # (label, median, min, max, seeds_collapsed, colour, is_head)
+        ("OC-SVM (ac.)", 0.00, 0.00, 1.00, "1/5", CLASSICAL, False),
+        ("$k$-means (ac.)", 0.00, 0.00, 0.34, "1/5", CLASSICAL, False),
+        ("KDE (ac.)", 0.00, 0.00, 0.37, "1/5", CLASSICAL, False),
+        ("OC-SVM (vib.)", 0.06, 0.02, 0.92, "2/5", CLASSICAL, False),
+        ("$k$-means (vib.)", 0.06, 0.04, 0.90, "1/5", CLASSICAL, False),
+        ("KDE (vib.)", 0.25, 0.05, 0.93, "3/5", CLASSICAL, False),
+        ("V3-acoustic", 0.20, 0.11, 0.31, "3/5", ACOUSTIC, True),
+        ("V3-vibration", 0.04, 0.03, 0.12, "0/5", VIBRATION, True),
+        ("V3-fusion", 0.16, 0.03, 0.36, "2/5", INTERMEDIATE, True),
+        ("Late-fusion AND", 0.004, 0.001, 0.012, "0/5", LATE_FUSION, True),
     ]
-    labels = [r[0] for r in rows]
-    indist = np.array([r[1] for r in rows])
-    shift = np.array([r[2] for r in rows])
-    colors = [r[3] for r in rows]
+    floor = 7e-4  # log-axis floor so exact-zero medians/mins stay visible
+    clamp = lambda v: max(v, floor)
 
-    x = np.arange(len(rows), dtype=float)
-    x[7:] += 0.6  # visual gap between baselines and proposed heads
-    w = 0.38
+    fig, ax = plt.subplots(figsize=(6.8, 3.4))
+    y = np.arange(len(rows))[::-1]  # table order, top to bottom
+    for yi, (lbl, med, lo, hi, nco, color, is_head) in zip(y, rows):
+        ax.plot([clamp(lo), clamp(hi)], [yi, yi], color=color, lw=2.4, alpha=0.55,
+                solid_capstyle="round", zorder=2)
+        ax.plot(clamp(lo), yi, marker="|", ms=8, color=color, mew=1.6, zorder=3)
+        ax.plot(clamp(hi), yi, marker="|", ms=8, color=color, mew=1.6, zorder=3)
+        ax.plot(clamp(med), yi, marker="o", ms=7, color=color, mec="0.2", mew=0.6,
+                zorder=4)
+        ax.annotate(f"{nco}", (1.55, yi), va="center", ha="left", fontsize=7.5,
+                    color=ANOMALY if nco != "0/5" else "0.45",
+                    fontweight="bold" if nco != "0/5" else "normal")
 
-    fig, ax = plt.subplots(figsize=(6.6, 3.2))
-    ax.bar(x - w / 2, indist, w, color="0.78", label="FPR, in-distribution threshold")
-    ax.bar(x + w / 2, shift, w, color=colors, label="FPR, transferred threshold")
-    ax.axhline(0.05, color="0.35", lw=0.9, ls="--")
-    ax.text(x[0] - 0.45, 0.058, "0.05 target", va="bottom", ha="left",
+    ax.axvline(0.05, color="0.35", lw=0.9, ls="--")
+    ax.text(0.05, len(rows) - 0.3, "0.05 target", va="bottom", ha="center",
             fontsize=7.5, color="0.35")
+    ax.axvline(0.20, color=ANOMALY, lw=0.9, ls=":")
+    ax.text(0.20, -0.85, "collapse\n($>0.2$)", va="top", ha="center", fontsize=7.5,
+            color=ANOMALY)
+    ax.text(1.55, len(rows) - 0.3, "seeds\ncollapsed", va="bottom", ha="left",
+            fontsize=7.0, color="0.3")
 
-    ax.set_yscale("log")
-    ax.set_ylim(2e-3, 1.6)
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=35, ha="right")
-    ax.set_ylabel("healthy false-positive rate (log)")
+    ax.set_xscale("log")
+    ax.set_xlim(floor, 1.4)
+    ax.set_ylim(-1.4, len(rows) - 0.3)
+    ax.set_yticks(y)
+    ax.set_yticklabels([r[0] for r in rows], fontsize=8)
+    ax.set_xlabel("healthy false-positive rate after threshold transfer (log; min--median--max over 5 seeds)")
+    # divider between the unconditional baselines (top six rows) and the
+    # proposed heads (bottom four rows); the y-axis labels name each group
+    ax.axhline(3.5, color="0.8", lw=0.8)
     ax.set_title(
-        "Threshold transfer to an unseen operating condition: "
-        "OC-SVM collapses to 0.947, the AND rule holds at 0.003"
+        "Threshold transfer: every unconditional baseline and the acoustic and\n"
+        "fusion heads collapse on at least one seed; the AND rule holds at 0.004 (0/5)",
+        fontsize=9,
     )
-    ax.annotate(
-        "0.947", (x[0] + w / 2, 0.947), xytext=(0, 4),
-        textcoords="offset points", ha="center", fontsize=8,
-        fontweight="bold", color=ANOMALY,
-    )
-    ax.annotate(
-        "0.003", (x[-1] + w / 2, 0.003), xytext=(0, 4),
-        textcoords="offset points", ha="center", fontsize=8,
-        fontweight="bold", color=LATE_FUSION,
-    )
-    ax.axvline((x[6] + x[7]) / 2, color="0.8", lw=0.8)
-    ax.text(np.mean(x[:7]), 1.25, "unconditional baselines", ha="center", fontsize=8, color="0.3")
-    ax.text(np.mean(x[7:]), 1.25, "proposed heads", ha="center", fontsize=8, color="0.3")
     fig.tight_layout()
     save(fig, "fig20_threshold_transfer_fpr")
 
@@ -165,24 +174,34 @@ def fig20_threshold_transfer() -> None:
 # 22 — latent-SNR conditioning lift (tab:res_rq2_auc)
 # ─────────────────────────────────────────────────────────────────────────
 def fig22_latent_snr_lift() -> None:
+    # Five-seed median curves with across-seed [min, max] bands (tab:res_rq2_auc).
     snr = np.array([-10, -5, 0, 5, 10])
-    cond = np.array([0.370, 0.407, 0.473, 0.550, 0.539])
-    uncond = np.array([0.323, 0.311, 0.351, 0.327, 0.351])
+    cond = np.array([0.777, 0.692, 0.569, 0.563, 0.583])
+    cond_lo = np.array([0.596, 0.546, 0.518, 0.554, 0.532])
+    cond_hi = np.array([0.957, 0.973, 0.958, 0.910, 0.836])
+    uncond = np.array([0.575, 0.558, 0.552, 0.518, 0.491])
+    uncond_lo = np.array([0.373, 0.378, 0.365, 0.374, 0.420])
+    uncond_hi = np.array([0.736, 0.703, 0.711, 0.731, 0.665])
 
-    fig, ax = plt.subplots(figsize=(4.6, 3.0))
+    fig, ax = plt.subplots(figsize=(5.0, 3.2))
     ax.axhline(0.5, color="0.35", lw=1.0, ls=":", zorder=1, label="chance (0.5)")
-    ax.fill_between(snr, uncond, cond, color=INTERMEDIATE, alpha=0.18, label="conditioning lift")
-    ax.plot(snr, cond, "o-", color=INTERMEDIATE, label="conditional flow")
-    ax.plot(snr, uncond, "s--", color=CLASSICAL, label="unconditional ablation")
+    ax.fill_between(snr, cond_lo, cond_hi, color=INTERMEDIATE, alpha=0.13, lw=0,
+                    label="conditional, across-seed range")
+    ax.fill_between(snr, uncond_lo, uncond_hi, color=CLASSICAL, alpha=0.13, lw=0,
+                    label="unconditional, across-seed range")
+    ax.plot(snr, cond, "o-", color=INTERMEDIATE, label="conditional flow (median)")
+    ax.plot(snr, uncond, "s--", color=CLASSICAL, label="unconditional ablation (median)")
     for x, c, u in zip(snr, cond, uncond):
-        ax.annotate(f"+{c - u:.2f}", (x, (c + u) / 2), fontsize=7.5,
+        ax.annotate(f"+{c - u:.2f}", (x, max(c, u) + 0.015), fontsize=7.5,
                     ha="center", color=INTERMEDIATE)
     ax.set_xlabel("latent signal-to-noise ratio (dB)")
     ax.set_ylabel("ROC-AUC")
     ax.set_xticks(snr)
-    ax.set_ylim(0.28, 0.62)
-    ax.set_title("Conditioning lifts the controlled detection\ncurve at every SNR rung")
-    ax.legend(loc="upper left", frameon=False, fontsize=7.5)
+    ax.set_ylim(0.33, 1.0)
+    ax.set_title("Conditioning lifts the median detection curve at every\n"
+                 "SNR rung (largest at low SNR), but the seed bands overlap",
+                 fontsize=9)
+    ax.legend(loc="upper right", frameon=False, fontsize=7.0)
     fig.tight_layout()
     save(fig, "fig22_latent_snr_lift")
 
@@ -190,12 +209,46 @@ def fig22_latent_snr_lift() -> None:
 # ─────────────────────────────────────────────────────────────────────────
 # 23 — specificity audit (tab:res_rq2_spec)
 # ─────────────────────────────────────────────────────────────────────────
+def _load_spec_audit_seeds() -> dict:
+    """Per-cohort alert-quadrant fractions across the canonical five seeds.
+
+    Reads ``rq2_specificity_audit.json`` from each seed's run dir (the dirs
+    listed in the multiseed report).  Returns
+    ``{cohort: {quad: np.ndarray(n_seeds)}}`` so the figure can plot the
+    median bar *and* the across-seed min/max whisker — the co-firing rate is
+    not stable across seeds (the per-modality p95 threshold does not transfer
+    cleanly from the val_fit split to the evaluation healthy population, so the
+    AND operating point drifts), and the bar alone hides that.
+    """
+    rep = json.loads(MULTISEED.read_text())
+    runs = rep["runs"]  # {seed: "<ts>__full_pipeline_b5_cma"}
+    cohort_keys = ["healthy_holdout", "d2_anom", "d3_anom", "d4_anom"]
+    quads = ["a_only", "v_only", "both"]
+    out: dict[str, dict[str, list]] = {c: {q: [] for q in quads} for c in cohort_keys}
+    for run_name in runs.values():
+        p = REPO_ROOT / "results" / "runs" / run_name / "rq2_specificity_audit.json"
+        a = json.loads(p.read_text())
+        for c in cohort_keys:
+            for q in quads:
+                out[c][q].append(a[c][q])
+    return {c: {q: np.asarray(v, dtype=float) for q, v in qs.items()}
+            for c, qs in out.items()}
+
+
 def fig23_specificity_audit() -> None:
+    # Five-seed medians computed live from the canonical run dirs' audit JSONs
+    # (tab:res_rq2_spec); neither = 1 - (a + v + both).  Whiskers carry the
+    # across-seed [min, max] of the AND ("both") share so the instability is
+    # visible rather than hidden behind the median.
+    data = _load_spec_audit_seeds()
+    cohort_keys = ["healthy_holdout", "d2_anom", "d3_anom", "d4_anom"]
     cohorts = ["healthy\nhold-out", "D2 anomaly", "D3 anomaly", "D4 anomaly"]
-    a_only = np.array([0.013, 0.573, 0.297, 0.442])
-    v_only = np.array([0.017, 0.070, 0.000, 0.014])
-    both = np.array([0.000, 0.159, 0.703, 0.526])
-    neither = np.array([0.970, 0.199, 0.000, 0.018])
+    a_only = np.array([np.median(data[c]["a_only"]) for c in cohort_keys])
+    v_only = np.array([np.median(data[c]["v_only"]) for c in cohort_keys])
+    both = np.array([np.median(data[c]["both"]) for c in cohort_keys])
+    both_min = np.array([data[c]["both"].min() for c in cohort_keys])
+    both_max = np.array([data[c]["both"].max() for c in cohort_keys])
+    neither = np.clip(1.0 - (a_only + v_only + both), 0.0, 1.0)
 
     fig, ax = plt.subplots(figsize=(5.6, 3.0))
     x = np.arange(len(cohorts))
@@ -222,8 +275,8 @@ def fig23_specificity_audit() -> None:
     ax.set_ylabel("fraction of cohort windows")
     ax.set_ylim(0, 1.02)
     ax.set_title(
-        "Per-cohort co-firing: both modalities never fire together on healthy\n"
-        "windows, yet co-fire on every anomaly cohort"
+        "Per-cohort co-firing (five-seed medians): the modalities almost never\n"
+        "co-fire on healthy windows (0.003), yet co-fire on every anomaly cohort"
     )
     ax.legend(loc="center left", bbox_to_anchor=(1.0, 0.5), frameon=False)
     fig.tight_layout()
@@ -234,50 +287,45 @@ def fig23_specificity_audit() -> None:
 # 26 — LORO paradigm comparison (tab:res_rq3_loro)
 # ─────────────────────────────────────────────────────────────────────────
 def fig26_loro_paradigms() -> None:
-    # rows ordered best-first; horizontal bars share one label column
+    # Five-seed median macro MAE with across-seed [min, max] whiskers
+    # (tab:res_rq3_loro), ordered best-first.  The earlier "intermediate fusion
+    # is 4x tighter" stability claim does not survive the multi-seed reruns:
+    # the seed ranges overlap, so no paradigm is clearly tighter.
     rows = [
-        ("Late fusion: confidence-gated", 0.156, 0.056, LATE_FUSION),
-        ("Unimodal: V4-acoustic", 0.162, 0.049, ACOUSTIC),
-        ("Intermediate: V4-fusion", 0.169, 0.014, INTERMEDIATE),
-        ("Late fusion: uniform avg", 0.194, 0.048, LATE_FUSION),
-        ("Unimodal: V4-vibration", 0.268, 0.058, VIBRATION),
-        ("Late fusion: weighted avg", 0.292, 0.005, LATE_FUSION),
+        # (label, median, min, max, colour, is_best)
+        ("Late fusion: confidence-gated", 0.181, 0.160, 0.218, LATE_FUSION, True),
+        ("Intermediate: V4-fusion", 0.189, 0.163, 0.278, INTERMEDIATE, False),
+        ("Late fusion: uniform avg", 0.194, 0.163, 0.215, LATE_FUSION, False),
+        ("Unimodal: V4-acoustic", 0.198, 0.158, 0.286, ACOUSTIC, False),
+        ("Unimodal: V4-vibration", 0.231, 0.211, 0.334, VIBRATION, False),
+        ("Late fusion: weighted avg", 0.252, 0.246, 0.254, LATE_FUSION, False),
     ]
     labels = [r[0] for r in rows]
     mae = np.array([r[1] for r in rows])
-    std = np.array([r[2] for r in rows])
-    colors = [r[3] for r in rows]
+    lo = np.array([r[2] for r in rows])
+    hi = np.array([r[3] for r in rows])
+    colors = [r[4] for r in rows]
+    xerr = np.vstack([mae - lo, hi - mae])
     y = np.arange(len(rows))
 
-    fig, (ax1, ax2) = plt.subplots(
-        1, 2, figsize=(7.0, 2.9), sharey=True, gridspec_kw={"width_ratios": [1.25, 1]}
-    )
-    ax1.barh(y, mae, 0.62, color=colors, xerr=std, capsize=3,
-             error_kw={"elinewidth": 1.0, "ecolor": "0.35"})
-    ax1.set_yticks(y)
-    ax1.set_yticklabels(labels, fontsize=8)
-    ax1.invert_yaxis()
-    ax1.set_xlim(0, 0.40)
-    ax1.set_xlabel("LORO macro MAE (m)")
-    ax1.set_title("(a) average accuracy ($\\pm$ across-fold std)", fontsize=9)
-    for yi, (m, s) in enumerate(zip(mae, std)):
-        ax1.annotate(f"{m:.3f}", (m + s + 0.012, yi), va="center", fontsize=7.5,
-                     color="0.2", fontweight="bold" if yi == 0 else "normal")
-
-    ax2.barh(y, std, 0.62, color=colors)
-    ax2.set_xlim(0, 0.075)
-    ax2.set_xlabel("across-fold std of MAE (m)")
-    ax2.set_title("(b) worst-case stability", fontsize=9)
-    for yi, s in enumerate(std):
-        ax2.annotate(f"{s:.3f}", (s + 0.002, yi), va="center", fontsize=7.5,
-                     color=INTERMEDIATE if yi == 2 else "0.2",
-                     fontweight="bold" if yi == 2 else "normal")
-    ax2.annotate("4x tighter than\nany other paradigm", (0.030, 2), va="center",
-                 fontsize=7.5, color=INTERMEDIATE, fontweight="bold")
-
+    fig, ax = plt.subplots(figsize=(7.0, 3.0))
+    ax.barh(y, mae, 0.6, color=colors, alpha=0.9, xerr=xerr, capsize=3,
+            error_kw={"elinewidth": 1.1, "ecolor": "0.35"})
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels, fontsize=8)
+    ax.invert_yaxis()
+    ax.set_xlim(0, 0.36)
+    ax.set_xlabel("LORO macro MAE (m), median with across-seed [min, max]")
+    for yi, (m, h, best) in enumerate(zip(mae, hi, [r[5] for r in rows])):
+        ax.annotate(f"{m:.3f}", (h + 0.006, yi), va="center", fontsize=7.5,
+                    color="0.2", fontweight="bold" if best else "normal")
+    ax.annotate("fitted in sample:\nworst out of sample", (0.255, 5), va="center",
+                ha="left", fontsize=7.0, color=ANOMALY, xytext=(0.30, 5),
+                textcoords="data")
     fig.suptitle(
-        "Leave-one-recording-out: late fusion wins on accuracy, intermediate fusion on stability",
-        fontsize=10, y=1.04,
+        "Leave-one-recording-out: late fusion (confidence-gated) wins on median\n"
+        "accuracy; the seed ranges overlap, so no paradigm is clearly tighter",
+        fontsize=9.5, y=1.02,
     )
     fig.tight_layout()
     save(fig, "fig26_loro_paradigm_comparison")
@@ -329,13 +377,13 @@ def fig27_lopo_per_fold() -> None:
 # 28 — cross-session transfer to the unseen D5 session
 # ─────────────────────────────────────────────────────────────────────────
 def fig28_cross_session_d5() -> None:
-    # Values of the Results chapter's cross-session table (tab:res_rq3_cross):
-    # (mode, val MAE, ci low, ci high, val p95)
+    # Five-seed medians of the cross-session table (tab:res_rq3_cross):
+    # (mode, val MAE median, across-seed min, across-seed max, val p95 median)
     rows = [
-        ("tdoa_only", 0.109, 0.095, 0.124, 0.214),
-        ("both", 0.125, 0.107, 0.142, 0.257),
-        ("srp_only", 0.140, 0.126, 0.153, 0.231),
-        ("vibration_only_learned", 0.235, 0.210, 0.258, 0.365),
+        ("tdoa_only", 0.113, 0.107, 0.147, 0.259),
+        ("both", 0.145, 0.117, 0.173, 0.282),
+        ("srp_only", 0.151, 0.140, 0.176, 0.320),
+        ("vibration_only_learned", 0.291, 0.245, 0.304, 0.441),
     ]
 
     fig, ax = plt.subplots(figsize=(5.4, 2.9))
@@ -351,8 +399,8 @@ def fig28_cross_session_d5() -> None:
     ax.set_ylim(len(rows) - 0.5, -0.75)
     ax.set_xlabel("MAE on the 63 unseen D5 knock windows (m)")
     ax.set_title(
-        "Cross-session transfer (train D2/D3/D4 $\\rightarrow$ test D5):\n"
-        "dot = MAE with 95% CI, tick = 95th percentile error"
+        "Cross-session transfer (train D2/D3/D4 $\\rightarrow$ test D5), five-seed:\n"
+        "dot = median MAE with across-seed range, tick = median 95th percentile"
     )
     fig.tight_layout()
     save(fig, "fig28_cross_session_d5")
@@ -411,18 +459,19 @@ def fig33_robustness() -> None:
     pat = re.compile(r"^(2026052[67]|202605\d{2})_\d{6}__v3deep_v3_(d(\d)_w(\d)|cap_(\w+))_s(\d+)$")
 
     grid: dict[tuple[int, int], float] = {}
-    seeds: dict[int, float] = {}
     for c in cells:
         m = pat.match(c["cell"])
         if not m or not c["cell"].startswith(("20260526", "20260527")):
             continue  # final-protocol block only (earlier block used another protocol)
         seed = int(m.group(6))
-        if m.group(3) is not None:
-            d_lvl, w_lvl = int(m.group(3)), int(m.group(4))
-            if seed == 42:
-                grid[(d_lvl, w_lvl)] = c["f1"]
-            if (d_lvl, w_lvl) == (0, 5):
-                seeds[seed] = c["f1"]
+        if m.group(3) is not None and seed == 42:
+            grid[(int(m.group(3)), int(m.group(4)))] = c["f1"]
+
+    # Panel (b): the five canonical seeds the Results tables report, not the May
+    # reg-grid seeds.  This is the event-level F1 that couples to the K-means
+    # assignment (median 0.989, with the seed-99 low tail at 0.756).
+    seeds = {int(s): v["rq2_real_f1"]
+             for s, v in json.loads(MULTISEED.read_text())["per_seed"].items()}
 
     dropout_levels = [0.0, 0.1, 0.2, 0.3]
     wd_levels = {4: "1e-4", 5: "5e-4", 3: "1e-3"}

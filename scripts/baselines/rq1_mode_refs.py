@@ -39,7 +39,7 @@ def main() -> int:
         cluster_mode_floor,
         train_v0_mode_lgbm,
     )
-    from src.modeling.config.dataset_registry import REGISTRY
+    from src.config.dataset_registry import REGISTRY
     from src.modeling.orchestration.full_run import resolved_loader
 
     loaders = []

@@ -339,27 +339,28 @@ def fig17_split_protocol() -> None:
 def fig34_paradigm_map() -> None:
     fig, ax = blank_axes((6.8, 3.8), xlim=(0, 28), ylim=(0, 16))
 
+    # Five-seed verdicts (Results ch. tables).  The earlier "worst-case stability
+    # -> intermediate fusion" row is dropped: that ordering reversed under the
+    # multi-seed reruns, so intermediate fusion no longer owns a demand cleanly.
     demands = [
-        ("no false alarms on healthy data", "healthy FPR 0.000, shift FPR 0.003"),
-        ("average localization accuracy", "LORO macro MAE 0.156 m"),
-        ("worst-case stability", "across-fold std 0.014 m"),
-        ("transfer to unseen positions / sessions", "LOPO 0.131 m; D5 0.109 m"),
-        ("label-free mode discovery", "acoustic-trunk result (RQ1)"),
+        ("no false alarms on healthy data", "healthy both-fire 0.003; transfer FPR 0.004"),
+        ("average localization accuracy", "LORO macro MAE 0.181 m"),
+        ("transfer to unseen positions / sessions", "LOPO 0.129 m; D5 0.113 m"),
+        ("label-free mode discovery", "strict NMI 0.41, matches floor"),
     ]
     winners = [
         ("Late fusion: AND rule", LATE_FUSION),
         ("Late fusion: confidence gate", LATE_FUSION),
-        ("Intermediate fusion (FiLM on $c_t$)", INTERMEDIATE),
         ("Unimodal: accelerometer TDOA", VIBRATION),
         ("Unimodal: acoustic encoder", ACOUSTIC),
     ]
-    y = 12.9
+    y = 12.4
     for (d, v), (wname, wc) in zip(demands, winners):
-        box(ax, 0.4, y, 11.8, 2.2, f"{d}\n{v}", fc="#f7f7f7", ec="0.45", fs=7.2)
-        box(ax, 16.4, y, 11.0, 2.2, wname, fc=wc, ec=wc, fs=7.5, text_color="white",
+        box(ax, 0.4, y, 11.8, 2.4, f"{d}\n{v}", fc="#f7f7f7", ec="0.45", fs=7.2)
+        box(ax, 16.4, y, 11.0, 2.4, wname, fc=wc, ec=wc, fs=7.5, text_color="white",
             weight="bold")
-        arrow(ax, (12.2, y + 1.1), (16.4, y + 1.1), color=wc, lw=1.6)
-        y -= 2.85
+        arrow(ax, (12.2, y + 1.2), (16.4, y + 1.2), color=wc, lw=1.6)
+        y -= 3.0
 
     ax.text(6.3, 15.6, "operational demand (measured)", fontsize=9, ha="center",
             fontweight="bold", color="0.2")

@@ -211,9 +211,10 @@ def fig03_geometry() -> None:
 # 25 — per-position localization error map
 # ─────────────────────────────────────────────────────────────────────────
 def fig25_error_map() -> None:
-    # Per-position LOPO folds of the run whose aggregate statistics match the
-    # Results chapter's LOPO table (tdoa-only mean 0.131 m).
-    folds = REPO_ROOT / "results" / "runs" / "20260609_225957__full_pipeline_b5_cma" / "lopo" / "folds.jsonl"
+    # Per-position LOPO folds of the canonical seed-42 run (the lopo_dir of
+    # finalize_results_20260617_042101.json; tdoa-only mean 0.126 m, with a
+    # five-seed median of 0.129 m in Table tab:res_rq3_lopo).
+    folds = REPO_ROOT / "results" / "runs" / "20260615_112939__full_pipeline_b5_cma" / "lopo" / "folds.jsonl"
     mode = "both"
 
     mic, _, vib, _ = circular_rig_sensors()
