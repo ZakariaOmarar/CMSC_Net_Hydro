@@ -21,10 +21,49 @@ sum-fuse the per-modality scores.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import torch
 import torch.nn as nn
 
 from .cnf_head import ConditionalRealNVP
+
+
+@dataclass
+class DeepImpulseConfig:
+    """All hyperparameters for the deep impulse-aware anomaly detector.
+
+    Single source of truth shared by training (`train_deep_impulse_flow.py`)
+    and the hyperparameter search (`search_deep_impulse_flow.py`).  Feature
+    knobs (n_mels/win_s/stride_s) define the on-disk feature cache, so the HP
+    search holds them fixed and sweeps the model/training knobs.
+    """
+    # --- features (define the feature cache; fixed during HP search) ---
+    n_mels: int = 64
+    n_t: int = 64
+    win_s: float = 1.0
+    stride_s: float = 0.5
+    n_anchor: int = 16
+    # --- model ---
+    emb_dim: int = 32
+    ctx_dim: int = 8
+    dropout: float = 0.1
+    flow_layers: int = 6
+    flow_hidden: int = 64
+    # --- training ---
+    epochs: int = 40
+    batch_size: int = 64
+    lr: float = 1e-3
+    weight_decay: float = 1e-4
+    patience: int = 8
+    val_frac: float = 0.15
+    augment: str = "strong"            # "none" | "light" | "strong"
+    target_fpr: float = 0.05
+    seed: int = 0
+    # --- few-shot adaptation to a new campaign ---
+    adapt_frac: float = 0.0
+    adapt_epochs: int = 10
+    adapt_lr_mult: float = 0.05
 
 
 class RawCNN1D(nn.Module):
@@ -106,6 +145,12 @@ class DeepImpulseFlow(nn.Module):
             n_layers=flow_layers, hidden_dim=flow_hidden, conditional_base=True,
         )
         self.n_anchor = n_anchor
+
+    @classmethod
+    def from_config(cls, cfg: "DeepImpulseConfig") -> "DeepImpulseFlow":
+        return cls(cfg.n_anchor, front="spectro", emb_dim=cfg.emb_dim,
+                   ctx_dim=cfg.ctx_dim, dropout=cfg.dropout,
+                   flow_layers=cfg.flow_layers, flow_hidden=cfg.flow_hidden)
 
     def log_prob(self, front_in: torch.Tensor, anchor: torch.Tensor) -> torch.Tensor:
         emb = self.cnn(front_in)

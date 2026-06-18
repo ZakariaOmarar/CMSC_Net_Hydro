@@ -1,25 +1,32 @@
-"""Train + evaluate the deep impulse-aware anomaly flow (learned front-end).
+"""Train + evaluate the deep impulse-aware anomaly flow — the PRODUCTION
+anomaly detector for the rig.
 
-One-class: a CNN front-end (spectrogram by default; preserves spectral AND
-transient cues) is trained END-TO-END with a conditional flow on the HEALTHY
-NLL, with the hand-crafted impulse+spectral anchor concatenated (recall
-guarantee + anti-collapse).  Per modality (mic, accel); anomaly score = sum of
-z-scored per-modality NLLs.  Light time-shift/noise augmentation for small-data
-generalization.
+Architecture (src/modeling/anomaly/deep_impulse_flow.py): a spectrogram 2-D CNN
+front-end trained END-TO-END one-class with a conditional normalizing flow on
+the HEALTHY NLL (no SSL/CMA), with the hand-crafted impulse+spectral anchor
+concatenated (recall guarantee + anti-collapse), per-window instance norm
+(regime-level invariance), strong regime-simulating augmentation (domain
+generalization), early-stop restore-best.  Per modality (mic, accel); anomaly
+score = sum of z-scored per-modality NLLs.  Fit on healthy only.  Few-shot
+adaptation (--adapt-frac) recovers a brand-new campaign from a little of its
+healthy.
 
-Fit on FIT datasets' healthy; D5 (or any non-fit) is held out to verify the
-theory on a new campaign.  Reports recording-level ROC/PR and window-level
-(healthy-referenced) detection at a healthy-calibrated operating point.
+This module exposes `collect_features`, `train_and_eval` and `DeepImpulseConfig`
+so the hyperparameter search (search_deep_impulse_flow.py) reuses the exact same
+pipeline.  Feature extraction is cached on disk (keyed by window/n_mels) so the
+search and the multi-seed runs are fast.
 
 Run:
-    python -m scripts.train_deep_impulse_flow --epochs 40
+    python -m scripts.train_deep_impulse_flow --epochs 40 --seed 0 --adapt-frac 0.3
     python -m scripts.train_deep_impulse_flow --smoke
 """
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import sys
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import numpy as np
@@ -29,41 +36,35 @@ REPO = Path(__file__).resolve().parents[1]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from src.modeling.anomaly.deep_impulse_flow import DeepImpulseFlow  # noqa: E402
+from src.modeling.anomaly.deep_impulse_flow import DeepImpulseConfig, DeepImpulseFlow  # noqa: E402
 from src.modeling.anomaly.raw_impulse_detector import window_features  # noqa: E402
 from src.modeling.anomaly.weak_labels import derive_knock_events, window_overlaps_any  # noqa: E402
 
-N_MELS, N_T, N_ANCHOR = 64, 64, 16
-WIN_S, STRIDE_S = 1.0, 0.5
+CACHE_DIR = REPO / "results" / "cache"
 
 
-def _spectrogram(w: np.ndarray, fs: float) -> np.ndarray:
-    """log-STFT magnitude, freq-binned to N_MELS, time-resized to N_T."""
+# ----------------------------------------------------------------------------
+# Feature extraction (cached on disk)
+# ----------------------------------------------------------------------------
+def _spectrogram(w: np.ndarray, fs: float, n_mels: int, n_t: int) -> np.ndarray:
     if w.size < 32 or not np.any(w):
-        return np.zeros((N_MELS, N_T))
+        return np.zeros((n_mels, n_t))
     from scipy.signal import stft
     nper = min(512, max(32, w.size // 16))
     _, _, Z = stft(w.astype(np.float64), fs=fs, nperseg=nper, noverlap=nper // 2)
-    mag = np.log1p(np.abs(Z))                                   # (F, Tf)
-    F, Tf = mag.shape
-    if F >= N_MELS:                                             # downscale: average-bin
-        mel = np.stack([b.mean(0) for b in np.array_split(mag, N_MELS, axis=0)])
-    else:                                                       # upscale: interpolate freq
-        fi = np.linspace(0, F - 1, N_MELS)
+    mag = np.log1p(np.abs(Z)); F, Tf = mag.shape
+    if F >= n_mels:
+        mel = np.stack([b.mean(0) for b in np.array_split(mag, n_mels, axis=0)])
+    else:
+        fi = np.linspace(0, F - 1, n_mels)
         mel = np.stack([np.interp(fi, np.arange(F), mag[:, j]) for j in range(Tf)], axis=1)
-    if mel.shape[1] != N_T:                                     # resize time
-        xi = np.linspace(0, mel.shape[1] - 1, N_T)
-        mel = np.stack([np.interp(xi, np.arange(mel.shape[1]), mel[i]) for i in range(N_MELS)])
-    # Per-window instance normalization: removes the regime-level offset so the
-    # CNN front-end sees a regime-INVARIANT shape (the absolute energy/impulse
-    # signal is kept by the hand-crafted anchor).  This is what lets the learned
-    # features transfer zero-shot to an unseen campaign, and it bounds the input
-    # so the flow's val NLL stops blowing up.
-    mel = (mel - mel.mean()) / (mel.std() + 1e-6)
-    return mel
+    if mel.shape[1] != n_t:
+        xi = np.linspace(0, mel.shape[1] - 1, n_t)
+        mel = np.stack([np.interp(xi, np.arange(mel.shape[1]), mel[i]) for i in range(n_mels)])
+    return (mel - mel.mean()) / (mel.std() + 1e-6)
 
 
-def _collect(loader, is_anom: bool):
+def _collect(loader, is_anom: bool, cfg: DeepImpulseConfig):
     msp, asp, manc, aanc, env, peak = [], [], [], [], [], []
     for s in loader.list_segments():
         if s.is_anomaly != is_anom:
@@ -79,40 +80,58 @@ def _collect(loader, is_anom: bool):
         wm = np.sqrt(np.mean(mic.astype(np.float64) ** 2, axis=0))
         wa = (np.sqrt(np.mean(acc.astype(np.float64) ** 2, axis=0))
               if acc is not None and acc.size else None)
-        T = wm.size; step = max(1, int(STRIDE_S * fs_m)); wlen = int(WIN_S * fs_m)
+        T = wm.size; step = max(1, int(cfg.stride_s * fs_m)); wlen = int(cfg.win_s * fs_m)
         for i0 in range(0, max(1, T - wlen + 1), step):
             t0, t1 = i0 / fs_m, (i0 + wlen) / fs_m
             seg = wm[i0:i0 + wlen]
-            msp.append(_spectrogram(seg, fs_m)); manc.append(window_features(seg, fs_m))
+            msp.append(_spectrogram(seg, fs_m, cfg.n_mels, cfg.n_t)); manc.append(window_features(seg, fs_m))
             peak.append(float(np.abs(seg).max()) if seg.size else 0.0)
             sa = wa[int(t0 * fs_a):int(t1 * fs_a)] if wa is not None else np.zeros(0)
-            asp.append(_spectrogram(sa, fs_a)); aanc.append(window_features(sa, fs_a))
+            asp.append(_spectrogram(sa, fs_a, cfg.n_mels, cfg.n_t)); aanc.append(window_features(sa, fs_a))
             env.append(1 if (is_anom and window_overlaps_any(t0, t1, intervals)) else 0)
-    return {"msp": np.asarray(msp), "asp": np.asarray(asp),
-            "manc": np.asarray(manc), "aanc": np.asarray(aanc),
-            "env": np.asarray(env), "peak": np.asarray(peak)}
+    return {"msp": np.asarray(msp), "asp": np.asarray(asp), "manc": np.asarray(manc),
+            "aanc": np.asarray(aanc), "env": np.asarray(env), "peak": np.asarray(peak)}
 
 
-def _augment(spec: torch.Tensor) -> torch.Tensor:
-    """Strong regime-simulating augmentation for DOMAIN GENERALIZATION.
+def collect_features(datasets, cfg: DeepImpulseConfig, cache_dir: Path = CACHE_DIR):
+    """{ds: (H, A)} with on-disk caching keyed by window/n_mels."""
+    from src.modeling.eval.rq2_three_paradigm_eval import _loader
+    out = {}
+    for dn in datasets:
+        key = f"deepimp_{dn}_w{cfg.win_s}_s{cfg.stride_s}_m{cfg.n_mels}_t{cfg.n_t}.npz"
+        p = cache_dir / key
+        if p.exists():
+            d = np.load(p)
+            H = {k[2:]: d[k] for k in d.files if k.startswith("h_")}
+            A = {k[2:]: d[k] for k in d.files if k.startswith("a_")}
+        else:
+            L = _loader(dn)
+            H = _collect(L, False, cfg); A = _collect(L, True, cfg)
+            floor = float(np.percentile(H["peak"], 99.5)) if H["peak"].size else float("inf")
+            A["ref"] = (A["peak"] > floor).astype(int)
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            np.savez(p, **{f"h_{k}": v for k, v in H.items()},
+                     **{f"a_{k}": v for k, v in A.items()})
+        out[dn] = (H, A)
+        print(f"  {dn}: healthy={H['msp'].shape[0]} anom={A['msp'].shape[0]}"
+              f"{' (cached)' if p.exists() else ''}", flush=True)
+    return out
 
-    The deep model fails on a new campaign because it overfits the training
-    regimes' absolute spectra.  Simulating regime shift during training -
-    random gain, frequency shift, time shift, SpecAugment freq/time masking,
-    and noise - forces the front-end to learn regime-INVARIANT healthy
-    structure, so an unseen campaign falls inside the trained "healthy"
-    distribution.  Applied to healthy training windows only; the hand-crafted
-    anchor (separate input) still carries the absolute impulse signal.
-    """
-    x = spec.clone()
-    B, F, T = x.shape
-    dev = x.device
-    # random per-sample gain (level invariance)
+
+# ----------------------------------------------------------------------------
+# Augmentation + training
+# ----------------------------------------------------------------------------
+def _augment(spec: torch.Tensor, strength: str) -> torch.Tensor:
+    if strength == "none":
+        return spec
+    x = spec.clone(); B, F, T = x.shape; dev = x.device
+    if strength == "light":
+        x = torch.roll(x, int(torch.randint(-T // 8, T // 8 + 1, (1,))), dims=2)
+        return x + 0.02 * torch.randn_like(x)
+    # strong: domain-generalization augmentation
     x = x * (1.0 + 0.4 * (torch.rand(B, 1, 1, device=dev) - 0.5))
-    # frequency shift (spectral-regime invariance) + time shift
-    x = torch.roll(x, shifts=int(torch.randint(-F // 6, F // 6 + 1, (1,))), dims=1)
-    x = torch.roll(x, shifts=int(torch.randint(-T // 6, T // 6 + 1, (1,))), dims=2)
-    # SpecAugment: zero a random frequency band and a random time span
+    x = torch.roll(x, int(torch.randint(-F // 6, F // 6 + 1, (1,))), dims=1)
+    x = torch.roll(x, int(torch.randint(-T // 6, T // 6 + 1, (1,))), dims=2)
     fm = int(torch.randint(0, F // 4 + 1, (1,))); f0 = int(torch.randint(0, max(1, F - fm), (1,)))
     x[:, f0:f0 + fm, :] = 0.0
     tm = int(torch.randint(0, T // 4 + 1, (1,))); t0 = int(torch.randint(0, max(1, T - tm), (1,)))
@@ -120,30 +139,19 @@ def _augment(spec: torch.Tensor) -> torch.Tensor:
     return x + 0.05 * torch.randn_like(x)
 
 
-def _train_one(model, spec, anc, dev, epochs, bs, lr, augment,
-               patience=8, val_frac=0.15):
-    """One-class training with held-out-healthy early stopping (restore-best).
-
-    A val_frac slice of the healthy windows is held out; we monitor val NLL and
-    stop when it stops improving for `patience` epochs, restoring the best-val
-    weights — the standard guard against the CNN overfitting the healthy set.
-    """
+def _train_one(model, spec, anc, dev, cfg, lr, epochs, patience):
     st = torch.tensor(spec, dtype=torch.float32); at = torch.tensor(anc, dtype=torch.float32)
     n = st.shape[0]
-    perm = torch.randperm(n, generator=torch.Generator().manual_seed(0))
-    n_val = max(1, int(val_frac * n))
-    val_idx, tr_idx = perm[:n_val], perm[n_val:]
-    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+    perm = torch.randperm(n, generator=torch.Generator().manual_seed(cfg.seed))
+    n_val = max(1, int(cfg.val_frac * n)); val_idx, tr_idx = perm[:n_val], perm[n_val:]
+    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=cfg.weight_decay)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, epochs))
     best_val, best_state, bad, best_ep = float("inf"), None, 0, 0
     for ep in range(epochs):
-        model.train()
-        tp = tr_idx[torch.randperm(tr_idx.shape[0])]; tot = 0.0
-        for i in range(0, tp.shape[0], bs):
-            idx = tp[i:i + bs]
-            sb = st[idx].to(dev); ab = at[idx].to(dev)
-            if augment:
-                sb = _augment(sb)
+        model.train(); tp = tr_idx[torch.randperm(tr_idx.shape[0])]; tot = 0.0
+        for i in range(0, tp.shape[0], cfg.batch_size):
+            idx = tp[i:i + cfg.batch_size]
+            sb = _augment(st[idx].to(dev), cfg.augment); ab = at[idx].to(dev)
             loss = -model.log_prob(sb, ab).mean()
             opt.zero_grad(); loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
@@ -151,28 +159,25 @@ def _train_one(model, spec, anc, dev, epochs, bs, lr, augment,
         sched.step()
         model.eval()
         with torch.no_grad():
-            vt = 0.0
-            for i in range(0, n_val, 512):
-                vi = val_idx[i:i + 512]
-                vt += float(-model.log_prob(st[vi].to(dev), at[vi].to(dev)).sum())
-            val_nll = vt / n_val
-        if val_nll < best_val - 1e-3:
-            best_val, bad, best_ep = val_nll, 0, ep
+            vt = sum(float(-model.log_prob(st[val_idx[i:i+512]].to(dev),
+                                           at[val_idx[i:i+512]].to(dev)).sum())
+                     for i in range(0, n_val, 512)) / n_val
+        if vt < best_val - 1e-3:
+            best_val, bad, best_ep = vt, 0, ep
             best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
         else:
             bad += 1
-        if ep == 0 or (ep + 1) % 5 == 0 or bad >= patience or ep == epochs - 1:
-            print(f"    epoch {ep+1}/{epochs}  train_NLL={tot/tr_idx.shape[0]:.3f}  "
-                  f"val_NLL={val_nll:.3f}  best@{best_ep+1}", flush=True)
+        if ep == 0 or (ep + 1) % 10 == 0 or bad >= patience or ep == epochs - 1:
+            print(f"    ep {ep+1}/{epochs} train={tot/tr_idx.shape[0]:.2f} val={vt:.2f} best@{best_ep+1}", flush=True)
         if bad >= patience:
-            print(f"    early stop at epoch {ep+1} (best val @ {best_ep+1})", flush=True)
+            print(f"    early stop @ {ep+1} (best @ {best_ep+1})", flush=True)
             break
     if best_state is not None:
         model.load_state_dict(best_state)
     return model
 
 
-def _scores(model, spec, anc, dev) -> np.ndarray:
+def _scores(model, spec, anc, dev):
     model.eval(); out = []
     with torch.no_grad():
         st = torch.tensor(spec, dtype=torch.float32); at = torch.tensor(anc, dtype=torch.float32)
@@ -181,63 +186,30 @@ def _scores(model, spec, anc, dev) -> np.ndarray:
     return np.concatenate(out) if out else np.zeros(0)
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--fit-ds", nargs="*", default=["d2", "d3", "d4"])
-    ap.add_argument("--test-ds", nargs="*", default=["d2", "d3", "d4", "d5"])
-    ap.add_argument("--epochs", type=int, default=40)
-    ap.add_argument("--batch-size", type=int, default=64)
-    ap.add_argument("--lr", type=float, default=1e-3)
-    ap.add_argument("--patience", type=int, default=8, help="early-stop patience (epochs)")
-    ap.add_argument("--val-frac", type=float, default=0.15, help="healthy val split for early stop")
-    ap.add_argument("--target-fpr", type=float, default=0.05)
-    ap.add_argument("--adapt-frac", type=float, default=0.0,
-                    help="few-shot: fraction of a held-out campaign's healthy to "
-                         "fine-tune/recalibrate on (0 = off)")
-    ap.add_argument("--adapt-epochs", type=int, default=10)
-    ap.add_argument("--no-augment", action="store_true")
-    ap.add_argument("--out", default="results/deep_impulse_flow.pt")
-    ap.add_argument("--smoke", action="store_true")
-    args = ap.parse_args()
-    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"device = {dev}")
-    augment = not args.no_augment
-
-    if args.smoke:
-        m = DeepImpulseFlow(N_ANCHOR, front="spectro").to(dev)
-        sp = np.random.randn(96, N_MELS, N_T); an = np.random.randn(96, N_ANCHOR)
-        _train_one(m, sp, an, dev, 6, 32, 1e-3, augment, patience=2, val_frac=0.2)
-        print("smoke scores:", _scores(m, sp[:8], an[:8], dev).shape)
-        return 0
-
+# ----------------------------------------------------------------------------
+# Full train + eval (shared by main and the HP search)
+# ----------------------------------------------------------------------------
+def train_and_eval(cfg, feats, fit_ds, test_ds, dev, *, do_adapt=False, verbose=True):
     from sklearn.metrics import average_precision_score, roc_auc_score
-    from src.modeling.eval.rq2_three_paradigm_eval import _loader
-    all_ds = sorted(set(args.fit_ds) | set(args.test_ds))
-    H, A = {}, {}
-    print("collecting spectrograms + anchors ...", flush=True)
-    for dn in all_ds:
-        L = _loader(dn)
-        H[dn] = _collect(L, False); A[dn] = _collect(L, True)
-        floor = float(np.percentile(H[dn]["peak"], 99.5)) if H[dn]["peak"].size else float("inf")
-        A[dn]["ref"] = (A[dn]["peak"] > floor).astype(int)
-        print(f"  {dn}: healthy={H[dn]['msp'].shape[0]} anom={A[dn]['msp'].shape[0]}", flush=True)
+    torch.manual_seed(cfg.seed); np.random.seed(cfg.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(cfg.seed)
+    H = {d: feats[d][0] for d in feats}; A = {d: feats[d][1] for d in feats}
+    fm = np.concatenate([H[d]["manc"] for d in fit_ds]); fa = np.concatenate([H[d]["aanc"] for d in fit_ds])
+    mmu, msd = fm.mean(0), fm.std(0) + 1e-8; amu, asd = fa.mean(0), fa.std(0) + 1e-8
 
-    fm = np.concatenate([H[d]["manc"] for d in args.fit_ds])
-    fa = np.concatenate([H[d]["aanc"] for d in args.fit_ds])
-    mmu, msd = fm.mean(0), fm.std(0) + 1e-8
-    amu, asd = fa.mean(0), fa.std(0) + 1e-8
+    mic = DeepImpulseFlow.from_config(cfg).to(dev); acc = DeepImpulseFlow.from_config(cfg).to(dev)
+    if verbose:
+        print("training mic ...", flush=True)
+    _train_one(mic, np.concatenate([H[d]["msp"] for d in fit_ds]), (fm - mmu) / msd,
+               dev, cfg, cfg.lr, cfg.epochs, cfg.patience)
+    if verbose:
+        print("training accel ...", flush=True)
+    _train_one(acc, np.concatenate([H[d]["asp"] for d in fit_ds]), (fa - amu) / asd,
+               dev, cfg, cfg.lr, cfg.epochs, cfg.patience)
 
-    mic = DeepImpulseFlow(N_ANCHOR, front="spectro").to(dev)
-    acc = DeepImpulseFlow(N_ANCHOR, front="spectro").to(dev)
-    print("training mic model ...", flush=True)
-    _train_one(mic, np.concatenate([H[d]["msp"] for d in args.fit_ds]), (fm - mmu) / msd,
-               dev, args.epochs, args.batch_size, args.lr, augment, args.patience, args.val_frac)
-    print("training accel model ...", flush=True)
-    _train_one(acc, np.concatenate([H[d]["asp"] for d in args.fit_ds]), (fa - amu) / asd,
-               dev, args.epochs, args.batch_size, args.lr, augment, args.patience, args.val_frac)
-
-    hzm = _scores(mic, np.concatenate([H[d]["msp"] for d in args.fit_ds]), (fm - mmu) / msd, dev)
-    hza = _scores(acc, np.concatenate([H[d]["asp"] for d in args.fit_ds]), (fa - amu) / asd, dev)
+    hzm = _scores(mic, np.concatenate([H[d]["msp"] for d in fit_ds]), (fm - mmu) / msd, dev)
+    hza = _scores(acc, np.concatenate([H[d]["asp"] for d in fit_ds]), (fa - amu) / asd, dev)
     mz = (hzm.mean(), hzm.std() + 1e-8); ma = (hza.mean(), hza.std() + 1e-8)
 
     def _fused(mic_m, acc_m, mz_, ma_, d, sel=slice(None)):
@@ -246,63 +218,106 @@ def main() -> int:
         return zm + za
 
     hf = (hzm - mz[0]) / mz[1] + (hza - ma[0]) / ma[1]
-    thr = float(np.percentile(hf, 100 * (1 - args.target_fpr)))
-    res = {"fit_ds": args.fit_ds, "target_fpr": args.target_fpr,
-           "healthy_fpr": float((hf > thr).mean()), "per_dataset": {}}
-    print(f"\nhealthy FPR @ threshold = {res['healthy_fpr']:.3f}\n")
-    print(f"{'ds':<5} {'reclvl_ROC':>10} {'reclvl_PR':>10} {'href_ROC':>9} {'flag@thr':>9} {'heldout':>8}")
-    for dn in args.test_ds:
+    thr = float(np.percentile(hf, 100 * (1 - cfg.target_fpr)))
+    res = {"healthy_fpr": float((hf > thr).mean()), "per_dataset": {}}
+    for dn in test_ds:
         zh = _fused(mic, acc, mz, ma, H[dn]); za = _fused(mic, acc, mz, ma, A[dn])
         y = np.concatenate([np.zeros(zh.size), np.ones(za.size)]); s = np.concatenate([zh, za])
-        rr, rp = roc_auc_score(y, s), average_precision_score(y, s)
         yr = A[dn]["ref"]
-        hr = roc_auc_score(yr, za) if 0 < yr.sum() < yr.size else float("nan")
-        flag = float((za > thr).mean())
-        res["per_dataset"][dn] = {"reclvl_roc": float(rr), "reclvl_pr": float(rp),
-                                  "href_roc": float(hr), "flag_at_thr": flag,
-                                  "held_out": dn not in args.fit_ds}
-        print(f"{dn:<5} {rr:>10.3f} {rp:>10.3f} {hr if not np.isnan(hr) else 0:>9.3f} "
-              f"{flag:>9.3f} {'YES' if dn not in args.fit_ds else '':>8}")
+        res["per_dataset"][dn] = {
+            "reclvl_roc": float(roc_auc_score(y, s)), "reclvl_pr": float(average_precision_score(y, s)),
+            "href_roc": float(roc_auc_score(yr, za)) if 0 < yr.sum() < yr.size else float("nan"),
+            "flag_at_thr": float((za > thr).mean()), "held_out": dn not in fit_ds}
 
-    # ---- few-shot domain adaptation to held-out campaigns ----
-    if args.adapt_frac > 0:
-        import copy
-        print(f"\n=== few-shot adaptation (adapt on {args.adapt_frac:.0%} of held-out "
-              f"healthy, fine-tune {args.adapt_epochs} ep) ===")
-        print(f"{'ds':<5} {'reclvl_ROC':>10} {'reclvl_PR':>10} {'flag@thr':>9} {'eval_FPR':>9}")
-        for dn in args.test_ds:
-            if dn in args.fit_ds:
-                continue
-            nH = H[dn]["msp"].shape[0]
-            idx = np.random.default_rng(0).permutation(nH)
-            na = max(16, int(args.adapt_frac * nH))
-            ai, ei = idx[:na], idx[na:]
-            micA, accA = copy.deepcopy(mic), copy.deepcopy(acc)
-            _train_one(micA, H[dn]["msp"][ai], (H[dn]["manc"][ai] - mmu) / msd, dev,
-                       args.adapt_epochs, args.batch_size, args.lr * 0.2, augment,
-                       patience=args.adapt_epochs, val_frac=0.2)
-            _train_one(accA, H[dn]["asp"][ai], (H[dn]["aanc"][ai] - amu) / asd, dev,
-                       args.adapt_epochs, args.batch_size, args.lr * 0.2, augment,
-                       patience=args.adapt_epochs, val_frac=0.2)
-            # recalibrate per-modality score-norm + threshold on the adapt slice
-            zmh = _scores(micA, H[dn]["msp"][ai], (H[dn]["manc"][ai] - mmu) / msd, dev)
-            zah = _scores(accA, H[dn]["asp"][ai], (H[dn]["aanc"][ai] - amu) / asd, dev)
+        if do_adapt and dn not in fit_ds and cfg.adapt_frac > 0:
+            nH = H[dn]["msp"].shape[0]; idx = np.random.default_rng(cfg.seed).permutation(nH)
+            na = max(16, int(cfg.adapt_frac * nH)); ai, ei = idx[:na], idx[na:]
+            mA, aA = copy.deepcopy(mic), copy.deepcopy(acc)
+            _train_one(mA, H[dn]["msp"][ai], (H[dn]["manc"][ai] - mmu) / msd, dev, cfg,
+                       cfg.lr * cfg.adapt_lr_mult, cfg.adapt_epochs, cfg.adapt_epochs)
+            _train_one(aA, H[dn]["asp"][ai], (H[dn]["aanc"][ai] - amu) / asd, dev, cfg,
+                       cfg.lr * cfg.adapt_lr_mult, cfg.adapt_epochs, cfg.adapt_epochs)
+            zmh = _scores(mA, H[dn]["msp"][ai], (H[dn]["manc"][ai] - mmu) / msd, dev)
+            zah = _scores(aA, H[dn]["asp"][ai], (H[dn]["aanc"][ai] - amu) / asd, dev)
             mzN = (zmh.mean(), zmh.std() + 1e-8); maN = (zah.mean(), zah.std() + 1e-8)
-            hfa = (zmh - mzN[0]) / mzN[1] + (zah - maN[0]) / maN[1]
-            thrA = float(np.percentile(hfa, 100 * (1 - args.target_fpr)))
-            zh = _fused(micA, accA, mzN, maN, H[dn], ei)      # held-out eval healthy
-            za = _fused(micA, accA, mzN, maN, A[dn])
+            thrA = float(np.percentile((zmh - mzN[0]) / mzN[1] + (zah - maN[0]) / maN[1],
+                                       100 * (1 - cfg.target_fpr)))
+            zh = _fused(mA, aA, mzN, maN, H[dn], ei); za = _fused(mA, aA, mzN, maN, A[dn])
             y = np.concatenate([np.zeros(zh.size), np.ones(za.size)]); s = np.concatenate([zh, za])
-            rr, rp = roc_auc_score(y, s), average_precision_score(y, s)
             res["per_dataset"][dn]["adapted"] = {
-                "reclvl_roc": float(rr), "reclvl_pr": float(rp),
+                "reclvl_roc": float(roc_auc_score(y, s)), "reclvl_pr": float(average_precision_score(y, s)),
                 "flag_at_thr": float((za > thrA).mean()), "eval_fpr": float((zh > thrA).mean())}
-            print(f"{dn:<5} {rr:>10.3f} {rp:>10.3f} {(za > thrA).mean():>9.3f} {(zh > thrA).mean():>9.3f}")
+    artifacts = {"mic": mic, "acc": acc, "anchor": (mmu, msd, amu, asd),
+                 "score_norm": (mz, ma), "threshold": thr}
+    return res, artifacts
+
+
+def _print_table(res):
+    print(f"\nhealthy FPR @ threshold = {res['healthy_fpr']:.3f}\n")
+    print(f"{'ds':<5} {'reclvl_ROC':>10} {'reclvl_PR':>10} {'href_ROC':>9} {'flag@thr':>9} {'heldout':>8}")
+    for dn, r in res["per_dataset"].items():
+        print(f"{dn:<5} {r['reclvl_roc']:>10.3f} {r['reclvl_pr']:>10.3f} "
+              f"{r['href_roc'] if not np.isnan(r['href_roc']) else 0:>9.3f} "
+              f"{r['flag_at_thr']:>9.3f} {'YES' if r['held_out'] else '':>8}")
+    if any("adapted" in r for r in res["per_dataset"].values()):
+        print("\nfew-shot adapted (held-out campaigns):")
+        print(f"{'ds':<5} {'reclvl_ROC':>10} {'reclvl_PR':>10} {'flag@thr':>9} {'eval_FPR':>9}")
+        for dn, r in res["per_dataset"].items():
+            if "adapted" in r:
+                a = r["adapted"]
+                print(f"{dn:<5} {a['reclvl_roc']:>10.3f} {a['reclvl_pr']:>10.3f} "
+                      f"{a['flag_at_thr']:>9.3f} {a['eval_fpr']:>9.3f}")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--fit-ds", nargs="*", default=["d2", "d3", "d4"])
+    ap.add_argument("--test-ds", nargs="*", default=["d2", "d3", "d4", "d5"])
+    ap.add_argument("--epochs", type=int, default=40)
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--patience", type=int, default=8)
+    ap.add_argument("--augment", choices=("none", "light", "strong"), default="strong")
+    ap.add_argument("--adapt-frac", type=float, default=0.0)
+    ap.add_argument("--config", default=None,
+                    help="JSON of a DeepImpulseConfig (e.g. the HP-search best); "
+                         "--seed/--epochs/--adapt-frac still override it")
+    ap.add_argument("--out", default="results/deep_impulse_flow.pt")
+    ap.add_argument("--smoke", action="store_true")
+    args = ap.parse_args()
+    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"device = {dev}")
+
+    if args.smoke:
+        cfg = DeepImpulseConfig(epochs=4, patience=2)
+        m = DeepImpulseFlow.from_config(cfg).to(dev)
+        sp = np.random.randn(96, cfg.n_mels, cfg.n_t); an = np.random.randn(96, cfg.n_anchor)
+        _train_one(m, sp, an, dev, cfg, cfg.lr, cfg.epochs, cfg.patience)
+        print("smoke scores:", _scores(m, sp[:8], an[:8], dev).shape)
+        return 0
+
+    if args.config:
+        base = DeepImpulseConfig(**json.loads(Path(args.config).read_text()))
+        cfg = replace(base, seed=args.seed, epochs=args.epochs, adapt_frac=args.adapt_frac)
+        print(f"loaded config from {args.config}")
+    else:
+        cfg = DeepImpulseConfig(epochs=args.epochs, seed=args.seed, lr=args.lr,
+                                patience=args.patience, augment=args.augment,
+                                adapt_frac=args.adapt_frac)
+    all_ds = sorted(set(args.fit_ds) | set(args.test_ds))
+    print(f"collecting features (cache={CACHE_DIR}) ...", flush=True)
+    feats = collect_features(all_ds, cfg)
+    res, art = train_and_eval(cfg, feats, args.fit_ds, args.test_ds, dev,
+                              do_adapt=args.adapt_frac > 0)
+    _print_table(res)
+    res["config"] = asdict(cfg); res["fit_ds"] = args.fit_ds
 
     out = Path(args.out).resolve(); out.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({"mic": mic.state_dict(), "acc": acc.state_dict(),
+    mmu, msd, amu, asd = art["anchor"]
+    torch.save({"mic": art["mic"].state_dict(), "acc": art["acc"].state_dict(),
                 "anchor_stats": {"mmu": mmu, "msd": msd, "amu": amu, "asd": asd},
-                "score_norm": {"mic": mz, "acc": ma}, "threshold": thr, "cfg": vars(args)}, out)
+                "score_norm": art["score_norm"], "threshold": art["threshold"],
+                "config": asdict(cfg)}, out)
     with out.with_suffix(".json").open("w", encoding="utf-8") as fh:
         json.dump(res, fh, indent=2)
     print(f"\nsaved -> {out.relative_to(REPO)}\nsaved -> {out.with_suffix('.json').relative_to(REPO)}")
