@@ -51,36 +51,69 @@ class RawCNN1D(nn.Module):
         return self.net(w).squeeze(-1)  # (B, emb_dim)
 
 
-class DeepImpulseFlow(nn.Module):
-    """Learned raw front-end + anchored conditional flow (one-class, per modality).
+class SpectroCNN(nn.Module):
+    """Compact 2-D CNN over a (freq, time) spectrogram -> embedding.
 
-    `anchor` is the standardized hand-crafted impulse+spectral feature vector
-    (computed outside, by `raw_impulse_detector.window_features`, then z-scored
-    with healthy stats).  `context` is a learned low-dim regime descriptor; the
-    flow's conditional base normalises by it.  Keeping the anchor as a fixed
-    input (not produced by the CNN) is the anti-collapse / recall guarantee.
+    A spectrogram keeps frequency content the raw-downsample path discards
+    (essential for SPECTRAL anomalies like D3) while still exposing transients
+    as vertical stripes (impulsive D2/D4).  Dropout guards the small-data regime.
     """
 
-    def __init__(self, in_len: int, n_anchor: int, *, emb_dim: int = 32,
-                 ctx_dim: int = 8, flow_layers: int = 6, flow_hidden: int = 64) -> None:
+    def __init__(self, emb_dim: int = 32, dropout: float = 0.1) -> None:
         super().__init__()
-        self.cnn = RawCNN1D(in_len, emb_dim)
+        self.net = nn.Sequential(
+            nn.Conv2d(1, 16, 3, stride=2, padding=1), nn.BatchNorm2d(16), nn.GELU(),
+            nn.Conv2d(16, 32, 3, stride=2, padding=1), nn.BatchNorm2d(32), nn.GELU(),
+            nn.Dropout2d(dropout),
+            nn.Conv2d(32, 48, 3, stride=2, padding=1), nn.BatchNorm2d(48), nn.GELU(),
+            nn.Conv2d(48, emb_dim, 3, stride=2, padding=1), nn.GELU(),
+            nn.AdaptiveAvgPool2d(1),
+        )
+        self.emb_dim = emb_dim
+
+    def forward(self, s: torch.Tensor) -> torch.Tensor:
+        if s.dim() == 3:
+            s = s.unsqueeze(1)  # (B, F, T) -> (B, 1, F, T)
+        return self.net(s).flatten(1)  # (B, emb_dim)
+
+
+class DeepImpulseFlow(nn.Module):
+    """Learned front-end + anchored conditional flow (one-class, per modality).
+
+    front="spectro" (recommended): 2-D CNN over a (freq,time) spectrogram —
+    preserves spectral (D3) and transient (D2/D4) cues.  front="raw1d": 1-D CNN
+    over a fixed-length raw window.
+
+    `anchor` = standardized hand-crafted impulse+spectral features (recall
+    guarantee + anti-collapse; cannot be optimised away).  `context` = learned
+    low-dim regime descriptor for the flow's conditional base.
+    """
+
+    def __init__(self, n_anchor: int, *, front: str = "spectro", in_len: int = 8192,
+                 emb_dim: int = 32, ctx_dim: int = 8, dropout: float = 0.1,
+                 flow_layers: int = 6, flow_hidden: int = 64) -> None:
+        super().__init__()
+        self.front = front
+        if front == "spectro":
+            self.cnn = SpectroCNN(emb_dim, dropout)
+        elif front == "raw1d":
+            self.cnn = RawCNN1D(in_len, emb_dim)
+        else:
+            raise ValueError(f"unknown front {front!r}")
         self.ctx_head = nn.Sequential(nn.Linear(emb_dim, ctx_dim), nn.Tanh())
         self.flow = ConditionalRealNVP(
             dim=emb_dim + n_anchor, c_dim=ctx_dim,
             n_layers=flow_layers, hidden_dim=flow_hidden, conditional_base=True,
         )
-        self.in_len = in_len
         self.n_anchor = n_anchor
 
-    def log_prob(self, raw: torch.Tensor, anchor: torch.Tensor) -> torch.Tensor:
-        emb = self.cnn(raw)
+    def log_prob(self, front_in: torch.Tensor, anchor: torch.Tensor) -> torch.Tensor:
+        emb = self.cnn(front_in)
         ctx = self.ctx_head(emb)
-        x = torch.cat([emb, anchor], dim=1)
-        return self.flow.log_prob(x, ctx)
+        return self.flow.log_prob(torch.cat([emb, anchor], dim=1), ctx)
 
-    def anomaly_score(self, raw: torch.Tensor, anchor: torch.Tensor) -> torch.Tensor:
-        return -self.log_prob(raw, anchor)
+    def anomaly_score(self, front_in: torch.Tensor, anchor: torch.Tensor) -> torch.Tensor:
+        return -self.log_prob(front_in, anchor)
 
 
 __all__ = ["DeepImpulseFlow", "RawCNN1D"]
