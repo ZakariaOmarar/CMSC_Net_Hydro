@@ -103,10 +103,22 @@ def main() -> int:
         s = np.einsum("ij,jk,ik->i", X - mu, inv, X - mu)
         return (s - s[hmask].mean()) / (s[hmask].std() + 1e-8)
 
-    for tag, norm in (("plain GLOBAL", False), ("context-normalized GLOBAL", True)):
-        fa = _norm(ac) if norm else ac
-        fv = _norm(vib) if norm else vib
-        za, zv = _maha_z(fa, h), _maha_z(fv, h)
+    def _norm_ridge(feat: np.ndarray) -> np.ndarray:
+        """Parametric, DEPLOYABLE regime-normalization: residual = feat - mu(c),
+        mu = Ridge(context -> feat) fit on pooled healthy only (no memory bank)."""
+        from sklearn.linear_model import Ridge
+        from sklearn.preprocessing import StandardScaler
+        sc = StandardScaler().fit(ctx[h])
+        m = Ridge(alpha=10.0).fit(sc.transform(ctx[h]), feat[h])
+        return feat - m.predict(sc.transform(ctx))
+
+    variants = [
+        ("plain GLOBAL", lambda f: f),
+        ("context-norm kNN GLOBAL", _norm),
+        ("context-norm Ridge GLOBAL (deployable)", _norm_ridge),
+    ]
+    for tag, fn in variants:
+        za, zv = _maha_z(fn(ac), h), _maha_z(fn(vib), h)
         zsum = za + zv
         print(f"\n########## physical Mahalanobis + SUM — {tag} ##########")
         print(f"{'ds':<6} {'ac_AUC':>7} {'vib_AUC':>8} {'SUM_AUC':>8}")
