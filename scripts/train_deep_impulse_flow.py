@@ -54,6 +54,12 @@ def _spectrogram(w: np.ndarray, fs: float) -> np.ndarray:
     if mel.shape[1] != N_T:                                     # resize time
         xi = np.linspace(0, mel.shape[1] - 1, N_T)
         mel = np.stack([np.interp(xi, np.arange(mel.shape[1]), mel[i]) for i in range(N_MELS)])
+    # Per-window instance normalization: removes the regime-level offset so the
+    # CNN front-end sees a regime-INVARIANT shape (the absolute energy/impulse
+    # signal is kept by the hand-crafted anchor).  This is what lets the learned
+    # features transfer zero-shot to an unseen campaign, and it bounds the input
+    # so the flow's val NLL stops blowing up.
+    mel = (mel - mel.mean()) / (mel.std() + 1e-6)
     return mel
 
 
