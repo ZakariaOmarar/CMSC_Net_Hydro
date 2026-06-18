@@ -94,9 +94,30 @@ def _collect(loader, is_anom: bool):
 
 
 def _augment(spec: torch.Tensor) -> torch.Tensor:
-    """Time-roll + small gaussian noise (small-data regularization)."""
-    shift = int(torch.randint(-N_T // 8, N_T // 8 + 1, (1,)))
-    return torch.roll(spec, shifts=shift, dims=-1) + 0.02 * torch.randn_like(spec)
+    """Strong regime-simulating augmentation for DOMAIN GENERALIZATION.
+
+    The deep model fails on a new campaign because it overfits the training
+    regimes' absolute spectra.  Simulating regime shift during training -
+    random gain, frequency shift, time shift, SpecAugment freq/time masking,
+    and noise - forces the front-end to learn regime-INVARIANT healthy
+    structure, so an unseen campaign falls inside the trained "healthy"
+    distribution.  Applied to healthy training windows only; the hand-crafted
+    anchor (separate input) still carries the absolute impulse signal.
+    """
+    x = spec.clone()
+    B, F, T = x.shape
+    dev = x.device
+    # random per-sample gain (level invariance)
+    x = x * (1.0 + 0.4 * (torch.rand(B, 1, 1, device=dev) - 0.5))
+    # frequency shift (spectral-regime invariance) + time shift
+    x = torch.roll(x, shifts=int(torch.randint(-F // 6, F // 6 + 1, (1,))), dims=1)
+    x = torch.roll(x, shifts=int(torch.randint(-T // 6, T // 6 + 1, (1,))), dims=2)
+    # SpecAugment: zero a random frequency band and a random time span
+    fm = int(torch.randint(0, F // 4 + 1, (1,))); f0 = int(torch.randint(0, max(1, F - fm), (1,)))
+    x[:, f0:f0 + fm, :] = 0.0
+    tm = int(torch.randint(0, T // 4 + 1, (1,))); t0 = int(torch.randint(0, max(1, T - tm), (1,)))
+    x[:, :, t0:t0 + tm] = 0.0
+    return x + 0.05 * torch.randn_like(x)
 
 
 def _train_one(model, spec, anc, dev, epochs, bs, lr, augment,
@@ -170,6 +191,10 @@ def main() -> int:
     ap.add_argument("--patience", type=int, default=8, help="early-stop patience (epochs)")
     ap.add_argument("--val-frac", type=float, default=0.15, help="healthy val split for early stop")
     ap.add_argument("--target-fpr", type=float, default=0.05)
+    ap.add_argument("--adapt-frac", type=float, default=0.0,
+                    help="few-shot: fraction of a held-out campaign's healthy to "
+                         "fine-tune/recalibrate on (0 = off)")
+    ap.add_argument("--adapt-epochs", type=int, default=10)
     ap.add_argument("--no-augment", action="store_true")
     ap.add_argument("--out", default="results/deep_impulse_flow.pt")
     ap.add_argument("--smoke", action="store_true")
@@ -215,9 +240,9 @@ def main() -> int:
     hza = _scores(acc, np.concatenate([H[d]["asp"] for d in args.fit_ds]), (fa - amu) / asd, dev)
     mz = (hzm.mean(), hzm.std() + 1e-8); ma = (hza.mean(), hza.std() + 1e-8)
 
-    def fused(d):
-        zm = (_scores(mic, d["msp"], (d["manc"] - mmu) / msd, dev) - mz[0]) / mz[1]
-        za = (_scores(acc, d["asp"], (d["aanc"] - amu) / asd, dev) - ma[0]) / ma[1]
+    def _fused(mic_m, acc_m, mz_, ma_, d, sel=slice(None)):
+        zm = (_scores(mic_m, d["msp"][sel], (d["manc"][sel] - mmu) / msd, dev) - mz_[0]) / mz_[1]
+        za = (_scores(acc_m, d["asp"][sel], (d["aanc"][sel] - amu) / asd, dev) - ma_[0]) / ma_[1]
         return zm + za
 
     hf = (hzm - mz[0]) / mz[1] + (hza - ma[0]) / ma[1]
@@ -227,7 +252,7 @@ def main() -> int:
     print(f"\nhealthy FPR @ threshold = {res['healthy_fpr']:.3f}\n")
     print(f"{'ds':<5} {'reclvl_ROC':>10} {'reclvl_PR':>10} {'href_ROC':>9} {'flag@thr':>9} {'heldout':>8}")
     for dn in args.test_ds:
-        zh = fused(H[dn]); za = fused(A[dn])
+        zh = _fused(mic, acc, mz, ma, H[dn]); za = _fused(mic, acc, mz, ma, A[dn])
         y = np.concatenate([np.zeros(zh.size), np.ones(za.size)]); s = np.concatenate([zh, za])
         rr, rp = roc_auc_score(y, s), average_precision_score(y, s)
         yr = A[dn]["ref"]
@@ -238,6 +263,41 @@ def main() -> int:
                                   "held_out": dn not in args.fit_ds}
         print(f"{dn:<5} {rr:>10.3f} {rp:>10.3f} {hr if not np.isnan(hr) else 0:>9.3f} "
               f"{flag:>9.3f} {'YES' if dn not in args.fit_ds else '':>8}")
+
+    # ---- few-shot domain adaptation to held-out campaigns ----
+    if args.adapt_frac > 0:
+        import copy
+        print(f"\n=== few-shot adaptation (adapt on {args.adapt_frac:.0%} of held-out "
+              f"healthy, fine-tune {args.adapt_epochs} ep) ===")
+        print(f"{'ds':<5} {'reclvl_ROC':>10} {'reclvl_PR':>10} {'flag@thr':>9} {'eval_FPR':>9}")
+        for dn in args.test_ds:
+            if dn in args.fit_ds:
+                continue
+            nH = H[dn]["msp"].shape[0]
+            idx = np.random.default_rng(0).permutation(nH)
+            na = max(16, int(args.adapt_frac * nH))
+            ai, ei = idx[:na], idx[na:]
+            micA, accA = copy.deepcopy(mic), copy.deepcopy(acc)
+            _train_one(micA, H[dn]["msp"][ai], (H[dn]["manc"][ai] - mmu) / msd, dev,
+                       args.adapt_epochs, args.batch_size, args.lr * 0.2, augment,
+                       patience=args.adapt_epochs, val_frac=0.2)
+            _train_one(accA, H[dn]["asp"][ai], (H[dn]["aanc"][ai] - amu) / asd, dev,
+                       args.adapt_epochs, args.batch_size, args.lr * 0.2, augment,
+                       patience=args.adapt_epochs, val_frac=0.2)
+            # recalibrate per-modality score-norm + threshold on the adapt slice
+            zmh = _scores(micA, H[dn]["msp"][ai], (H[dn]["manc"][ai] - mmu) / msd, dev)
+            zah = _scores(accA, H[dn]["asp"][ai], (H[dn]["aanc"][ai] - amu) / asd, dev)
+            mzN = (zmh.mean(), zmh.std() + 1e-8); maN = (zah.mean(), zah.std() + 1e-8)
+            hfa = (zmh - mzN[0]) / mzN[1] + (zah - maN[0]) / maN[1]
+            thrA = float(np.percentile(hfa, 100 * (1 - args.target_fpr)))
+            zh = _fused(micA, accA, mzN, maN, H[dn], ei)      # held-out eval healthy
+            za = _fused(micA, accA, mzN, maN, A[dn])
+            y = np.concatenate([np.zeros(zh.size), np.ones(za.size)]); s = np.concatenate([zh, za])
+            rr, rp = roc_auc_score(y, s), average_precision_score(y, s)
+            res["per_dataset"][dn]["adapted"] = {
+                "reclvl_roc": float(rr), "reclvl_pr": float(rp),
+                "flag_at_thr": float((za > thrA).mean()), "eval_fpr": float((zh > thrA).mean())}
+            print(f"{dn:<5} {rr:>10.3f} {rp:>10.3f} {(za > thrA).mean():>9.3f} {(zh > thrA).mean():>9.3f}")
 
     out = Path(args.out).resolve(); out.parent.mkdir(parents=True, exist_ok=True)
     torch.save({"mic": mic.state_dict(), "acc": acc.state_dict(),
