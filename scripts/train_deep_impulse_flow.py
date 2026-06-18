@@ -93,15 +93,27 @@ def _augment(spec: torch.Tensor) -> torch.Tensor:
     return torch.roll(spec, shifts=shift, dims=-1) + 0.02 * torch.randn_like(spec)
 
 
-def _train_one(model, spec, anc, dev, epochs, bs, lr, augment):
+def _train_one(model, spec, anc, dev, epochs, bs, lr, augment,
+               patience=8, val_frac=0.15):
+    """One-class training with held-out-healthy early stopping (restore-best).
+
+    A val_frac slice of the healthy windows is held out; we monitor val NLL and
+    stop when it stops improving for `patience` epochs, restoring the best-val
+    weights — the standard guard against the CNN overfitting the healthy set.
+    """
+    st = torch.tensor(spec, dtype=torch.float32); at = torch.tensor(anc, dtype=torch.float32)
+    n = st.shape[0]
+    perm = torch.randperm(n, generator=torch.Generator().manual_seed(0))
+    n_val = max(1, int(val_frac * n))
+    val_idx, tr_idx = perm[:n_val], perm[n_val:]
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, epochs))
-    st = torch.tensor(spec, dtype=torch.float32); at = torch.tensor(anc, dtype=torch.float32)
-    n = st.shape[0]; model.train()
+    best_val, best_state, bad, best_ep = float("inf"), None, 0, 0
     for ep in range(epochs):
-        perm = torch.randperm(n); tot = 0.0
-        for i in range(0, n, bs):
-            idx = perm[i:i + bs]
+        model.train()
+        tp = tr_idx[torch.randperm(tr_idx.shape[0])]; tot = 0.0
+        for i in range(0, tp.shape[0], bs):
+            idx = tp[i:i + bs]
             sb = st[idx].to(dev); ab = at[idx].to(dev)
             if augment:
                 sb = _augment(sb)
@@ -110,8 +122,26 @@ def _train_one(model, spec, anc, dev, epochs, bs, lr, augment):
             torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
             opt.step(); tot += float(loss.detach()) * len(idx)
         sched.step()
-        if ep == 0 or (ep + 1) % 5 == 0 or ep == epochs - 1:
-            print(f"    epoch {ep+1}/{epochs}  NLL={tot/n:.3f}", flush=True)
+        model.eval()
+        with torch.no_grad():
+            vt = 0.0
+            for i in range(0, n_val, 512):
+                vi = val_idx[i:i + 512]
+                vt += float(-model.log_prob(st[vi].to(dev), at[vi].to(dev)).sum())
+            val_nll = vt / n_val
+        if val_nll < best_val - 1e-3:
+            best_val, bad, best_ep = val_nll, 0, ep
+            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+        else:
+            bad += 1
+        if ep == 0 or (ep + 1) % 5 == 0 or bad >= patience or ep == epochs - 1:
+            print(f"    epoch {ep+1}/{epochs}  train_NLL={tot/tr_idx.shape[0]:.3f}  "
+                  f"val_NLL={val_nll:.3f}  best@{best_ep+1}", flush=True)
+        if bad >= patience:
+            print(f"    early stop at epoch {ep+1} (best val @ {best_ep+1})", flush=True)
+            break
+    if best_state is not None:
+        model.load_state_dict(best_state)
     return model
 
 
@@ -131,6 +161,8 @@ def main() -> int:
     ap.add_argument("--epochs", type=int, default=40)
     ap.add_argument("--batch-size", type=int, default=64)
     ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--patience", type=int, default=8, help="early-stop patience (epochs)")
+    ap.add_argument("--val-frac", type=float, default=0.15, help="healthy val split for early stop")
     ap.add_argument("--target-fpr", type=float, default=0.05)
     ap.add_argument("--no-augment", action="store_true")
     ap.add_argument("--out", default="results/deep_impulse_flow.pt")
@@ -143,7 +175,7 @@ def main() -> int:
     if args.smoke:
         m = DeepImpulseFlow(N_ANCHOR, front="spectro").to(dev)
         sp = np.random.randn(96, N_MELS, N_T); an = np.random.randn(96, N_ANCHOR)
-        _train_one(m, sp, an, dev, 2, 32, 1e-3, augment)
+        _train_one(m, sp, an, dev, 6, 32, 1e-3, augment, patience=2, val_frac=0.2)
         print("smoke scores:", _scores(m, sp[:8], an[:8], dev).shape)
         return 0
 
@@ -168,10 +200,10 @@ def main() -> int:
     acc = DeepImpulseFlow(N_ANCHOR, front="spectro").to(dev)
     print("training mic model ...", flush=True)
     _train_one(mic, np.concatenate([H[d]["msp"] for d in args.fit_ds]), (fm - mmu) / msd,
-               dev, args.epochs, args.batch_size, args.lr, augment)
+               dev, args.epochs, args.batch_size, args.lr, augment, args.patience, args.val_frac)
     print("training accel model ...", flush=True)
     _train_one(acc, np.concatenate([H[d]["asp"] for d in args.fit_ds]), (fa - amu) / asd,
-               dev, args.epochs, args.batch_size, args.lr, augment)
+               dev, args.epochs, args.batch_size, args.lr, augment, args.patience, args.val_frac)
 
     hzm = _scores(mic, np.concatenate([H[d]["msp"] for d in args.fit_ds]), (fm - mmu) / msd, dev)
     hza = _scores(acc, np.concatenate([H[d]["asp"] for d in args.fit_ds]), (fa - amu) / asd, dev)
