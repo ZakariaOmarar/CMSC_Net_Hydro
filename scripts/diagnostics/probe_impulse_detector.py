@@ -68,8 +68,8 @@ def _impulse_feats(w: np.ndarray, fs: float) -> np.ndarray:
 
 
 def _collect(loader, is_anom: bool):
-    """Return X_mic, X_acc (n_win, n_feat), labels (n_win,) over recordings."""
-    Xm, Xa, y = [], [], []
+    """Per-window: X_mic, X_acc, envelope-label, raw mic peak (for healthy-ref label)."""
+    Xm, Xa, yenv, peak = [], [], [], []
     for s in loader.list_segments():
         if s.is_anomaly != is_anom:
             continue
@@ -80,8 +80,6 @@ def _collect(loader, is_anom: bool):
         fs_m = float(ds.mic_sample_rate)
         acc = getattr(ds, "accel_data", None)
         fs_a = float(getattr(ds, "accel_sample_rate", 0) or 1.0)
-        # window-level knock labels (only meaningful inside anomaly recordings;
-        # healthy recordings are all-negative by construction).
         intervals = derive_knock_events(s, max_events=300, noise_floor_mult=3.0) if is_anom else []
         wm = np.sqrt(np.mean(mic.astype(np.float64) ** 2, axis=0))   # RMS-across-channels
         wa = (np.sqrt(np.mean(acc.astype(np.float64) ** 2, axis=0))
@@ -89,14 +87,16 @@ def _collect(loader, is_anom: bool):
         T = wm.size; step = int(STRIDE_S * fs_m); wlen = int(WIN_S * fs_m)
         for i0 in range(0, max(1, T - wlen + 1), max(1, step)):
             t0, t1 = i0 / fs_m, (i0 + wlen) / fs_m
-            Xm.append(_impulse_feats(wm[i0:i0 + wlen], fs_m))
+            seg_m = wm[i0:i0 + wlen]
+            Xm.append(_impulse_feats(seg_m, fs_m))
+            peak.append(float(np.abs(seg_m).max()) if seg_m.size else 0.0)
             if wa is not None:
                 a0, a1 = int(t0 * fs_a), int(t1 * fs_a)
                 Xa.append(_impulse_feats(wa[a0:a1], fs_a))
             else:
                 Xa.append(np.zeros(8))
-            y.append(1 if (is_anom and window_overlaps_any(t0, t1, intervals)) else 0)
-    return np.array(Xm), np.array(Xa), np.array(y)
+            yenv.append(1 if (is_anom and window_overlaps_any(t0, t1, intervals)) else 0)
+    return np.array(Xm), np.array(Xa), np.array(yenv), np.array(peak)
 
 
 def _maha_fit(Xh: np.ndarray):
@@ -114,14 +114,18 @@ def main() -> int:
     from sklearn.metrics import average_precision_score, roc_auc_score
     loaders = {dn: _loader(dn) for dn in DS}
     print("collecting raw-impulse features + window knock-labels ...", flush=True)
-    Hm, Ha, Am, Aa, Ay, Ad = [], [], {}, {}, {}, {}
+    Hm, Ha, Am, Aa, Aenv, Aref, Hpeak_by_ds = [], [], {}, {}, {}, {}, {}
     for dn in DS:
-        hm, ha, _ = _collect(loaders[dn], False)
-        am, aa, ay = _collect(loaders[dn], True)
+        hm, ha, _, hpk = _collect(loaders[dn], False)
+        am, aa, aenv, apk = _collect(loaders[dn], True)
         Hm.append(hm); Ha.append(ha)
-        Am[dn], Aa[dn], Ay[dn] = am, aa, ay
-        print(f"  {dn}: healthy_win={hm.shape[0]} anom_win={am.shape[0]} "
-              f"knock+={int(ay.sum())} ({ay.mean():.2f} of anom cohort)", flush=True)
+        Am[dn], Aa[dn], Aenv[dn] = am, aa, aenv
+        # healthy-referenced label: peak above the same-dataset healthy p99.5
+        floor = float(np.percentile(hpk, 99.5)) if hpk.size else float("inf")
+        Aref[dn] = (apk > floor).astype(int)
+        print(f"  {dn}: healthy_win={hm.shape[0]} anom_win={am.shape[0]} | "
+              f"env+={aenv.mean():.2f}  healthyref+={Aref[dn].mean():.2f}  "
+              f"(floor=healthy-peak-p99.5)", flush=True)
     Hm = np.concatenate(Hm); Ha = np.concatenate(Ha)
     # standardize then Mahalanobis (per modality), fit on healthy.
     def _std(X, m, s): return (X - m) / s
@@ -130,19 +134,28 @@ def main() -> int:
     pm = _maha_fit(_std(Hm, mm, ms)); pa = _maha_fit(_std(Ha, am_, as_))
     zhm = _maha_z(_std(Hm, mm, ms), pm); zha = _maha_z(_std(Ha, am_, as_), pa)
 
-    print("\nWindow-level detection vs derived knock labels (fit on healthy only)")
-    print(f"{'ds':<5} {'mic_ROC':>8} {'acc_ROC':>8} {'SUM_ROC':>8} {'SUM_PRAUC':>10} {'+rate':>7}")
-    for dn in DS:
-        y = Ay[dn]
-        if y.sum() == 0 or y.sum() == y.size:
-            print(f"{dn:<5} (no usable +/- split: {int(y.sum())}/{y.size})")
-            continue
-        zm = _maha_z(_std(Am[dn], mm, ms), pm)
-        za = _maha_z(_std(Aa[dn], am_, as_), pa)
-        zsum = zm + za
-        print(f"{dn:<5} {roc_auc_score(y, zm):>8.3f} {roc_auc_score(y, za):>8.3f} "
-              f"{roc_auc_score(y, zsum):>8.3f} {average_precision_score(y, zsum):>10.3f} "
-              f"{y.mean():>7.2f}")
+    # healthy flag-rate (FPR) at a healthy-calibrated p95 threshold on SUM.
+    zsum_h = zhm + zha
+    thr95 = float(np.percentile(zsum_h, 95))
+    print(f"\nhealthy SUM flag-rate @ healthy-p95 threshold = {(zsum_h > thr95).mean():.3f}")
+
+    for labname, L in (("envelope label", Aenv), ("healthy-ref label", Aref)):
+        print(f"\n=== window-level detection vs {labname} (detector fit on healthy only) ===")
+        print(f"{'ds':<5} {'mic_ROC':>8} {'acc_ROC':>8} {'SUM_ROC':>8} {'SUM_PRAUC':>10} "
+              f"{'+rate':>7} {'flag@p95':>9}")
+        for dn in DS:
+            y = L[dn]
+            zm = _maha_z(_std(Am[dn], mm, ms), pm)
+            za = _maha_z(_std(Aa[dn], am_, as_), pa)
+            zsum = zm + za
+            flag = float((zsum > thr95).mean())
+            if y.sum() == 0 or y.sum() == y.size:
+                print(f"{dn:<5} {'-':>8} {'-':>8} {'-':>8} {'-':>10} "
+                      f"{y.mean():>7.2f} {flag:>9.3f}  (no +/- split)")
+                continue
+            print(f"{dn:<5} {roc_auc_score(y, zm):>8.3f} {roc_auc_score(y, za):>8.3f} "
+                  f"{roc_auc_score(y, zsum):>8.3f} {average_precision_score(y, zsum):>10.3f} "
+                  f"{y.mean():>7.2f} {flag:>9.3f}")
     return 0
 
 
