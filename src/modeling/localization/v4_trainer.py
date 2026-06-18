@@ -221,9 +221,15 @@ def precompute_v4_samples(
     restrict_to_knock_intervals: bool = True,
     knock_intervals_override: dict[str, list[tuple[float, float]]] | None = None,
     v3_xt_pool: torch.nn.Module | None = None,
+    v3_anchor_norm: tuple[np.ndarray, np.ndarray] | None = None,
     device: torch.device | str = "auto",
 ) -> list[V4Sample]:
     """Walk segments, slice labeled anomaly windows, build `V4Sample`s.
+
+    ``v3_anchor_norm`` (healthy mean/std from V3 training) appends the
+    standardized impulse+spectral anchor to ``x_for_v3`` so the V4 gate scores
+    EXACTLY the input the conditional V3 flow was trained on (RQ2 anchor
+    injection).  Must match ``V3Result.anchor_mean/anchor_std``.
 
     - Spatial labels come from `segment.spatial_label` if present, with an
       optional `spatial_label_overrides` dict keyed by `recording_id` for
@@ -386,6 +392,13 @@ def precompute_v4_samples(
             else:
                 x_t = fused.mean(dim=1)
             x_for_v3 = x_t.squeeze(0).cpu().numpy().astype(np.float32)
+            # RQ2 anchor: append the standardized impulse+spectral anchor so the
+            # V4 gate scores the same input the conditional V3 flow trained on.
+            if v3_anchor_norm is not None:
+                from ..anomaly.impulse_anchor import append_anchor
+                x_for_v3 = append_anchor(
+                    x_for_v3[None, :], ac_win, vib_win, v3_anchor_norm
+                )[0].astype(np.float32)
 
             # Front-end features on the raw waveform window.  Burst-aware
             # SRP crops to the highest-energy ~100 ms sub-window before

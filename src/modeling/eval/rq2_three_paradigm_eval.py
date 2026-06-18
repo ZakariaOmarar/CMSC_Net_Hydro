@@ -106,8 +106,18 @@ def _load_state(path: Path, module: torch.nn.Module) -> None:
 
 
 def _load_v3(pipeline_dir: Path, x_dim: int, c_dim: int):
+    from ..anomaly.impulse_anchor import N_ANCHOR
+    th_npz = np.load(pipeline_dir / "thresholds.npz")
+    # RQ2 anchor injection: if the run trained with the impulse+spectral anchor,
+    # the flow input is [pooled(embed) ⊕ anchor(N_ANCHOR)] so the flow dim is
+    # embed+N_ANCHOR (the xt_pool still pools to `embed`).
+    anchor_norm = None
+    flow_dim = x_dim
+    if "anchor_mean" in th_npz.files:
+        anchor_norm = (th_npz["anchor_mean"], th_npz["anchor_std"])
+        flow_dim = x_dim + N_ANCHOR
     flow = ConditionalRealNVP(
-        dim=x_dim, c_dim=c_dim, n_layers=6, hidden_dim=64, n_hidden_per_net=2, scale_max=2.0,
+        dim=flow_dim, c_dim=c_dim, n_layers=6, hidden_dim=64, n_hidden_per_net=2, scale_max=2.0,
     )
     _load_state(pipeline_dir / "flow.pt", flow)
     flow.eval()
@@ -135,12 +145,11 @@ def _load_v3(pipeline_dir: Path, x_dim: int, c_dim: int):
     xt_pool = _XtPool(embed_dim=x_dim, num_heads=V3Config().xt_pool_num_heads)
     _load_state(xt_path, xt_pool)
     xt_pool.eval()
-    th_npz = np.load(pipeline_dir / "thresholds.npz")
     th = PerClusterThresholds(
         centroids=th_npz["centroids"], p95=th_npz["p95"], p99=th_npz["p99"],
         n_per_cluster=th_npz["n_per_cluster"], seed=42,
     )
-    return flow, th, xt_pool
+    return flow, th, xt_pool, anchor_norm
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +164,7 @@ class _PipelineState:
     flow: ConditionalRealNVP
     thresholds: PerClusterThresholds
     xt_pool: torch.nn.Module | None = None
+    anchor_norm: tuple = None  # (mean, std) for RQ2 impulse+spectral anchor, or None
 
 
 def _score_cohort_three_paradigms(
@@ -179,6 +189,11 @@ def _score_cohort_three_paradigms(
                 # Reproduce the flow's training-time x_t: the learnable pma2 pool
                 # when persisted, otherwise the legacy mean-pool.
                 x = p.xt_pool(fused) if p.xt_pool is not None else fused.mean(dim=1)
+                # RQ2 anchor injection: append the standardized impulse+spectral
+                # anchor so the flow input matches what it trained on.
+                if p.anchor_norm is not None:
+                    from ..anomaly.impulse_anchor import append_anchor
+                    x = append_anchor(x, ac, vib, p.anchor_norm)
                 c = d["context"]
                 scores = p.flow.anomaly_score(x, c).cpu().numpy()
                 c_np = c.cpu().numpy()
@@ -347,13 +362,13 @@ def main() -> None:
     v2.eval()
 
     # Build the three pipeline states.
-    flow_a, th_a, xt_a = _load_v3(v3_run / "v3_acoustic", x_dim=embed, c_dim=embed)
-    flow_v, th_v, xt_v = _load_v3(v3_run / "v3_vibration", x_dim=embed, c_dim=embed)
-    flow_f, th_f, xt_f = _load_v3(v3_run / "v3_fusion", x_dim=embed, c_dim=embed)
+    flow_a, th_a, xt_a, anc_a = _load_v3(v3_run / "v3_acoustic", x_dim=embed, c_dim=embed)
+    flow_v, th_v, xt_v, anc_v = _load_v3(v3_run / "v3_vibration", x_dim=embed, c_dim=embed)
+    flow_f, th_f, xt_f, anc_f = _load_v3(v3_run / "v3_fusion", x_dim=embed, c_dim=embed)
     pipelines = [
-        _PipelineState("acoustic", V3AcousticOnlyAdapter(v1_a), flow_a, th_a, xt_a),
-        _PipelineState("vibration", V3VibrationOnlyAdapter(v1_v), flow_v, th_v, xt_v),
-        _PipelineState("fusion", v2, flow_f, th_f, xt_f),
+        _PipelineState("acoustic", V3AcousticOnlyAdapter(v1_a), flow_a, th_a, xt_a, anc_a),
+        _PipelineState("vibration", V3VibrationOnlyAdapter(v1_v), flow_v, th_v, xt_v, anc_v),
+        _PipelineState("fusion", v2, flow_f, th_f, xt_f, anc_f),
     ]
 
     print("[rq2-3p] Gathering cohorts ...")

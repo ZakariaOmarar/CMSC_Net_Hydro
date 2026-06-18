@@ -63,13 +63,13 @@ def main() -> int:
     v1_a = _build_v1("acoustic", v1_cfg); _load_state(run / "v1" / "acoustic.pt", v1_a); v1_a.eval()
     v1_v = _build_v1("vibration", v1_cfg); _load_state(run / "v1" / "vibration.pt", v1_v); v1_v.eval()
     v2 = _build_v2(v2_cfg); _load_state(run / "v2" / "encoder.pt", v2); v2.eval()
-    flow_a, th_a, xt_a = _load_v3(run / "v3_acoustic", x_dim=embed, c_dim=embed)
-    flow_v, th_v, xt_v = _load_v3(run / "v3_vibration", x_dim=embed, c_dim=embed)
-    flow_f, th_f, xt_f = _load_v3(run / "v3_fusion", x_dim=embed, c_dim=embed)
+    flow_a, th_a, xt_a, anc_a = _load_v3(run / "v3_acoustic", x_dim=embed, c_dim=embed)
+    flow_v, th_v, xt_v, anc_v = _load_v3(run / "v3_vibration", x_dim=embed, c_dim=embed)
+    flow_f, th_f, xt_f, anc_f = _load_v3(run / "v3_fusion", x_dim=embed, c_dim=embed)
     pipes = [
-        _PipelineState("acoustic", V3AcousticOnlyAdapter(v1_a), flow_a, th_a, xt_a),
-        _PipelineState("vibration", V3VibrationOnlyAdapter(v1_v), flow_v, th_v, xt_v),
-        _PipelineState("fusion", v2, flow_f, th_f, xt_f),
+        _PipelineState("acoustic", V3AcousticOnlyAdapter(v1_a), flow_a, th_a, xt_a, anc_a),
+        _PipelineState("vibration", V3VibrationOnlyAdapter(v1_v), flow_v, th_v, xt_v, anc_v),
+        _PipelineState("fusion", v2, flow_f, th_f, xt_f, anc_f),
     ]
 
     loaders = [_loader(d) for d in ("d1", "d2", "d3", "d4")]

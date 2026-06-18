@@ -42,9 +42,26 @@ from ..context.v2_ssl import (
 )
 from ..encoders.set_transformer import PMA
 from .cnf_head import ConditionalRealNVP
+from .impulse_anchor import N_ANCHOR, append_anchor, impulse_spectral_anchor
 from .threshold import PerClusterThresholds
 
 XtPoolKind = Literal["mean", "pma2"]
+
+
+def _fit_anchor_norm(cache: list[dict]) -> tuple[np.ndarray, np.ndarray]:
+    """Healthy mean/std of the cached per-window anchor (for standardization)."""
+    A = np.concatenate([e["anchor"] for e in cache], axis=0)
+    return A.mean(axis=0), A.std(axis=0) + 1e-8
+
+
+def _augment_anchor(x: torch.Tensor, anchor: np.ndarray,
+                    anchor_norm: tuple[np.ndarray, np.ndarray] | None) -> torch.Tensor:
+    """Concatenate the standardized impulse+spectral anchor to a pooled x."""
+    if anchor_norm is None:
+        return x
+    mean, std = anchor_norm
+    a = torch.as_tensor((anchor - mean) / std, dtype=x.dtype, device=x.device)
+    return torch.cat([x, a], dim=1)
 
 
 class _XtPool(nn.Module):
@@ -125,6 +142,7 @@ class V3Config:
     n_hidden_per_net: int = 2   # CNF coupling MLP depth; not centralised
     scale_max: float = V3_ANOMALY.scale_max
     conditional_base: bool = V3_ANOMALY.conditional_base
+    inject_impulse_anchor: bool = V3_ANOMALY.inject_impulse_anchor
 
     # Training schedule — per-experiment, not centralised.
     epochs: int = 30
@@ -189,6 +207,7 @@ def _extract_xc(
     device: torch.device,
     xt_pool: nn.Module | None = None,
     grad: bool = False,
+    anchor_norm: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, list[str]]:
     """Run frozen V2 encoder forward; collect x_t, c_t, mode labels.
 
@@ -225,6 +244,7 @@ def _extract_xc(
                     x_t = xt_pool(fused)
         else:
             x_t = fused.mean(dim=1)
+        x_t = append_anchor(x_t, batch["ac_feat"], batch["vib_feat"], anchor_norm)
         xs.append(x_t.detach().cpu())
         cs.append(c_t.detach().cpu())
         labels.extend(batch["mode_label"])
@@ -294,10 +314,19 @@ def _cache_fused(
             out = encoder(ac, ac_xyz, vib, vib_xyz, ds_idx, mask_p=0.0)
             fused = torch.cat([out["a_fused"], out["v_fused"]], dim=1).detach().cpu()
             c = out["context"].detach().cpu()
+            # Per-window impulse+spectral anchor from the SAME windowed log-mel
+            # +CWT features (RQ2: augments the conditional flow input so the
+            # detector sees the knock the SSL embedding discards).  Cached so
+            # the joint training loop reuses it without recompute.
+            anchor = impulse_spectral_anchor(
+                batch["ac_feat"].detach().cpu().numpy(),
+                batch["vib_feat"].detach().cpu().numpy(),
+            )
             cache.append(
                 {
                     "fused": fused,
                     "c": c,
+                    "anchor": anchor,
                     "labels": list(batch["mode_label"]),
                 }
             )
@@ -308,20 +337,21 @@ def _pool_cached_x(
     cache: list[dict],
     xt_pool: nn.Module | None,
     device: torch.device,
+    anchor_norm: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> torch.Tensor:
     """Apply ``xt_pool`` (or the legacy mean-pool) over a fused cache.
 
     Always runs under ``no_grad`` — used for the final extract-once paths
-    (val NLL evaluation, threshold fitting, post-training scoring).
+    (val NLL evaluation, threshold fitting, post-training scoring).  When
+    ``anchor_norm`` is supplied the standardized per-window impulse+spectral
+    anchor is concatenated to x (RQ2 conditional-flow input augmentation).
     """
     chunks: list[torch.Tensor] = []
     with torch.no_grad():
         for entry in cache:
             fused = entry["fused"].to(device)
-            if xt_pool is None:
-                x = fused.mean(dim=1)
-            else:
-                x = xt_pool(fused)
+            x = fused.mean(dim=1) if xt_pool is None else xt_pool(fused)
+            x = _augment_anchor(x, entry["anchor"], anchor_norm)
             chunks.append(x.detach().cpu())
     return torch.cat(chunks, dim=0)
 
@@ -373,6 +403,11 @@ class V3Result:
     # weights that scoring / streaming inference must reuse to obtain
     # comparable scores on new windows.
     xt_pool: nn.Module | None = None
+    # Impulse+spectral anchor standardization (healthy mean/std) when
+    # `inject_impulse_anchor` is on; None otherwise.  Persisted so the RQ2 eval
+    # and the V4 gate can recompute + standardize the anchor identically.
+    anchor_mean: np.ndarray | None = None
+    anchor_std: np.ndarray | None = None
     early_stopped_epoch: int | None = None
     best_val_nll: float = float("nan")
     # Cached x / c arrays for the deep-vs-simple comparison (KDE-on-c_t in
@@ -481,6 +516,18 @@ def train_v3_cnf(
     else:
         raise ValueError(f"unknown xt_pool {v3_cfg.xt_pool!r}")
 
+    # RQ2 anchor: standardize on the train-healthy cache and append to x at
+    # every pooling site (so flow dim, thresholds, val and scoring all stay
+    # consistent).  Supported on the pma2 cache path only.
+    anchor_norm: tuple[np.ndarray, np.ndarray] | None = None
+    if v3_cfg.inject_impulse_anchor:
+        if xt_pool is None:
+            raise NotImplementedError(
+                "inject_impulse_anchor=True requires xt_pool='pma2' "
+                "(the legacy mean path does not cache the anchor)"
+            )
+        anchor_norm = _fit_anchor_norm(train_cache)
+
     if xt_pool is None:
         # Legacy mean-pool: extract once, then train flow on tensors.
         x_train, c_train, _ = _extract_xc(v2_encoder, train_loader, device)
@@ -498,9 +545,9 @@ def train_v3_cnf(
         # These tensors are NOT used in training; the training loop re-pools
         # each epoch from `train_cache`.  We compute them with the pool's
         # initialisation so flow.__init__ sees the right shape.
-        x_train = _pool_cached_x(train_cache, xt_pool, device)
-        x_val_fit = _pool_cached_x(val_fit_cache, xt_pool, device)
-        x_val = _pool_cached_x(val_eval_cache, xt_pool, device)
+        x_train = _pool_cached_x(train_cache, xt_pool, device, anchor_norm)
+        x_val_fit = _pool_cached_x(val_fit_cache, xt_pool, device, anchor_norm)
+        x_val = _pool_cached_x(val_eval_cache, xt_pool, device, anchor_norm)
 
     if v3_cfg.unconditional:
         c_train_used = torch.zeros_like(c_train)
@@ -614,7 +661,7 @@ def train_v3_cnf(
                 # CPU tensor concatenated in cache order — see `_cache_fused`).
                 cb = c_train_used[cum_idx : cum_idx + B].to(device)
                 cum_idx += B
-                xb = xt_pool(fused)
+                xb = _augment_anchor(xt_pool(fused), entry["anchor"], anchor_norm)
                 log_p = flow.log_prob(xb, cb)
                 loss = -log_p.mean()
                 optim.zero_grad()
@@ -640,7 +687,7 @@ def train_v3_cnf(
         with torch.no_grad():
             if xt_pool is not None:
                 # Re-pool the cached val_eval with current weights.
-                x_val_epoch = _pool_cached_x(val_eval_cache, xt_pool, device)
+                x_val_epoch = _pool_cached_x(val_eval_cache, xt_pool, device, anchor_norm)
             else:
                 x_val_epoch = x_val
             v_log_p = flow.log_prob(x_val_epoch.to(device), c_val_used.to(device))
@@ -675,8 +722,8 @@ def train_v3_cnf(
         xt_pool.eval()
         # Re-pool with final pool weights so threshold-fit and held-out scores
         # both reflect the converged `_XtPool` state.
-        x_val_fit_final = _pool_cached_x(val_fit_cache, xt_pool, device)
-        x_val_final = _pool_cached_x(val_eval_cache, xt_pool, device)
+        x_val_fit_final = _pool_cached_x(val_fit_cache, xt_pool, device, anchor_norm)
+        x_val_final = _pool_cached_x(val_eval_cache, xt_pool, device, anchor_norm)
     else:
         x_val_fit_final = x_val_fit
         x_val_final = x_val
@@ -713,7 +760,7 @@ def train_v3_cnf(
     # consistent with x_val_final the flow was just evaluated on.
     if xt_pool is not None:
         with torch.no_grad():
-            x_train_final = _pool_cached_x(train_cache, xt_pool, device)
+            x_train_final = _pool_cached_x(train_cache, xt_pool, device, anchor_norm)
     else:
         x_train_final = x_train
 
@@ -734,6 +781,8 @@ def train_v3_cnf(
         val_labels=val_labels,
         unconditional=v3_cfg.unconditional,
         xt_pool=xt_pool,
+        anchor_mean=(anchor_norm[0] if anchor_norm is not None else None),
+        anchor_std=(anchor_norm[1] if anchor_norm is not None else None),
         early_stopped_epoch=early_stopped_epoch,
         best_val_nll=best_val_nll,
         train_x=x_train_final.detach().cpu().numpy(),
@@ -758,6 +807,7 @@ def score_segments(
     device: torch.device | str = "auto",
     xt_pool: nn.Module | None = None,
     window_seconds_override: float | dict[str, float] | None = None,
+    anchor_norm: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
     """Score a list of paired segments with the trained flow.
 
@@ -799,7 +849,8 @@ def score_segments(
         collate_fn=_collate,
     )
 
-    x, c, labels = _extract_xc(v2_encoder, loader, device, xt_pool=xt_pool, grad=False)
+    x, c, labels = _extract_xc(v2_encoder, loader, device, xt_pool=xt_pool, grad=False,
+                               anchor_norm=anchor_norm)
     c_used = torch.zeros_like(c) if unconditional else c
     with torch.no_grad():
         scores = flow.anomaly_score(x.to(device), c_used.to(device)).cpu().numpy()

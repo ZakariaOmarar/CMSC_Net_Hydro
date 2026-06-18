@@ -269,6 +269,7 @@ def sliding_window_v3_inference(
     inference_stride_s: float = 0.25,
     xt_pool=None,
     device: str = "auto",
+    anchor_norm=None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Run V3 on a single paired segment at a finer-than-training stride.
 
@@ -324,7 +325,8 @@ def sliding_window_v3_inference(
     dev = resolve_device(device)
     # Pass the trained xt_pool so inference pooling matches training pooling.
     xtp = xt_pool.to(dev) if xt_pool is not None else None
-    x, c, _ = _extract_xc(v2_encoder, loader, dev, xt_pool=xtp, grad=False)
+    x, c, _ = _extract_xc(v2_encoder, loader, dev, xt_pool=xtp, grad=False,
+                          anchor_norm=anchor_norm)
     with torch.no_grad():
         scores = flow.anomaly_score(x.to(dev), c.to(dev)).cpu().numpy().astype(np.float64)
     # Window-centre times: start_ac / acoustic_fs + window_seconds / 2.

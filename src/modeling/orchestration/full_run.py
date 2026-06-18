@@ -220,6 +220,8 @@ def _v3_event_intervals_for_recordings(
                     v2_encoder, v3.flow, paired,
                     v2_cfg=v2_cfg, inference_stride_s=0.25,
                     xt_pool=getattr(v3, "xt_pool", None), device=v3_cfg.device,
+                    anchor_norm=((v3.anchor_mean, v3.anchor_std)
+                                 if getattr(v3, "anchor_mean", None) is not None else None),
                 )
             except Exception:
                 # Skip a recording whose V3 inference fails; it simply gets no
@@ -577,13 +579,18 @@ def _train_one_v3(
     # makes the NLL blow up and the healthy FPR degenerate to 1.0.
     if getattr(res, "xt_pool", None) is not None:
         torch.save(res.xt_pool.state_dict(), pipe_dir / "xt_pool.pt")
-    np.savez(
-        pipe_dir / "thresholds.npz",
+    threshold_arrays = dict(
         centroids=res.thresholds.centroids,
         p95=res.thresholds.p95,
         p99=res.thresholds.p99,
         n_per_cluster=res.thresholds.n_per_cluster,
     )
+    # Persist the impulse+spectral anchor standardization (RQ2 anchor injection)
+    # so the RQ2 eval and V4 gate recompute + standardize the anchor identically.
+    if getattr(res, "anchor_mean", None) is not None:
+        threshold_arrays["anchor_mean"] = res.anchor_mean
+        threshold_arrays["anchor_std"] = res.anchor_std
+    np.savez(pipe_dir / "thresholds.npz", **threshold_arrays)
     np.savez(
         pipe_dir / "val_eval.npz",
         scores=res.val_scores,
@@ -985,7 +992,12 @@ def main(
                         ),
                         collate_fn=_collate,
                     )
-                    x_val, c_val, _ = _extract_xc(v2.encoder, val_loader, resolve_device(v3_cfg.device))
+                    x_val, c_val, _ = _extract_xc(
+                        v2.encoder, val_loader, resolve_device(v3_cfg.device),
+                        xt_pool=getattr(v3, "xt_pool", None),
+                        anchor_norm=((v3.anchor_mean, v3.anchor_std)
+                                     if getattr(v3, "anchor_mean", None) is not None else None),
+                    )
                     auc = evaluate_synthetic_anomaly_auc(
                         v3.flow, x_val.numpy(), c_val.numpy(),
                         snr_db_list=(-10.0, -5.0, 0.0, 5.0, 10.0),
@@ -1114,6 +1126,8 @@ def main(
                             v2_cfg=v2_cfg, inference_stride_s=0.25,
                             xt_pool=v3.xt_pool,
                             device=resolve_device(v3_cfg.device),
+                            anchor_norm=((v3.anchor_mean, v3.anchor_std)
+                                         if getattr(v3, "anchor_mean", None) is not None else None),
                         )
                     except Exception as inner:
                         log(f"    {cohort_label}/{s.recording_id} skipped: {inner}")
@@ -1212,6 +1226,10 @@ def main(
         # Pool `x_for_v3` with V3's pooling so gating-time NLL matches the
         # manifold the flow was trained on (avoids the PMA-2/mean saturation).
         v3_xt_pool=getattr(v3, "xt_pool", None),
+        # Append V3's impulse+spectral anchor so the gate scores the exact input
+        # the conditional flow trained on (RQ2 anchor injection).
+        v3_anchor_norm=((v3.anchor_mean, v3.anchor_std)
+                        if getattr(v3, "anchor_mean", None) is not None else None),
     )
     log(f"  {len(v4_samples)} V4 samples in {time.time()-t0:.0f}s")
     n_with_multilat = sum(1 for s in v4_samples if s.multilat_xyz is not None)

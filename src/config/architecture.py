@@ -301,6 +301,14 @@ class _V3Anomaly:
     # masked single-regime faults).  Zero-init ⇒ identical to N(0,I) at init.
     conditional_base: bool = True
 
+    # Append impulse+spectral condition-monitoring features to the conditional
+    # flow's input x (RQ2): the SSL embedding discards the impulsiveness a knock
+    # produces, so the conditional detector cannot see it.  Injecting the
+    # hand-crafted anchor restores the anomaly signal WITHOUT abandoning
+    # context-conditioning (the flow still conditions on c_t).  Ablatable:
+    # False reproduces the embedding-only conditional flow.
+    inject_impulse_anchor: bool = True
+
 
 V3_ANOMALY = _V3Anomaly()
 
