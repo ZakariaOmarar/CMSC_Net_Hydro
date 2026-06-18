@@ -89,20 +89,33 @@ def main() -> int:
 
     sh = det.fused_score(phys_h, ctx_h)
     mh = det.modality_scores(phys_h, ctx_h)
+    res: dict = {
+        "run": run.name, "normalizer": args.normalizer,
+        "target_fpr": args.target_fpr,
+        "healthy_fused_fpr": float((sh > det.threshold).mean()),
+        "per_cohort": {},
+    }
     print(f"\n=== physical detector ({args.normalizer}, target_fpr={args.target_fpr:.0%}) ===")
-    print(f"pooled-healthy fused FPR @ threshold = {(sh > det.threshold).mean():.3f}")
+    print(f"pooled-healthy fused FPR @ threshold = {res['healthy_fused_fpr']:.3f}")
     print(f"{'ds':<6} {'ac_AUC':>7} {'vib_AUC':>8} {'SUM_AUC':>8} {'detect@thr':>11}")
     for dn in A:
         ph, ct = A[dn]
         ms = det.modality_scores(ph, ct)
         fs = det.fused_score(ph, ct)
-        print(f"{dn:<6} {_auc(mh['ac'], ms['ac']):>7.3f} {_auc(mh['vib'], ms['vib']):>8.3f} "
-              f"{_auc(sh, fs):>8.3f} {(fs > det.threshold).mean():>11.3f}")
+        row = {"ac_auc": _auc(mh["ac"], ms["ac"]), "vib_auc": _auc(mh["vib"], ms["vib"]),
+               "sum_auc": _auc(sh, fs), "detect_at_thr": float((fs > det.threshold).mean()),
+               "n": int(fs.size)}
+        res["per_cohort"][dn] = row
+        print(f"{dn:<6} {row['ac_auc']:>7.3f} {row['vib_auc']:>8.3f} "
+              f"{row['sum_auc']:>8.3f} {row['detect_at_thr']:>11.3f}")
 
-    out = run / "physical_detector.pkl"
-    with out.open("wb") as fh:
+    with (run / "physical_detector.pkl").open("wb") as fh:
         pickle.dump(det, fh)
-    print(f"\nsaved -> {out.relative_to(REPO)}")
+    import json
+    with (run / "physical_detector_eval.json").open("w", encoding="utf-8") as fh:
+        json.dump(res, fh, indent=2)
+    print(f"\nsaved -> {(run / 'physical_detector.pkl').relative_to(REPO)}")
+    print(f"saved -> {(run / 'physical_detector_eval.json').relative_to(REPO)}")
     return 0
 
 
