@@ -126,16 +126,32 @@ def main() -> int:
         m, s = sc_h.mean(), sc_h.std() + 1e-8
         return (sc_h - m) / s, (sc_q - m) / s
 
-    print("\n########## physical-feature Mahalanobis detector + SUM fusion ##########")
+    # OWN-dataset (regime-matched) baseline.
+    print("\n########## physical Mahalanobis + SUM fusion — OWN-dataset healthy ##########")
     print(f"{'ds':<6} {'ac_AUC':>7} {'vib_AUC':>8} {'SUM_AUC':>8}")
     for dn in A:
         if dn not in H:
             continue
         zah, zaa = _maha_z(_mat(H[dn]["ac"]), _mat(A[dn]["ac"]))
         zvh, zva = _maha_z(_mat(H[dn]["vib"]), _mat(A[dn]["vib"]))
-        au_a, au_v = _auc(zah, zaa), _auc(zvh, zva)
-        au_sum = _auc(zah + zvh, zaa + zva)
-        print(f"{dn:<6} {au_a:>7.3f} {au_v:>8.3f} {au_sum:>8.3f}")
+        print(f"{dn:<6} {_auc(zah, zaa):>7.3f} {_auc(zvh, zva):>8.3f} "
+              f"{_auc(zah + zvh, zaa + zva):>8.3f}")
+
+    # GLOBAL (pooled-healthy) baseline — the deployable, single-threshold case.
+    # Fit one Mahalanobis per modality on ALL healthy; healthy AUC reference is
+    # the pooled healthy. This tests whether the physical detector survives the
+    # user's hard constraint (one global baseline, no per-campaign fit).
+    print("\n########## physical Mahalanobis + SUM fusion — GLOBAL healthy ##########")
+    gh_ac = np.concatenate([_mat(H[dn]["ac"]) for dn in H])
+    gh_vib = np.concatenate([_mat(H[dn]["vib"]) for dn in H])
+    zgh_a, _ = _maha_z(gh_ac, gh_ac[:1])   # healthy ref scores
+    zgh_v, _ = _maha_z(gh_vib, gh_vib[:1])
+    print(f"{'ds':<6} {'ac_AUC':>7} {'vib_AUC':>8} {'SUM_AUC':>8}")
+    for dn in A:
+        _, zaa = _maha_z(gh_ac, _mat(A[dn]["ac"]))
+        _, zva = _maha_z(gh_vib, _mat(A[dn]["vib"]))
+        print(f"{dn:<6} {_auc(zgh_a, zaa):>7.3f} {_auc(zgh_v, zva):>8.3f} "
+              f"{_auc(zgh_a + zgh_v, zaa + zva):>8.3f}")
     return 0
 
 
