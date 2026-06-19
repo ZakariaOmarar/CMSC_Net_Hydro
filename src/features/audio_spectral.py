@@ -18,6 +18,7 @@ import numpy as np
 
 from ..config.architecture import ACOUSTIC_CWT, ACOUSTIC_FEATURES
 from .acoustic_representations import compute_cwt_scalogram
+from .feature_cache import disk_cached_feature
 
 
 def compute_log_mel_spectrogram(
@@ -105,6 +106,7 @@ def compute_log_mel_spectrogram(
     return np.asarray(log_mel, dtype=np.float64)
 
 
+@disk_cached_feature
 def compute_encoder_input_stack(
     mic_data: np.ndarray,
     fs: int,

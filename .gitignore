@@ -27,6 +27,7 @@ build/
 artifacts/
 models/
 results/
+.feature_cache/
 
 # OS files
 .DS_Store

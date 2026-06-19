@@ -205,6 +205,14 @@ def cluster_purity_and_nmi(
     nmi = _normalised_mutual_information(cluster_idx, label_idx)
     ari = _adjusted_rand_index(cluster_idx, label_idx)
 
+    # Collapse diagnostics: an NMI of exactly 0 almost always means K-means
+    # found a single populated cluster because the embeddings collapsed to
+    # (near-)identical vectors — not "poor but real" clustering.  Surface that
+    # explicitly so a future collapse is diagnosable rather than mistaken for a
+    # weak-but-valid score.  `collapsed` is True when only one cluster is
+    # populated OR the embedding spread is numerically negligible.
+    n_effective_clusters = int(np.unique(cluster_idx).size)
+    embedding_std = float(embeddings.std())
     return {
         "purity": purity,
         "nmi": nmi,
@@ -215,6 +223,9 @@ def cluster_purity_and_nmi(
         "mapping": mapping,
         "confusion": confusion,
         "cluster_idx": cluster_idx.astype(np.int64),
+        "n_effective_clusters": n_effective_clusters,
+        "embedding_std": embedding_std,
+        "collapsed": bool(n_effective_clusters <= 1 or embedding_std < 1e-6),
     }
 
 

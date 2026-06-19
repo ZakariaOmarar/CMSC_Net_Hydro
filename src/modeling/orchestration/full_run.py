@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -668,7 +669,6 @@ def main(
     # kernels fall through rather than crash).  BLAS thread scheduling
     # variance is bounded, not eliminated — `multi_seed.py` remains the
     # canonical mean ± std reporter for publication numbers.
-    import os
     os.environ.setdefault("PYTHONHASHSEED", "0")
     torch.manual_seed(42)
     np.random.seed(42)
@@ -706,6 +706,15 @@ def main(
     log(f"REPO_ROOT = {REPO_ROOT}")
     log(f"out_dir = {out_dir}")
     log(f"quick = {quick}, variant = b5_cma")
+
+    # Result-neutral feature cache (CWT/mel + vibration stacks).  Shared across
+    # V1 / V2 / the A1 ablation / V4 — keyed on exact input bytes + params, so
+    # it only ever speeds things up, never changes a number.  Enabled by default
+    # at a stable repo-level dir; set HYDRO_FEATURE_CACHE_DIR (empty to disable).
+    if os.environ.get("HYDRO_FEATURE_CACHE_DIR") is None:
+        os.environ["HYDRO_FEATURE_CACHE_DIR"] = str(REPO_ROOT / ".feature_cache")
+    _fc = os.environ.get("HYDRO_FEATURE_CACHE_DIR")
+    log(f"feature cache = {_fc or '(disabled)'}")
 
     # ----------------------------------------------------------------- data
     # Loaders are built dynamically from the registry — adding a future
@@ -832,19 +841,36 @@ def main(
     }
 
     # V2 A1 ablation: drop vibration.
+    #
+    # IMPORTANT — the cross-modal alignment (CMA) loss aligns the acoustic
+    # summary to the vibration summary.  With vibration zeroed, the vibration
+    # summary is a per-dataset CONSTANT (it depends only on vib_xyz / dataset
+    # idx, not on the zeroed signal), so the CMA contrastive collapses the
+    # shared acoustic/context representation toward that single point — K-means
+    # then finds one populated cluster and NMI is exactly 0.000.  The severed
+    # retrain is acoustic-only by construction, so CMA (and vibration dropout)
+    # are meaningless here and must be switched off; otherwise the ablation
+    # measures representation collapse, not "can acoustic alone recover mode".
     log("V2 A1 ablation (drop_vibration=True) ...")
     t0 = time.time()
-    a1_cfg = replace(v2_cfg, drop_vibration=True)
+    a1_cfg = replace(v2_cfg, drop_vibration=True, cma_weight=0.0, vibration_dropout_p=0.0)
     v2_a1 = train_v2_fusion(
         SSL_LOADERS, cfg=a1_cfg,
         v1_acoustic_state_dict=v1_a.encoder.state_dict(),
         v1_vibration_state_dict=v1_v.encoder.state_dict(),
     )
     log(f"  V2 A1 {time.time()-t0:.0f}s — NMI={v2_a1.rq1.get('nmi',0):.3f}")
+    if v2_a1.rq1.get("collapsed", False):
+        log("  WARNING: V2 A1 context COLLAPSED (n_effective_clusters="
+            f"{v2_a1.rq1.get('n_effective_clusters', '?')}, embedding_std="
+            f"{v2_a1.rq1.get('embedding_std', float('nan')):.2e}); NMI is "
+            "degenerate, not a valid ablation result.")
     metrics["stages"]["v2_a1_drop_vibration"] = {
         "rq1_nmi": v2_a1.rq1.get("nmi", 0.0),
         "rq1_ari": v2_a1.rq1.get("ari", 0.0),
         "rq1_purity": v2_a1.rq1.get("purity", 0.0),
+        "collapsed": bool(v2_a1.rq1.get("collapsed", False)),
+        "n_effective_clusters": v2_a1.rq1.get("n_effective_clusters"),
     }
 
     # V2 modality-balance probe (the headline Phase-B metric).

@@ -52,6 +52,7 @@ from numpy.lib.stride_tricks import sliding_window_view
 from scipy.signal import hilbert
 
 from ..config.architecture import VIBRATION_FEATURES
+from .feature_cache import disk_cached_feature
 
 Channel2Mode = Literal["kurtosis", "crest_factor", "none"]
 
@@ -82,6 +83,7 @@ def channel2_statistic_name(
     return mode
 
 
+@disk_cached_feature
 def compute_vibration_input_stack(
     accel_data: np.ndarray,
     *,
