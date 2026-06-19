@@ -1005,6 +1005,8 @@ def encoder_level_transition_fpr(
     percentile: int | str = 95,
     unconditional: bool = False,
     device: torch.device | str = "auto",
+    xt_pool: nn.Module | None = None,
+    anchor_norm: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> dict:
     """Cross-dataset transition stress-test that bypasses sensor-count mismatch.
 
@@ -1025,10 +1027,12 @@ def encoder_level_transition_fpr(
     a_scores, a_contexts, _ = score_segments(
         v2_encoder, flow, [seg_a], v2_cfg=v2_cfg,
         unconditional=unconditional, device=device,
+        xt_pool=xt_pool, anchor_norm=anchor_norm,
     )
     b_scores, b_contexts, _ = score_segments(
         v2_encoder, flow, [seg_b], v2_cfg=v2_cfg,
         unconditional=unconditional, device=device,
+        xt_pool=xt_pool, anchor_norm=anchor_norm,
     )
     if a_contexts.shape[0] == 0 or b_contexts.shape[0] == 0:
         return {"n_windows": 0, "n_alerts": 0, "fpr": 0.0}
@@ -1046,8 +1050,8 @@ def encoder_level_transition_fpr(
     # source segment by running the encoder again.  Cheaper alternative:
     # cache `x` alongside `c` from `score_segments`, but the helper only
     # exposes `c`.  For diagnostic rigour we recompute here.
-    a_x = _extract_x_for_segment(v2_encoder, seg_a, v2_cfg, device)[-K:]
-    b_x = _extract_x_for_segment(v2_encoder, seg_b, v2_cfg, device)[:K]
+    a_x = _extract_x_for_segment(v2_encoder, seg_a, v2_cfg, device, xt_pool, anchor_norm)[-K:]
+    b_x = _extract_x_for_segment(v2_encoder, seg_b, v2_cfg, device, xt_pool, anchor_norm)[:K]
 
     weights = np.linspace(0.0, 1.0, K, dtype=np.float32)
     transition_x = (1.0 - weights[:, None]) * a_x + weights[:, None] * b_x
@@ -1076,8 +1080,15 @@ def _extract_x_for_segment(
     seg: _PairedSegment,
     cfg: V2SSLConfig,
     device: torch.device,
+    xt_pool: nn.Module | None = None,
+    anchor_norm: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> np.ndarray:
-    """Run V2 forward over every window in `seg`; return mean-pool x array."""
+    """Run V2 forward over every window in `seg`; return the V3 flow input x.
+
+    Pools with ``xt_pool`` (pma2) when supplied else mean, and appends the
+    standardized impulse+spectral anchor when ``anchor_norm`` is given — so x
+    matches exactly what the conditional flow was trained on.
+    """
     ds = _PairedWindowedDataset([seg], cfg)
     if len(ds) == 0:
         return np.zeros((0, v2_encoder.embed_dim), dtype=np.float32)
@@ -1092,7 +1103,9 @@ def _extract_x_for_segment(
                 batch["dataset_idx"].to(device), mask_p=0.0,
             )
             fused = torch.cat([out["a_fused"], out["v_fused"]], dim=1)
-            xs.append(fused.mean(dim=1).cpu().numpy())
+            x = xt_pool(fused) if xt_pool is not None else fused.mean(dim=1)
+            x = append_anchor(x, batch["ac_feat"], batch["vib_feat"], anchor_norm)
+            xs.append(x.cpu().numpy())
     return np.concatenate(xs, axis=0).astype(np.float32)
 
 
@@ -1108,6 +1121,8 @@ def transition_fpr(
     percentile: int = 99,
     unconditional: bool = False,
     device: torch.device | str = "auto",
+    xt_pool: nn.Module | None = None,
+    anchor_norm: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> dict:
     """Splice (A → crossfade → B), score every window, return the FPR.
 
@@ -1123,6 +1138,8 @@ def transition_fpr(
         v2_cfg=v2_cfg,
         unconditional=unconditional,
         device=device,
+        xt_pool=xt_pool,
+        anchor_norm=anchor_norm,
     )
     if scores.shape[0] == 0:
         return {

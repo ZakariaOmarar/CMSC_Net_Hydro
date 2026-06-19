@@ -101,8 +101,16 @@ def main() -> int:
             cells.append(f"{v}={np.mean(objs):.4f}(n{len(objs)})" if objs else f"{v}=-")
         print(f"  {k:<12} " + "  ".join(cells))
 
+    def _rel(p: Path) -> Path:
+        p = Path(p).resolve()
+        try:
+            return p.relative_to(REPO)
+        except ValueError:
+            return p
+
     best = ok[0] if ok else None
-    best_cfg_path = Path(args.out).with_name("deep_impulse_best_config.json")
+    # Resolve to absolute so `_rel`/save work regardless of a relative --out.
+    best_cfg_path = Path(args.out).resolve().with_name("deep_impulse_best_config.json")
     if best:
         print(f"\nBEST objective={best['objective']:.4f}  per-ds={best['per_ds']}")
         print(f"BEST params = {best['params']}")
@@ -110,18 +118,18 @@ def main() -> int:
         full = replace(base, epochs=40, **best["params"])
         best_cfg_path.parent.mkdir(parents=True, exist_ok=True)
         best_cfg_path.write_text(json.dumps(asdict(full), indent=2), encoding="utf-8")
-        print(f"\nwrote best config -> {best_cfg_path.relative_to(REPO)}")
+        print(f"\nwrote best config -> {_rel(best_cfg_path)}")
         print("-> final multi-seed run, e.g.:")
         print(f"   for s in 0 1 2 3 4; do python -m scripts.train_deep_impulse_flow "
-              f"--config {best_cfg_path.relative_to(REPO)} --seed $s --adapt-frac 0.3 "
+              f"--config {_rel(best_cfg_path)} --seed $s --adapt-frac 0.3 "
               f"--out results/deep_impulse_seed$s.pt; done")
 
     out = Path(args.out).resolve(); out.parent.mkdir(parents=True, exist_ok=True)
     with out.open("w", encoding="utf-8") as fh:
         json.dump({"space": SPACE, "trials": trials, "best": best,
-                   "best_config_path": str(best_cfg_path.relative_to(REPO)),
+                   "best_config_path": str(_rel(best_cfg_path)),
                    "fit_ds": args.fit_ds, "test_ds": args.test_ds}, fh, indent=2)
-    print(f"saved -> {out.relative_to(REPO)}")
+    print(f"saved -> {_rel(out)}")
     return 0
 
 

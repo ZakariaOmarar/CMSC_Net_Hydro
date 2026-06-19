@@ -69,7 +69,11 @@ from ..anomaly.event_detection import (
 from ..anomaly.synthetic_eval import evaluate_synthetic_anomaly_auc
 from ..anomaly.threshold import per_cluster_alert_breakdown
 from ..anomaly.v3_per_modality import V3AcousticOnlyAdapter, V3VibrationOnlyAdapter
-from ..anomaly.v3_trainer import encoder_level_transition_fpr, precompute_paired
+from ..anomaly.v3_trainer import (
+    encoder_level_transition_fpr,
+    precompute_paired,
+    transition_fpr,
+)
 from ..anomaly_baselines import (
     ALL_MODELS,
     MODALITIES,
@@ -1054,17 +1058,21 @@ def main(
                     log(f"  transition {plabel}: skipped (missing source)")
                     continue
                 seg_a, seg_b = paired_by[ka][0], paired_by[kb][0]
+                _anchor_norm = ((v3.anchor_mean, v3.anchor_std)
+                                if getattr(v3, "anchor_mean", None) is not None else None)
                 if level == "raw":
                     out_pair = transition_fpr(
                         v2.encoder, v3.flow, v3.thresholds, seg_a, seg_b,
                         v2_cfg=v2_cfg, crossfade_seconds=1.0,
                         percentile=v3_cfg.threshold_percentile,
+                        xt_pool=getattr(v3, "xt_pool", None), anchor_norm=_anchor_norm,
                     )
                 else:
                     out_pair = encoder_level_transition_fpr(
                         v2.encoder, v3.flow, v3.thresholds, seg_a, seg_b,
                         v2_cfg=v2_cfg, n_crossfade_windows=8,
                         percentile=v3_cfg.threshold_percentile,
+                        xt_pool=getattr(v3, "xt_pool", None), anchor_norm=_anchor_norm,
                     )
                 transition_results[plabel] = out_pair["fpr"]
                 log(f"  transition {plabel} ({level}): fpr={out_pair['fpr']:.3f} "
