@@ -6,7 +6,7 @@ two-knock recording so the leakage / multi-sample behaviour is exercised in CI.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 
 import numpy as np
 import torch
@@ -129,9 +129,11 @@ def _two_knock_segment() -> TestDatasetSegment:
         a0 = int(t * accel_sr)
         acc[:, a0 : a0 + 3] += 8.0 * rng.standard_normal((n_acc_ch, 3)).astype(np.float32)
 
+    # Naive datetime is fine: DataSegment.from_arrays attaches UTC itself.
+    # (Avoids datetime.UTC, which is Python 3.11+ only — the box runs 3.10.)
     seg = DataSegment.from_arrays(
         mic_data=mic, accel_data=acc,
-        start_time=datetime(2026, 1, 1, tzinfo=UTC),
+        start_time=datetime(2026, 1, 1),  # noqa: DTZ001
         mic_sr=mic_sr, accel_sr=accel_sr, metadata={},
     )
     mic_xyz = np.array([[0, 0, 0], [0.2, 0, 0], [0, 0.2, 0], [0.2, 0.2, 0]], np.float64)
