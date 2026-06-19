@@ -9,6 +9,12 @@ Chapter 6 baselines and built on the `classical` primitives; it is not imported
 by the live pipeline.
 """
 
+from .array_geometry import (
+    FootprintVerdict,
+    array_sensor_xyz,
+    classify_position,
+    classify_positions,
+)
 from .v4_features import (
     C_AIR_MS,
     C_PLASTIC_3DP_MS,
@@ -18,6 +24,11 @@ from .v4_features import (
     compute_burst_aware_srp_phat_volume,
     compute_srp_phat_volume,
     find_burst_window,
+)
+from .v4_knock_events import (
+    KnockEventConfig,
+    assert_no_position_leak,
+    precompute_v4_knock_event_samples,
 )
 from .v4_loc_head import (
     FiLMResidualHead,
@@ -48,19 +59,26 @@ __all__ = [
     "V4_CANDIDATE_GRID",
     "AlertBurst",
     "FiLMResidualHead",
+    "FootprintVerdict",
     "GridSpec",
     "HeatmapCross3D",
+    "KnockEventConfig",
     "TDOASetEncoder",
     "V4Config",
     "V4LocalizationHead",
     "V4Result",
     "V4Sample",
+    "array_sensor_xyz",
+    "assert_no_position_leak",
+    "classify_position",
+    "classify_positions",
     "compute_accel_tdoa_tokens",
     "compute_burst_aware_srp_phat_volume",
     "compute_srp_phat_volume",
     "detect_alert_bursts",
     "evaluate_burst_localization",
     "find_burst_window",
+    "precompute_v4_knock_event_samples",
     "precompute_v4_samples",
     "smooth_predictions_over_bursts",
     "soft_argmax_3d",
