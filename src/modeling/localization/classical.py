@@ -26,32 +26,58 @@ def gcc_phat(
     x_j: np.ndarray,
     max_delay_samples: int,
     n_fft: int | None = None,
+    oversample: int = 1,
 ) -> np.ndarray:
     """Compute the GCC-PHAT cross-correlation vector for one mic pair.
 
     Args:
         x_i: 1D float array of audio samples for mic i.
         x_j: 1D float array of audio samples for mic j.
-        max_delay_samples: Half-width of the output in samples.
+        max_delay_samples: Half-width of the output in *input* samples.
         n_fft: FFT size. Defaults to len(x_i); increase to next power-of-two
             for efficiency on non-power-of-two window lengths.
+        oversample: Integer GCC up-sampling factor (default 1 = unchanged).
+            ``oversample = O`` interpolates the cross-correlation to a lag grid
+            ``O×`` finer than one input sample by zero-padding the one-sided
+            cross-spectrum before the inverse FFT — standard frequency-domain
+            sinc interpolation.  The returned vector then has length
+            ``2 * max_delay_samples * O + 1`` and a lag step of ``1/O`` samples,
+            so the SRP-PHAT peak can resolve below the input-sample grid (the
+            16 kHz acoustic path's main precision bottleneck; the accel
+            multilateration already does this with parabolic interpolation).
+            The caller must pass ``fs * O`` to :func:`srp_phat_3d` so the
+            steered-delay indexing matches the finer grid.
 
     Returns:
-        gcc: float32 array of shape (L,), where L = 2 * max_delay_samples + 1.
-            Index max_delay_samples corresponds to zero lag.
+        gcc: float32 array of shape (L,), where ``L = 2 * max_delay_samples * O
+            + 1``.  Index ``max_delay_samples * O`` corresponds to zero lag.
     """
     if n_fft is None:
         n_fft = len(x_i)
+    oversample = max(1, int(oversample))
 
     Xi = np.fft.rfft(x_i, n=n_fft)
     Xj = np.fft.rfft(x_j, n=n_fft)
     G = Xi * np.conj(Xj)
     G_phat = G / (np.abs(G) + 1e-8)  # PHAT whitening
-    gcc_full = np.fft.irfft(G_phat, n=n_fft)
+
+    if oversample > 1:
+        # Zero-pad the one-sided spectrum to upsample the IFFT in time → a
+        # lag grid O× finer.  Multiply by O to preserve the peak amplitude
+        # (irfft divides by the output length).
+        n_out = n_fft * oversample
+        n_bins_out = n_out // 2 + 1
+        G_pad = np.zeros(n_bins_out, dtype=G_phat.dtype)
+        G_pad[: G_phat.shape[0]] = G_phat
+        gcc_full = np.fft.irfft(G_pad, n=n_out) * oversample
+        half = max_delay_samples * oversample
+    else:
+        gcc_full = np.fft.irfft(G_phat, n=n_fft)
+        half = max_delay_samples
     gcc_full = np.fft.fftshift(gcc_full)  # center at zero lag
 
     center = len(gcc_full) // 2
-    gcc = gcc_full[center - max_delay_samples : center + max_delay_samples + 1]
+    gcc = gcc_full[center - half : center + half + 1]
     return gcc.astype(np.float32)  # shape (L,)
 
 

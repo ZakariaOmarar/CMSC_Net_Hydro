@@ -24,6 +24,7 @@ from .v4_features import (
     compute_burst_aware_srp_phat_volume,
     compute_srp_phat_volume,
     find_burst_window,
+    srp_peak_sharpness,
 )
 from .v4_knock_events import (
     KnockEventConfig,
@@ -36,6 +37,10 @@ from .v4_loc_head import (
     TDOASetEncoder,
     V4LocalizationHead,
     soft_argmax_3d,
+)
+from .v4_synthetic import (
+    SyntheticArraySpec,
+    generate_synthetic_knock_samples,
 )
 from .v4_temporal import (
     AlertBurst,
@@ -63,6 +68,7 @@ __all__ = [
     "GridSpec",
     "HeatmapCross3D",
     "KnockEventConfig",
+    "SyntheticArraySpec",
     "TDOASetEncoder",
     "V4Config",
     "V4LocalizationHead",
@@ -78,11 +84,13 @@ __all__ = [
     "detect_alert_bursts",
     "evaluate_burst_localization",
     "find_burst_window",
+    "generate_synthetic_knock_samples",
     "precompute_v4_knock_event_samples",
     "precompute_v4_samples",
     "smooth_predictions_over_bursts",
     "soft_argmax_3d",
     "split_samples_by_dataset",
     "split_samples_by_position",
+    "srp_peak_sharpness",
     "train_v4_localization",
 ]

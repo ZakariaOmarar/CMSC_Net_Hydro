@@ -78,6 +78,7 @@ def compute_srp_phat_volume(
     *,
     c: float = C_AIR_MS,
     max_delay_seconds: float | None = None,
+    gcc_oversample: int = 1,
 ) -> np.ndarray:
     """Compute the SRP-PHAT 3-D power volume on a fixed grid.
 
@@ -89,6 +90,10 @@ def compute_srp_phat_volume(
       c:         speed of sound in air (m/s).
       max_delay_seconds: half-width of the GCC-PHAT vector.  Defaults to the
          max TDOA implied by the array's spatial extent + a 1.2× safety margin.
+      gcc_oversample: integer GCC up-sampling factor (default 1 = unchanged).
+         ``O > 1`` resolves the steered-delay to ``1/O`` of an input sample
+         (see :func:`classical.gcc_phat`); the steered indexing uses ``fs * O``
+         so the peak sharpens below the ~2 cm voxel grid.
 
     Returns:
       float32 array of shape `(Nx, Ny, Nz)`, normalised to its peak so the
@@ -109,17 +114,19 @@ def compute_srp_phat_volume(
         max_dist = float(np.linalg.norm(diffs, axis=-1).max())
         max_delay_seconds = (max_dist / c) * 1.2
 
+    oversample = max(1, int(gcc_oversample))
     max_delay_samples = max(1, int(round(max_delay_seconds * fs)))
     pairs = _all_pairs(n_mics)
     n_pairs = len(pairs)
 
-    L = 2 * max_delay_samples + 1
+    L = 2 * max_delay_samples * oversample + 1
     gcc_stack = np.zeros((n_pairs, L), dtype=np.float32)
     for k, (i, j) in enumerate(pairs):
         gcc_stack[k] = gcc_phat(
             mic_data[i].astype(np.float64),
             mic_data[j].astype(np.float64),
             max_delay_samples=max_delay_samples,
+            oversample=oversample,
         )
 
     grid_x, grid_y, grid_z = grid.axes()
@@ -129,7 +136,7 @@ def compute_srp_phat_volume(
         grid_x,
         grid_y,
         grid_z,
-        fs=float(fs),
+        fs=float(fs) * oversample,  # finer lag grid → scale the steered fs
         c=float(c),
         mic_pairs=pairs,
     )
@@ -137,6 +144,24 @@ def compute_srp_phat_volume(
     if peak > 1e-12:
         vol = vol / peak
     return vol.astype(np.float32)
+
+
+def srp_peak_sharpness(volume: np.ndarray) -> float:
+    """Peak-to-average ratio of a (peak-normalised) SRP volume — a knock-quality
+    proxy.
+
+    A sharp, well-localised SRP peak sits far above the surrounding floor (high
+    ratio); a diffuse / reverberation-smeared volume has its mass spread out
+    (ratio → 1).  Used to down-weight low-confidence knocks when aggregating
+    per-knock predictions into one event estimate.  Cheap — reuses the volume
+    the front-end already computed.
+    """
+    vol = np.asarray(volume, dtype=np.float64)
+    peak = float(vol.max())
+    mean = float(vol.mean())
+    if mean <= 1e-9:
+        return 1.0
+    return peak / mean
 
 
 def find_burst_window(
@@ -291,4 +316,5 @@ __all__ = [
     "compute_burst_aware_srp_phat_volume",
     "compute_srp_phat_volume",
     "find_burst_window",
+    "srp_peak_sharpness",
 ]

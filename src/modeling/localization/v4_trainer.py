@@ -73,6 +73,11 @@ class V4Sample:
     # the V3-gated evaluation can match this sample to V3's detected event
     # intervals (V4 only "fires" on windows V3 flags anomalous in deployment).
     window_start_s: float = 0.0
+    # Per-knock SRP peak sharpness (peak-to-average of the SRP volume), used as
+    # a confidence weight when aggregating a position's knocks into one event
+    # estimate.  Defaults to 1.0 (uniform) so legacy samples / the window
+    # builder behave as before.
+    srp_psr: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -155,6 +160,15 @@ class V4Config:
     # Default 0.0 keeps the dataclass byte-equivalent to pre-fix behaviour;
     # the orchestrator `v4_config` builder sets 0.1.
     head_dropout_p: float = 0.0
+
+    # Heatmap auxiliary loss (integral-regression supervision, Sun et al. 2018).
+    # When > 0, an auxiliary soft-cross-entropy pulls the SRP logit volume
+    # toward a Gaussian centred on the GT voxel, giving the 3-D CNN a dense
+    # per-voxel gradient instead of only the final-(x,y,z) Smooth-L1 signal —
+    # sharpens the soft-argmax.  Default 0.0 keeps training byte-identical.
+    # Only bites where the SRP volume is live (channel_mode "both"/"srp_only").
+    heatmap_aux_weight: float = 0.0
+    heatmap_sigma_m: float = 0.03  # Gaussian target width (~1.5 voxels)
 
     # Early stopping on val total loss.  Patience=5 (vs V1/V2's 3) because V4
     # has only ~10 labeled recordings and val loss is dramatically noisier.
@@ -639,12 +653,35 @@ def _grid_coords_from_spec(grid: GridSpec) -> torch.Tensor:
     return torch.from_numpy(coords)
 
 
+def _heatmap_aux_loss(
+    logits: torch.Tensor,
+    grid_coords_flat: torch.Tensor,
+    targets_xyz: torch.Tensor,
+    sigma_m: float,
+) -> torch.Tensor:
+    """Soft cross-entropy between the SRP logit volume and a Gaussian GT target.
+
+    The target is a softmax-normalised Gaussian over voxels centred on each
+    sample's GT position (integral-regression supervision, Sun et al. 2018).
+    Returns a scalar; the caller weights it by `cfg.heatmap_aux_weight`.
+    """
+    B = logits.shape[0]
+    flat_logits = logits.reshape(B, -1)  # (B, V)
+    coords = grid_coords_flat.to(logits.device).to(logits.dtype)  # (V, 3)
+    # (B, V) squared distances from each voxel to each sample's GT.
+    d2 = ((coords[None, :, :] - targets_xyz[:, None, :]) ** 2).sum(dim=-1)
+    target = F.softmax(-d2 / (2.0 * float(sigma_m) ** 2), dim=-1)  # (B, V)
+    log_pred = F.log_softmax(flat_logits, dim=-1)
+    return -(target * log_pred).sum(dim=-1).mean()
+
+
 def train_v4_localization(
     samples: list[V4Sample],
     cfg: V4Config | None = None,
     *,
     grid: GridSpec,
     explicit_split: tuple[list[V4Sample], list[V4Sample]] | None = None,
+    init_state: dict | None = None,
 ) -> V4Result:
     """Train the V4 head supervised on labeled anomaly windows.
 
@@ -657,6 +694,11 @@ def train_v4_localization(
     holdout evaluation (train on most positions, validate on the held-out
     positions) so the reported MAE measures localise-an-unseen-position
     generalisation rather than within-position interpolation.
+
+    `init_state` — optional ``state_dict`` to warm-start the head from (loaded
+    with ``strict=False``).  Used by the synthetic-knock pretraining ablation:
+    pretrain the geometry on simulated knocks, then fine-tune on the real
+    cohort.  ``None`` keeps the standard from-scratch init.
     """
     cfg = cfg or V4Config()
     if not samples and explicit_split is None:
@@ -692,6 +734,14 @@ def train_v4_localization(
         soft_argmax_temperature=cfg.soft_argmax_temperature,
         head_dropout_p=cfg.head_dropout_p,
     ).to(device)
+    if init_state is not None:
+        # Warm-start from a pretrained head (e.g. synthetic-knock pretraining).
+        # strict=False tolerates a c_dim/grid mismatch by skipping those keys.
+        head.load_state_dict(init_state, strict=False)
+    # Flattened voxel coords for the optional heatmap auxiliary loss.
+    heatmap_coords_flat = (
+        grid_coords.reshape(-1, 3).to(device) if cfg.heatmap_aux_weight > 0 else None
+    )
     optim = torch.optim.AdamW(head.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     # Cosine LR schedule — small head + small labeled pool benefits from a
     # smooth lr decay rather than fixed-rate AdamW.  T_max = cfg.epochs.
@@ -776,17 +826,33 @@ def train_v4_localization(
             batch = _to_device(
                 _augment_batch(_make_batch([train_samples[j] for j in idx], channel_mode=cfg.channel_mode), aug_gen)
             )
-            pred = head(
-                batch["volumes"],
-                batch["tdoa"],
-                batch["contexts"],
-                batch["scada"],
-                unconditional=cfg.unconditional,
-                external_init_xyz=batch.get("external_init_xyz"),
-            )
+            if cfg.heatmap_aux_weight > 0:
+                out = head(
+                    batch["volumes"],
+                    batch["tdoa"],
+                    batch["contexts"],
+                    batch["scada"],
+                    unconditional=cfg.unconditional,
+                    external_init_xyz=batch.get("external_init_xyz"),
+                    return_components=True,
+                )
+                pred = out["pred"]
+            else:
+                pred = head(
+                    batch["volumes"],
+                    batch["tdoa"],
+                    batch["contexts"],
+                    batch["scada"],
+                    unconditional=cfg.unconditional,
+                    external_init_xyz=batch.get("external_init_xyz"),
+                )
             loss = F.smooth_l1_loss(
                 pred * loss_scale, batch["targets"] * loss_scale, beta=cfg.smooth_l1_beta
             )
+            if cfg.heatmap_aux_weight > 0 and heatmap_coords_flat is not None:
+                loss = loss + cfg.heatmap_aux_weight * _heatmap_aux_loss(
+                    out["logits"], heatmap_coords_flat, batch["targets"], cfg.heatmap_sigma_m
+                )
             optim.zero_grad()
             loss.backward()
             optim.step()

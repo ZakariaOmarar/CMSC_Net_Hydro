@@ -6,6 +6,7 @@ two-knock recording so the leakage / multi-sample behaviour is exercised in CI.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime
 
 import numpy as np
@@ -18,12 +19,18 @@ from src.modeling.context.v2_ssl import V2SSLConfig
 from src.modeling.localization import (
     GridSpec,
     KnockEventConfig,
+    SyntheticArraySpec,
     array_sensor_xyz,
     assert_no_position_leak,
     classify_position,
     classify_positions,
+    compute_srp_phat_volume,
+    generate_synthetic_knock_samples,
     precompute_v4_knock_event_samples,
+    srp_peak_sharpness,
+    train_v4_localization,
 )
+from src.modeling.localization.v4_trainer import V4Config
 
 
 # --------------------------------------------------------------------------- #
@@ -133,7 +140,7 @@ def _two_knock_segment() -> TestDatasetSegment:
     # (Avoids datetime.UTC, which is Python 3.11+ only — the box runs 3.10.)
     seg = DataSegment.from_arrays(
         mic_data=mic, accel_data=acc,
-        start_time=datetime(2026, 1, 1),  # noqa: DTZ001
+        start_time=datetime(2026, 1, 1),
         mic_sr=mic_sr, accel_sr=accel_sr, metadata={},
     )
     mic_xyz = np.array([[0, 0, 0], [0.2, 0, 0], [0, 0.2, 0], [0.2, 0.2, 0]], np.float64)
@@ -181,3 +188,118 @@ def test_knock_builder_emits_multiple_samples_per_recording() -> None:
     centres = sorted(s.window_start_s for s in samples)
     assert any(abs(c - 0.5) < 0.2 for c in centres)
     assert any(abs(c - 1.2) < 0.2 for c in centres)
+    # PSR is populated and finite.
+    assert all(np.isfinite(s.srp_psr) and s.srp_psr >= 1.0 for s in samples)
+
+
+# --------------------------------------------------------------------------- #
+# front-end: oversampled GCC + PSR
+# --------------------------------------------------------------------------- #
+def _impulse_in_noise(mic_xyz, src, fs, T, *, c=343.0, seed=1):
+    rng = np.random.default_rng(seed)
+    burst = int(0.005 * fs)
+    impulse = rng.standard_normal(burst) * 5.0
+    sig = 0.01 * rng.standard_normal((mic_xyz.shape[0], T))
+    for m in range(mic_xyz.shape[0]):
+        d = float(np.linalg.norm(src - mic_xyz[m]))
+        s0 = int(0.4 * fs) + int(round(d / c * fs))
+        if s0 + burst <= T:
+            sig[m, s0 : s0 + burst] += impulse
+    return sig
+
+
+def test_srp_peak_sharpness_sharp_vs_diffuse() -> None:
+    fs, T = 16000, 16000
+    mic_xyz = np.array([[0, 0, 0], [0.1, 0, 0], [0, 0.1, 0], [0.1, 0.1, 0]], float)
+    grid = GridSpec(lo=(-0.05, -0.05, -0.05), hi=(0.15, 0.15, 0.15), n=(11, 11, 11))
+    sharp = compute_srp_phat_volume(
+        _impulse_in_noise(mic_xyz, np.array([0.05, 0.05, 0.05]), fs, T), mic_xyz, fs, grid
+    )
+    rng = np.random.default_rng(2)
+    diffuse = compute_srp_phat_volume(
+        rng.standard_normal((4, T)).astype(np.float64), mic_xyz, fs, grid
+    )
+    assert srp_peak_sharpness(sharp) > srp_peak_sharpness(diffuse)
+
+
+def test_gcc_oversample_shape_and_accuracy() -> None:
+    fs, T = 16000, 16000
+    mic_xyz = np.array([[0, 0, 0], [0.1, 0, 0], [0, 0.1, 0], [0.1, 0.1, 0]], float)
+    src = np.array([0.05, 0.05, 0.05])
+    grid = GridSpec(lo=(-0.05, -0.05, -0.05), hi=(0.15, 0.15, 0.15), n=(11, 11, 11))
+    sig = _impulse_in_noise(mic_xyz, src, fs, T)
+    v1 = compute_srp_phat_volume(sig, mic_xyz, fs, grid, gcc_oversample=1)
+    v4 = compute_srp_phat_volume(sig, mic_xyz, fs, grid, gcc_oversample=4)
+    assert v1.shape == v4.shape == (11, 11, 11)
+    assert np.all(np.isfinite(v4)) and v4.max() <= 1.0 + 1e-6
+
+    ax = grid.axes()
+    def _peak(v):
+        idx = np.unravel_index(int(np.argmax(v)), v.shape)
+        return np.array([ax[0][idx[0]], ax[1][idx[1]], ax[2][idx[2]]])
+    # Oversampling must not regress the peak location on a clean impulse.
+    assert np.linalg.norm(_peak(v4) - src) <= np.linalg.norm(_peak(v1) - src) + 0.02
+
+
+# --------------------------------------------------------------------------- #
+# synthetic generator (pysoundlocalization forward model)
+# --------------------------------------------------------------------------- #
+def test_synthetic_generator_srp_peak_near_source() -> None:
+    spec = SyntheticArraySpec(
+        dataset_id="d5",
+        mic_xyz=np.array([[0, 0, 0], [0.2, 0, 0], [0, 0.2, 0], [0.2, 0.2, 0],
+                          [0.1, 0.1, 0.15]], float),
+        vib_xyz=np.array([[0.05, 0.05, 0], [0.15, 0.05, 0], [0.05, 0.15, 0],
+                          [0.15, 0.15, 0]], float),
+        mic_fs=16000, accel_fs=376,
+    )
+    grid = GridSpec(lo=(-0.05, -0.05, -0.05), hi=(0.25, 0.25, 0.2), n=(16, 16, 10))
+    samples = generate_synthetic_knock_samples(
+        [spec], grid, c_dim=16, n_positions_per_array=6, snr_db=20.0, seed=0,
+    )
+    assert len(samples) >= 4
+    ax = grid.axes()
+    errs = []
+    for s in samples:
+        idx = np.unravel_index(int(np.argmax(s.srp_volume)), s.srp_volume.shape)
+        peak = np.array([ax[0][idx[0]], ax[1][idx[1]], ax[2][idx[2]]])
+        errs.append(float(np.linalg.norm(peak - s.target_xyz)))
+        assert s.context.shape == (16,) and not s.context.any()  # zero context
+    # The classical SRP peak should be near the true source for most samples.
+    assert np.median(errs) < 0.06
+
+
+# --------------------------------------------------------------------------- #
+# trainer hooks: heatmap aux loss + warm-start
+# --------------------------------------------------------------------------- #
+def test_train_v4_heatmap_aux_and_warmstart_run() -> None:
+    encoder, v2_cfg = _smoke_v2()
+    grid = GridSpec(lo=(-0.1, -0.1, -0.05), hi=(0.3, 0.3, 0.2), n=(8, 8, 4))
+    # Two recordings at different positions so a recording split is valid.
+    segs = []
+    for i, pos in enumerate([(0.1, 0.1, 0.0), (0.2, 0.05, 0.05)]):
+        seg = _two_knock_segment()
+        segs.append(
+            seg.__class__(
+                segment=seg.segment, mic_positions=seg.mic_positions,
+                vib_positions=seg.vib_positions, mic_ids=seg.mic_ids, vib_ids=seg.vib_ids,
+                mode_label=None, op_condition=None, spatial_label=pos,
+                dataset_id="d5", recording_id=f"rec{i}", source_dir=f"d{i}", is_anomaly=True,
+            )
+        )
+    samples = precompute_v4_knock_event_samples(
+        encoder, segs, v2_cfg=v2_cfg, grid=grid,
+        cfg=KnockEventConfig(crop_seconds=0.12), device="cpu",
+    )
+    assert len(samples) >= 4
+    base = V4Config(cnn_feature_dim=32, tdoa_feature_dim=16, hidden_dim=32,
+                    epochs=2, batch_size=4, val_ratio=0.5, seed=0, device="cpu")
+    # Heatmap auxiliary loss path runs and produces finite losses.
+    res_aux = train_v4_localization(
+        samples, cfg=replace(base, heatmap_aux_weight=0.1), grid=grid
+    )
+    assert all(np.isfinite(res_aux.train_loss_history))
+    # Warm-start from the trained head loads without error and trains finite.
+    state = {k: v.detach().cpu().clone() for k, v in res_aux.head.state_dict().items()}
+    res_ws = train_v4_localization(samples, cfg=base, grid=grid, init_state=state)
+    assert all(np.isfinite(res_ws.train_loss_history))

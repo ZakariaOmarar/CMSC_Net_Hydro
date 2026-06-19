@@ -62,6 +62,7 @@ from .v4_features import (
     compute_accel_tdoa_tokens,
     compute_srp_phat_volume,
     find_burst_window,
+    srp_peak_sharpness,
 )
 from .v4_trainer import V4Sample, _window_v2_features
 
@@ -87,6 +88,9 @@ class KnockEventConfig:
     # When no impulse clears the noise floor, fall back to the single highest-
     # energy burst so a labelled recording is never silently dropped.
     fallback_to_loudest_burst: bool = True
+    # Acoustic GCC up-sampling factor for the per-knock SRP volume (1 = off).
+    # See `compute_srp_phat_volume`; sharpens the SRP peak below the voxel grid.
+    gcc_oversample: int = 1
 
 
 def _event_centres(
@@ -246,7 +250,11 @@ def precompute_v4_knock_event_samples(
             fused = torch.cat([out["a_fused"], out["v_fused"]], dim=1)
             x_for_v3 = fused.mean(dim=1).squeeze(0).cpu().numpy().astype(np.float32)
 
-            volume = compute_srp_phat_volume(mic_crop, s.mic_positions, fs=mic_fs, grid=grid)
+            volume = compute_srp_phat_volume(
+                mic_crop, s.mic_positions, fs=mic_fs, grid=grid,
+                gcc_oversample=cfg.gcc_oversample,
+            )
+            psr = srp_peak_sharpness(volume)
             tdoa = compute_accel_tdoa_tokens(acc_crop, s.vib_positions, fs=accel_fs)
 
             multilat_xyz: np.ndarray | None = None
@@ -275,6 +283,7 @@ def precompute_v4_knock_event_samples(
                     dataset_id=s.dataset_id,
                     multilat_xyz=multilat_xyz,
                     window_start_s=float(centre_s),
+                    srp_psr=float(psr),
                 )
             )
     return samples
