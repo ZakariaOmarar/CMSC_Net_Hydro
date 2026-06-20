@@ -643,6 +643,15 @@ class V4Result:
     # spatial target instead of their recording, exposing position-level
     # error for failure-mode analysis (Table 12 in analyze_ablation).
     val_position_breakdown: dict = field(default_factory=dict)
+    # Event-aggregated MAE — the deployment-faithful metric and the headline of
+    # the per-knock localization pipeline.  A detected anomaly event is a
+    # recording's worth of knocks; aggregating their per-knock predictions into
+    # one estimate sharpens the spatial fix by ~√n (the multi-seed-confirmed win
+    # vs per-window scoring).  `val_mae_3d_agg` = mean over recordings of
+    # ||mean(recording's per-knock preds) − GT||.
+    val_mae_3d_agg: float = float("nan")
+    val_p95_3d_agg: float = float("nan")
+    val_agg_method: str = "mean_per_recording"
 
 
 def _grid_coords_from_spec(grid: GridSpec) -> torch.Tensor:
@@ -976,6 +985,15 @@ def train_v4_localization(
                 "delta_xyz_mean": val_delta[mask].mean(axis=0).astype(float).tolist(),
             }
 
+        # Event-aggregated MAE (headline): one estimate per recording =
+        # mean of its per-knock predictions, error against its GT.
+        agg_errs = np.array([
+            float(np.linalg.norm(np.asarray(b["pred_xyz_mean"]) - np.asarray(b["target_xyz"])))
+            for b in breakdown.values()
+        ]) if breakdown else np.array([])
+        val_mae_agg = float(agg_errs.mean()) if agg_errs.size else float("nan")
+        val_p95_agg = float(np.percentile(agg_errs, 95)) if agg_errs.size else float("nan")
+
         # Per-POSITION breakdown (failure-mode analysis).  Groups val
         # windows by `_position_key(target_xyz)` so multiple windows at
         # the same spatial position aggregate into one entry — exposes
@@ -1007,6 +1025,8 @@ def train_v4_localization(
         val_targets = np.zeros((0, 3), dtype=np.float32)
         val_mae = float("nan")
         val_p95 = float("nan")
+        val_mae_agg = float("nan")
+        val_p95_agg = float("nan")
         ci_low = float("nan")
         ci_high = float("nan")
         breakdown = {}
@@ -1068,6 +1088,8 @@ def train_v4_localization(
         train_mae_3d=train_mae_3d_v,
         train_p95_3d=train_p95_3d_v,
         val_position_breakdown=pos_breakdown,
+        val_mae_3d_agg=val_mae_agg,
+        val_p95_3d_agg=val_p95_agg,
     )
 
 

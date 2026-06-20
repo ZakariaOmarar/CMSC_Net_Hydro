@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from ..localization import V4_CANDIDATE_GRID, precompute_v4_samples
+from ..localization import V4_CANDIDATE_GRID, precompute_v4_knock_event_samples
 from .full_run import _d3_spatial_overrides, resolved_loader
 
 if TYPE_CHECKING:
@@ -36,14 +36,21 @@ def load_or_precompute_cv_samples(
     v2_cfg: V2SSLConfig,
     *,
     samples_cache: Path | None,
-    burst_aware_srp: bool,
+    burst_aware_srp: bool = True,  # retained for call-site compat; ignored
     log_prefix: str,
 ) -> list[V4Sample]:
     """Return the shared V4Sample list for a cross-validation driver.
 
     Loads from ``samples_cache`` when it exists; otherwise gathers the D2/D3/D4/D5
-    labelled recordings, precomputes the V4 samples (knock-interval-restricted),
-    and writes the cache. ``log_prefix`` tags the progress prints (e.g. "V4 LOPO").
+    labelled recordings and precomputes **per-knock** V4 samples (each detected
+    knock localized on its own transient-centred crop — the multi-seed-confirmed
+    RQ3 win).  ``log_prefix`` tags the progress prints (e.g. "V4 LOPO").
+
+    NOTE: this builder replaced the older fixed-window
+    ``precompute_v4_samples`` path; a ``samples_cache`` written by the old
+    builder must be regenerated (delete the pickle) to pick up per-knock samples.
+    The ``burst_aware_srp`` argument is retained only for call-site
+    compatibility and is no longer used (per-knock cropping is inherent).
     """
     if samples_cache is not None and Path(samples_cache).exists():
         with Path(samples_cache).open("rb") as fh:
@@ -71,14 +78,12 @@ def load_or_precompute_cv_samples(
         f"D5={len(d5_labeled)}, total={len(all_labeled)} labeled recordings"
     )
     t0 = time.time()
-    samples = precompute_v4_samples(
+    samples = precompute_v4_knock_event_samples(
         encoder, all_labeled,
         v2_cfg=v2_cfg, grid=V4_CANDIDATE_GRID,
         spatial_label_overrides=overrides,
-        burst_aware_srp=burst_aware_srp, burst_seconds=0.10,
-        restrict_to_knock_intervals=True,
     )
-    print(f"  precomputed {len(samples)} V4 samples in {time.time() - t0:.1f}s")
+    print(f"  precomputed {len(samples)} per-knock V4 samples in {time.time() - t0:.1f}s")
     if samples_cache is not None:
         with Path(samples_cache).open("wb") as fh:
             pickle.dump(samples, fh)

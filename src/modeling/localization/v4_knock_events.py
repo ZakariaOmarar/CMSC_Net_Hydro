@@ -158,18 +158,25 @@ def precompute_v4_knock_event_samples(
     spatial_label_overrides: dict[str, tuple[float, float, float]] | None = None,
     window_seconds: float | dict[str, float] | None = None,
     cfg: KnockEventConfig | None = None,
+    v3_xt_pool: torch.nn.Module | None = None,
+    v3_anchor_norm: tuple[np.ndarray, np.ndarray] | None = None,
     device: torch.device | str = "auto",
 ) -> list[V4Sample]:
     """Build one `V4Sample` per detected knock (transient-centred crops).
 
-    Drop-in alternative to `precompute_v4_samples` for the supervised RQ3
-    cohort.  Same `V4Sample` schema, same grid contract, same V2-context
-    conditioning — only the sampling unit changes from "fixed window overlapping
-    a knock interval" to "each knock, cropped tight".
+    Drop-in replacement for `precompute_v4_samples`.  Same `V4Sample` schema,
+    same grid contract, same V2-context conditioning — only the sampling unit
+    changes from "fixed window overlapping a knock interval" to "each knock,
+    cropped tight".
 
     `window_seconds` sets the V2 **context** window length (per-dataset dict
     mirrors `V4Config.window_seconds_override`); the SRP/TDOA crop length is
     independent and set by `cfg.crop_seconds`.
+
+    `v3_xt_pool` / `v3_anchor_norm` mirror `precompute_v4_samples`: when given,
+    `x_for_v3` is pooled with V3's learned pool (else mean) and the standardized
+    impulse+spectral anchor is appended, so the V4 gate scores exactly the input
+    the conditional V3 flow trained on.
 
     Returns the expanded sample list.  Feed it ONLY to position- or recording-
     grouped splitters (see module docstring); `assert_no_position_leak` checks
@@ -180,6 +187,8 @@ def precompute_v4_knock_event_samples(
     v2_encoder = v2_encoder.to(device).eval()
     for p in v2_encoder.parameters():
         p.requires_grad_(False)
+    if v3_xt_pool is not None:
+        v3_xt_pool = v3_xt_pool.to(device).eval()
     overrides = spatial_label_overrides or {}
 
     def _per_segment_window_s(dataset_id: str) -> float:
@@ -279,7 +288,20 @@ def precompute_v4_knock_event_samples(
                 out = v2_encoder(ac_win, ac_xyz, vib_win, vib_xyz, ds_idx, mask_p=0.0)
             c_t = out["context"].squeeze(0).cpu().numpy().astype(np.float32)
             fused = torch.cat([out["a_fused"], out["v_fused"]], dim=1)
-            x_for_v3 = fused.mean(dim=1).squeeze(0).cpu().numpy().astype(np.float32)
+            # Pool x_for_v3 the way V3 consumes it (PMA-2 when supplied, else mean),
+            # then optionally append V3's impulse+spectral anchor — so a V3-gated
+            # deployment scores the exact input the conditional flow trained on.
+            if v3_xt_pool is not None:
+                with torch.no_grad():
+                    x_t = v3_xt_pool(fused)
+            else:
+                x_t = fused.mean(dim=1)
+            x_for_v3 = x_t.squeeze(0).cpu().numpy().astype(np.float32)
+            if v3_anchor_norm is not None:
+                from ..anomaly.impulse_anchor import append_anchor
+                x_for_v3 = append_anchor(
+                    x_for_v3[None, :], ac_win, vib_win, v3_anchor_norm
+                )[0].astype(np.float32)
 
             for view_crop_s, off in crop_views:
                 cc = centre_s + off

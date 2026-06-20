@@ -96,7 +96,7 @@ from ..localization import (
     V4_CANDIDATE_GRID,
     V4Config,
     V4Sample,
-    precompute_v4_samples,
+    precompute_v4_knock_event_samples,
     train_v4_localization,
 )
 from ..localization.multilateration import accel_tdoa_multilateration_v0
@@ -1250,13 +1250,12 @@ def main(
 
     grid = V4_CANDIDATE_GRID
 
-    log("Precomputing V4 samples (burst-aware SRP-PHAT + accel TDOA + V2 c_t) ...")
+    log("Precomputing per-knock V4 samples (SRP-PHAT + accel TDOA + V2 c_t) ...")
     t0 = time.time()
-    v4_samples = precompute_v4_samples(
+    v4_samples = precompute_v4_knock_event_samples(
         v2.encoder, d2_labeled + d3_labeled + d4_labeled + d5_labeled,
         v2_cfg=v2_cfg, grid=grid,
         spatial_label_overrides=overrides,
-        burst_aware_srp=True, burst_seconds=0.10,
         # Pool `x_for_v3` with V3's pooling so gating-time NLL matches the
         # manifold the flow was trained on (avoids the PMA-2/mean saturation).
         v3_xt_pool=getattr(v3, "xt_pool", None),
@@ -1265,7 +1264,7 @@ def main(
         v3_anchor_norm=((v3.anchor_mean, v3.anchor_std)
                         if getattr(v3, "anchor_mean", None) is not None else None),
     )
-    log(f"  {len(v4_samples)} V4 samples in {time.time()-t0:.0f}s")
+    log(f"  {len(v4_samples)} per-knock V4 samples in {time.time()-t0:.0f}s")
     n_with_multilat = sum(1 for s in v4_samples if s.multilat_xyz is not None)
     log(f"  multilat init available on {n_with_multilat}/{len(v4_samples)} samples")
     metrics["stages"]["v4_samples"] = {

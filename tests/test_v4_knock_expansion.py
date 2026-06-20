@@ -421,6 +421,11 @@ def test_train_v4_heatmap_aux_and_warmstart_run() -> None:
         samples, cfg=replace(base, heatmap_aux_weight=0.1), grid=grid
     )
     assert all(np.isfinite(res_aux.train_loss_history))
+    # Event-aggregated MAE is populated and no worse than the per-window MAE
+    # by more than a hair (aggregation should sharpen, never blow up).
+    if res_aux.val_predictions.shape[0] > 0:
+        assert np.isfinite(res_aux.val_mae_3d_agg)
+        assert res_aux.val_mae_3d_agg <= res_aux.val_mae_3d + 1e-6
     # Warm-start from the trained head loads without error and trains finite.
     state = {k: v.detach().cpu().clone() for k, v in res_aux.head.state_dict().items()}
     res_ws = train_v4_localization(samples, cfg=base, grid=grid, init_state=state)
