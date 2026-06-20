@@ -112,21 +112,18 @@ def run_cross_dataset(
             if errs.size >= 2:
                 ci = percentile_bootstrap_ci(errs, n_boot=1000, seed=seed)
                 ci_low, ci_high = ci.ci_low, ci.ci_high
-            mae_headline = (
-                float(res.val_mae_3d_agg)
-                if np.isfinite(res.val_mae_3d_agg) else float(res.val_mae_3d)
-            )
+            mae_headline = float(res.val_mae_3d)  # event-aggregated headline
             per_mode[mode] = {
                 "val_mae_3d_m": mae_headline,
-                "val_p95_3d_m": float(res.val_p95_3d_agg),
-                "val_mae_3d_per_window_m": float(res.val_mae_3d),
+                "val_p95_3d_m": float(res.val_p95_3d),
+                "val_mae_3d_per_window_m": float(res.val_mae_3d_per_window),
                 "train_mae_3d_m": float(res.train_mae_3d),
                 "ci95_low_m": ci_low,
                 "ci95_high_m": ci_high,
                 "elapsed_seconds": float(time.time() - t0),
             }
             print(f"  [{label}/{mode}] MAE={mae_headline:.3f}m "
-                  f"(per-window {res.val_mae_3d:.3f}m, train {res.train_mae_3d:.3f}m) "
+                  f"(per-window {res.val_mae_3d_per_window:.3f}m, train {res.train_mae_3d:.3f}m) "
                   f"n_train_pos={n_train_positions} n_test_pos={n_test_positions} "
                   f"in {time.time()-t0:.0f}s")
         results[label] = {

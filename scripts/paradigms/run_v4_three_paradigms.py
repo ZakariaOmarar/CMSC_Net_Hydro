@@ -56,10 +56,10 @@ from src.modeling.context.v2_fusion import V2FusionEncoder
 from src.modeling.context.v2_ssl import V2SSLConfig
 from src.modeling.localization.multilateration import accel_tdoa_multilateration_v0
 from src.modeling.localization.v4_features import V4_CANDIDATE_GRID, GridSpec
+from src.modeling.localization.v4_knock_events import precompute_v4_knock_event_samples
 from src.modeling.localization.v4_trainer import (
     V4Config,
     V4Sample,
-    precompute_v4_samples,
     train_v4_localization,
 )
 from src.modeling.orchestration.full_run import (
@@ -129,12 +129,16 @@ def _train_one_v4(
     try:
         result = train_v4_localization(samples, cfg=cfg, grid=grid)
         dt = time.time() - t0
-        log(f"V4-{name} done in {dt:.0f}s — val MAE = {result.val_mae_3d:.4f} m, p95 = {result.val_p95_3d:.4f} m")
+        # result.val_mae_3d is the event-aggregated headline; per-window kept.
+        mae_headline = float(result.val_mae_3d)
+        log(f"V4-{name} done in {dt:.0f}s — val MAE = {mae_headline:.4f} m "
+            f"(per-window {result.val_mae_3d_per_window:.4f} m), p95 = {result.val_p95_3d:.4f} m")
         _save_predictions(out_dir / f"v4_{name}", result, samples)
         return {
             "channel_mode": channel_mode,
-            "val_mae_3d": float(result.val_mae_3d),
+            "val_mae_3d": mae_headline,
             "val_p95_3d": float(result.val_p95_3d),
+            "val_mae_3d_per_window": float(result.val_mae_3d_per_window),
             "n_val": int(result.val_predictions.shape[0]),
             "n_train_recordings": len(result.train_recording_ids),
             "n_val_recordings": len(result.val_recording_ids),
@@ -203,18 +207,16 @@ def main() -> None:
 
     grid = V4_CANDIDATE_GRID
 
-    log("Precomputing V4 samples (one pass; multilat included per R3.3) ...")
+    log("Precomputing per-knock V4 samples (one pass; multilat included per R3.3) ...")
     t0 = time.time()
-    samples = precompute_v4_samples(
+    samples = precompute_v4_knock_event_samples(
         v2_encoder,
         d2_labeled + d3_labeled + d4_labeled,
         v2_cfg=v2_cfg,
         grid=grid,
         spatial_label_overrides=overrides,
-        burst_aware_srp=True,
-        burst_seconds=0.10,
     )
-    log(f"  {len(samples)} V4 samples in {time.time() - t0:.1f}s")
+    log(f"  {len(samples)} per-knock V4 samples in {time.time() - t0:.1f}s")
     n_with_multilat = sum(1 for s in samples if s.multilat_xyz is not None)
     log(f"  multilat init available on {n_with_multilat}/{len(samples)} samples")
 

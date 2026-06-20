@@ -54,7 +54,7 @@ from ..localization import (
     V4_CANDIDATE_GRID,
     GridSpec,
     V4Config,
-    precompute_v4_samples,
+    precompute_v4_knock_event_samples,
 )
 from .full_run import (
     REPO_ROOT,
@@ -137,16 +137,14 @@ def run_loocv(
     )
 
     grid = V4_CANDIDATE_GRID
-    print("V4 LOOCV: precomputing samples once (used in every fold) ...")
+    print("V4 LOOCV: precomputing per-knock samples once (used in every fold) ...")
     t0 = time.time()
-    samples = precompute_v4_samples(
+    samples = precompute_v4_knock_event_samples(
         encoder, all_labeled,
         v2_cfg=v2_cfg, grid=grid,
         spatial_label_overrides=overrides,
-        burst_aware_srp=burst_aware_srp,
-        burst_seconds=0.10,
     )
-    print(f"  {len(samples)} candidate samples in {time.time() - t0:.1f}s")
+    print(f"  {len(samples)} per-knock candidate samples in {time.time() - t0:.1f}s")
 
     fold_keys = sorted({_qualify(s) for s in samples})
     print(f"V4 LOOCV: running {len(fold_keys)} folds ...")
@@ -190,6 +188,9 @@ def run_loocv(
             np.linalg.norm(result.val_predictions - result.val_targets, axis=-1),
             n_boot=1000, seed=v4_cfg.seed,
         ) if result.val_predictions.size else None
+        # result.val_mae_3d is the event-aggregated headline (one estimate per
+        # held-out recording = mean of its per-knock predictions).
+        mae_headline = float(result.val_mae_3d)
         fold_results.append({
             "fold": i,
             "hold_out": hold,
@@ -198,17 +199,17 @@ def run_loocv(
             "n_val_recordings": 1,
             "n_train_windows": len(tr),
             "n_val_windows": len(va),
-            "val_mae_3d": result.val_mae_3d,
-            "val_p95_3d": result.val_p95_3d,
+            "val_mae_3d": mae_headline,
+            "val_p95_3d": float(result.val_p95_3d),
+            "val_mae_3d_per_window": float(result.val_mae_3d_per_window),
             "val_mae_ci95_low": ci.ci_low if ci else float("nan"),
             "val_mae_ci95_high": ci.ci_high if ci else float("nan"),
             "elapsed_seconds": elapsed,
         })
-        per_fold_maes.append(result.val_mae_3d)
+        per_fold_maes.append(mae_headline)
         print(
-            f"  fold {i:02d} ({hold}): MAE={result.val_mae_3d:.3f} m "
-            f"[CI {ci.ci_low:.3f}, {ci.ci_high:.3f}] in {elapsed:.1f}s"
-            if ci else f"  fold {i:02d} ({hold}): MAE={result.val_mae_3d:.3f} m in {elapsed:.1f}s"
+            f"  fold {i:02d} ({hold}): MAE={mae_headline:.3f} m "
+            f"(per-window {result.val_mae_3d_per_window:.3f} m) in {elapsed:.1f}s"
         )
 
     summary = {

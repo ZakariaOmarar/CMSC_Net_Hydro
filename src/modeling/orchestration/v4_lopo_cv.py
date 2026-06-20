@@ -142,21 +142,17 @@ def run_lopo(
             if errs.size >= 2:
                 ci = percentile_bootstrap_ci(errs, n_boot=1000, seed=seed)
                 ci_low, ci_high = ci.ci_low, ci.ci_high
-            # Headline MAE is the event-aggregated metric (one estimate per
-            # recording = mean of its per-knock predictions); per-window MAE is
-            # kept as a secondary diagnostic.
-            mae_headline = (
-                float(res.val_mae_3d_agg)
-                if np.isfinite(res.val_mae_3d_agg) else float(res.val_mae_3d)
-            )
+            # res.val_mae_3d is the event-aggregated headline (one estimate per
+            # recording = mean of its per-knock predictions); per-window kept.
+            mae_headline = float(res.val_mae_3d)
             rec = {
                 "fold": fi, "position_xyz": list(hold),
                 "channel_mode": mode,
                 "n_train_windows": len(tr),
                 "n_val_windows": len(va),
                 "val_mae_3d_m": mae_headline,
-                "val_p95_3d_m": float(res.val_p95_3d_agg),
-                "val_mae_3d_per_window_m": float(res.val_mae_3d),
+                "val_p95_3d_m": float(res.val_p95_3d),
+                "val_mae_3d_per_window_m": float(res.val_mae_3d_per_window),
                 "train_mae_3d_m": float(res.train_mae_3d),
                 "ci95_low_m": ci_low,
                 "ci95_high_m": ci_high,
@@ -166,7 +162,7 @@ def run_lopo(
             with folds_path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(rec) + "\n")
             print(f"  fold {fi}/{len(fold_keys)} [{mode}] @ {_position_str(hold)}: "
-                  f"MAE={mae_headline:.3f}m (per-window {res.val_mae_3d:.3f}m, "
+                  f"MAE={mae_headline:.3f}m (per-window {res.val_mae_3d_per_window:.3f}m, "
                   f"train {res.train_mae_3d:.3f}m) n_val={len(va)} in {time.time()-t0:.0f}s")
 
     # #15 — late-fusion paradigm: uniform average of the two unimodal heads'
