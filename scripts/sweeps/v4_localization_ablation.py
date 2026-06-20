@@ -84,7 +84,7 @@ ALL_VARIANTS = ["baseline", "gcc_oversample", "sharp_gcc", "multiscale",
 # or scoring-only change).  Each gets its own precomputed sample set.
 _SAMPLE_BUILD_VARIANTS = {"gcc_oversample", "sharp_gcc", "bandpass", "tta_crops",
                           "multiscale", "sharp_multiscale", "tdoa_subsample",
-                          "tdoa_slow_c"}
+                          "tdoa_slow_c", "sharp_all"}
 ALL_SCORINGS = ["per_window", "mean_agg", "median_agg", "psr_agg"]
 _BASELINE_LOPO = {"tdoa_only": 0.132, "both": 0.171, "srp_only": 0.168}
 
@@ -115,6 +115,10 @@ def _knock_cfg_for_variant(variant: str, args) -> KnockEventConfig:
         # As tdoa_subsample, but with a slow (flexural) structure-borne speed.
         return KnockEventConfig(**common, tdoa_gcc_oversample=args.tdoa_oversample,
                                 accel_c_ms=args.accel_c)
+    if variant == "sharp_all":
+        # Fully-corrected front-end: sharp acoustic GCC + sub-sample accel TDOA.
+        return KnockEventConfig(**common, **sharp,
+                                tdoa_gcc_oversample=args.tdoa_oversample)
     return KnockEventConfig(**common)  # baseline / heatmap_aux / synthetic_pretrain
 
 
