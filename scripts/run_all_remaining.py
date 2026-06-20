@@ -99,6 +99,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = ap.parse_args(argv)
 
+    # Enable the result-neutral feature cache for every subprocess (full_run +
+    # the CV drivers) so the CWT/mel/vibration stacks are extracted once and
+    # reused across stages AND across seeds.  Keyed on input bytes + all params
+    # (incl. defaults) + source hash, so it can only speed things up, never
+    # change a number.  Set HYDRO_FEATURE_CACHE_DIR= (empty) to disable.
+    os.environ.setdefault("HYDRO_FEATURE_CACHE_DIR", str(REPO / ".feature_cache"))
+
     # Make this driver's own console output encoding-proof on a cp1252 terminal.
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")

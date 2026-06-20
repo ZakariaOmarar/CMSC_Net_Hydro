@@ -21,6 +21,7 @@ from .acoustic_representations import compute_cwt_scalogram
 from .feature_cache import disk_cached_feature
 
 
+@disk_cached_feature
 def compute_log_mel_spectrogram(
     signal: np.ndarray,
     fs: int,

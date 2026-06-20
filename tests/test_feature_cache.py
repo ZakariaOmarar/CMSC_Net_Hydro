@@ -60,12 +60,60 @@ def test_cache_misses_on_any_change(tmp_path, monkeypatch) -> None:
     assert calls["n"] == 3
 
 
-def test_key_sensitive_to_dtype_and_shape() -> None:
+def test_key_sensitive_to_dtype_shape_param_and_source() -> None:
     a = np.ones((4,), dtype=np.float32)
-    assert _make_key("f", (a,), {}) != _make_key("f", (a.astype(np.float64),), {})
-    assert _make_key("f", (a,), {}) != _make_key("f", (np.ones((5,), np.float32),), {})
-    assert _make_key("f", (a,), {"k": 1}) != _make_key("f", (a,), {"k": 2})
-    assert _make_key("f", (a,), {"k": 1}) == _make_key("f", (a,), {"k": 1})
+
+    def K(args: dict, src: str = "src") -> str:
+        return _make_key("f", src, args)
+
+    assert K({"x": a}) != K({"x": a.astype(np.float64)})        # dtype matters
+    assert K({"x": a}) != K({"x": np.ones((5,), np.float32)})   # shape matters
+    assert K({"x": a, "k": 1}) != K({"x": a, "k": 2})           # param matters
+    assert K({"x": a, "k": 1}) == K({"x": a, "k": 1})           # stable
+    # The source-code hash is part of the key, so editing the extractor (same
+    # args) cannot return a stale entry.
+    assert K({"x": a}, src="src1") != K({"x": a}, src="src2")
+
+
+def test_default_and_explicit_args_share_one_entry(tmp_path, monkeypatch) -> None:
+    """The CRITICAL result-neutrality property: the key reflects the EFFECTIVE
+    arguments (defaults applied), so a value passed as a default and the same
+    value passed explicitly hit the SAME entry — and a different value misses.
+    Without signature binding, omitting a param whose default later changes
+    would silently return stale features."""
+    monkeypatch.setenv("HYDRO_FEATURE_CACHE_DIR", str(tmp_path))
+    calls = {"n": 0}
+
+    @disk_cached_feature
+    def f(x, *, k=3.0):
+        calls["n"] += 1
+        return (x * k).astype(np.float32)
+
+    a = np.ones((3,), np.float32)
+    r_default = f(a)          # uses default k=3.0
+    r_explicit = f(a, k=3.0)  # same effective value -> must be a cache HIT
+    assert calls["n"] == 1
+    np.testing.assert_array_equal(r_default, r_explicit)
+    f(a, k=4.0)               # different value -> miss
+    assert calls["n"] == 2
+
+
+def test_two_functions_do_not_collide(tmp_path, monkeypatch) -> None:
+    """Same signature + same args but different bodies must not share an entry
+    (qualname + source hash differ)."""
+    monkeypatch.setenv("HYDRO_FEATURE_CACHE_DIR", str(tmp_path))
+
+    @disk_cached_feature
+    def g(x):
+        return x + 1.0
+
+    @disk_cached_feature
+    def h(x):
+        return x + 2.0
+
+    a = np.zeros((2,), np.float64)
+    np.testing.assert_array_equal(g(a), a + 1.0)
+    np.testing.assert_array_equal(h(a), a + 2.0)  # not g's cached result
 
 
 def test_real_extractors_cache_matches_uncached(tmp_path, monkeypatch) -> None:

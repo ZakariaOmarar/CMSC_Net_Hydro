@@ -126,6 +126,12 @@ def main(argv=None) -> int:
                          "(the encoder seed is fixed by the run). Default 42.")
     args = ap.parse_args(argv)
 
+    # Share the result-neutral feature cache across every per-seed subprocess
+    # (LOPO / cross-session reuse the CWT/mel/vibration stacks full_run already
+    # extracted).  Keyed on bytes + all params + source hash → never changes a
+    # number.  Set HYDRO_FEATURE_CACHE_DIR= (empty) to disable.
+    os.environ.setdefault("HYDRO_FEATURE_CACHE_DIR", str(REPO / ".feature_cache"))
+
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except Exception:  # noqa: BLE001

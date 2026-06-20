@@ -1,27 +1,36 @@
 """Disk memoization for the expensive, deterministic feature extractors.
 
-The CWT acoustic stack (`compute_encoder_input_stack`) and the vibration stack
+The CWT acoustic stack (`compute_encoder_input_stack`), the log-mel spectrogram
+(`compute_log_mel_spectrogram`), and the vibration stack
 (`compute_vibration_input_stack`) are *pure functions* of their input waveform
 and a handful of scalar parameters.  Yet the full pipeline recomputes them many
 times over: V1 acoustic, V1 vibration, V2, the V2 A1 ablation (identical
-features — `drop_vibration` is applied later, in the forward pass), and the V4
-sample builders all re-extract the same per-recording features.  Each extraction
-of a 96-mel/64-scale CWT over a multi-minute recording costs seconds; the A1
-ablation alone re-pays the entire V2 feature bill.
+features — `drop_vibration` is applied later, in the forward pass), the V4
+sample builders, and — across a multi-seed sweep — every seed re-extracts the
+*same* per-recording features (features do not depend on the model seed).  Each
+extraction of a 96-mel / 64-scale CWT over a multi-minute recording costs
+seconds.
 
 This module caches those outputs to disk **only when** the environment variable
 ``HYDRO_FEATURE_CACHE_DIR`` is set, so the default behaviour is byte-identical to
-no caching.  Crucially it is *result-neutral*: the cache key is a SHA-256 over
+no caching.  It is engineered to be *provably result-neutral* — a cache hit
+returns exactly what the function would have computed, never an approximation —
+because the key is a SHA-256 over:
 
   * a cache-format version constant,
-  * the function's qualified name,
-  * the exact bytes (shape + dtype + raw buffer) of every ndarray argument, and
-  * the repr of every scalar / tuple / dict argument,
+  * the function's qualified name **and a hash of its own source code** (so
+    editing the extractor's body invalidates its entries automatically).  Note
+    this hash covers the *wrapped* function only, not helper functions it calls
+    (e.g. ``compute_cwt_scalogram``); if you change a callee's maths, bump
+    ``_CACHE_VERSION`` below (or delete the cache dir) to invalidate, and
+  * the **fully-bound** call arguments *including defaults* (so a changed default
+    — e.g. ``cwt_min_freq_hz`` — produces a different key instead of silently
+    colliding with a stale entry), each ndarray hashed by shape + dtype + raw
+    bytes and every scalar by ``repr``.
 
-so any change to the input waveform or any parameter — anything that could
-change the output — produces a different key and forces a recompute.  A stale
-hit is therefore impossible short of a hash collision; the cached value is the
-function's own output, never an approximation.
+Any change to the input waveform, any parameter, any default, or the extractor's
+source forces a recompute.  A stale hit is therefore impossible short of a hash
+collision, and the cached value is the function's own output.
 
 Enable it for a run with, e.g.::
 
@@ -32,6 +41,7 @@ from __future__ import annotations
 
 import functools
 import hashlib
+import inspect
 import os
 import tempfile
 from collections.abc import Callable
@@ -39,9 +49,9 @@ from pathlib import Path
 
 import numpy as np
 
-# Bump when the on-disk format or the set of cached functions' semantics change,
-# to invalidate every existing cache entry.
-_CACHE_VERSION = 1
+# Bump only for a change to the on-disk format or the keying scheme itself; the
+# per-function source hash already invalidates entries when an extractor changes.
+_CACHE_VERSION = 2
 
 
 def _cache_dir() -> Path | None:
@@ -52,7 +62,7 @@ def _cache_dir() -> Path | None:
     return Path(raw)
 
 
-def _hash_obj(h: "hashlib._Hash", obj: object) -> None:
+def _hash_obj(h, obj: object) -> None:
     """Fold one argument into the running hash, exactly and recursively."""
     if isinstance(obj, np.ndarray):
         a = np.ascontiguousarray(obj)
@@ -73,34 +83,30 @@ def _hash_obj(h: "hashlib._Hash", obj: object) -> None:
         h.update(("scalar|" + repr(obj)).encode())
 
 
-def _make_key(qualname: str, args: tuple, kwargs: dict) -> str:
+def _make_key(qualname: str, src_hash: str, bound_arguments: dict) -> str:
     h = hashlib.sha256()
-    h.update(f"v{_CACHE_VERSION}|{qualname}|".encode())
-    for a in args:
-        _hash_obj(h, a)
-    h.update(b"||kwargs||")
-    for k in sorted(kwargs):
+    h.update(f"v{_CACHE_VERSION}|{qualname}|{src_hash}|".encode())
+    for k in sorted(bound_arguments):
         h.update(repr(k).encode())
-        _hash_obj(h, kwargs[k])
+        _hash_obj(h, bound_arguments[k])
     return h.hexdigest()
 
 
 def _atomic_save(path: Path, arr: np.ndarray) -> None:
     """Write `arr` to `path` atomically so a crash never leaves a torn file."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+    # Use a .npy-suffixed temp so np.save writes it in place (no extra append)
+    # and there is exactly one temp file to rename — no orphan left behind.
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".npy")
     os.close(fd)
     try:
         np.save(tmp, arr, allow_pickle=False)
-        # np.save appends .npy to a path without one; normalise then replace.
-        tmp_npy = tmp + ".npy" if not tmp.endswith(".npy") else tmp
-        os.replace(tmp_npy, path)
+        os.replace(tmp, path)
     except Exception:
-        for p in (tmp, tmp + ".npy"):
-            try:
-                os.remove(p)
-            except OSError:
-                pass
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
         raise
 
 
@@ -108,16 +114,33 @@ def disk_cached_feature(fn: Callable[..., np.ndarray]) -> Callable[..., np.ndarr
     """Memoize a pure ``(*arrays, **params) -> np.ndarray`` extractor to disk.
 
     No-op unless ``HYDRO_FEATURE_CACHE_DIR`` is set.  Only ``np.ndarray`` return
-    values are cached (a `None` return — e.g. a too-short signal — is passed
+    values are cached (a ``None`` return — e.g. a too-short signal — is passed
     through uncached).  A corrupt cache file is treated as a miss and overwritten.
+    If the call cannot be bound to the signature (unexpected), caching is skipped
+    and the function runs normally — never a wrong answer, at worst a recompute.
     """
+    try:
+        src_hash = hashlib.sha256(inspect.getsource(fn).encode("utf-8")).hexdigest()[:16]
+    except Exception:
+        src_hash = "nosrc"
+    try:
+        sig: inspect.Signature | None = inspect.signature(fn)
+    except (TypeError, ValueError):
+        sig = None
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
         cdir = _cache_dir()
-        if cdir is None:
+        if cdir is None or sig is None:
             return fn(*args, **kwargs)
-        key = _make_key(fn.__qualname__, args, kwargs)
+        # Bind to the signature and fill defaults so the key reflects EVERY
+        # effective parameter, not just the ones the caller passed explicitly.
+        try:
+            bound = sig.bind(*args, **kwargs)
+            bound.apply_defaults()
+        except TypeError:
+            return fn(*args, **kwargs)  # binding failed → run uncached, safely
+        key = _make_key(fn.__qualname__, src_hash, dict(bound.arguments))
         path = cdir / f"{key}.npy"
         if path.exists():
             try:
