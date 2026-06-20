@@ -178,6 +178,25 @@ def main(argv: list[str] | None = None) -> int:
     else:
         results.append(("3 v4_cross_dataset", "SKIPPED (summary.json exists)"))
 
+    # --- Step 3b: leave-one-recording-out CV (LORO headline, fusion) ---------
+    if args.force or not (enc / "v4_loocv.json").exists():
+        rc = _run("3b v4_loocv (leave-one-recording-out CV)",
+                  [PY, "-m", "src.modeling.orchestration.v4_loocv",
+                   "--encoder-run", str(enc), *q], log)
+        record("3b v4_loocv", rc)
+    else:
+        results.append(("3b v4_loocv", "SKIPPED (v4_loocv.json exists)"))
+
+    # --- Step 3c: four-paradigm comparison (leave-one-recording-out CV) ------
+    para_out = enc / "paradigms"
+    if args.force or not (para_out / "metrics.json").exists():
+        rc = _run("3c run_v4_three_paradigms (LORO paradigm comparison)",
+                  [PY, "-m", "scripts.paradigms.run_v4_three_paradigms",
+                   "--encoder-run", str(enc), "--out-dir", str(para_out), *q], log)
+        record("3c run_v4_three_paradigms", rc)
+    else:
+        results.append(("3c run_v4_three_paradigms", "SKIPPED (paradigms/metrics.json exists)"))
+
     # --- Step 4: head domain-shift FPR (+ multi-seed shift sweep) ------------
     # The shift split is fragile (one split can land an easy/hard campaign in the
     # eval set), so sweep several split seeds for a mean/range -- symmetric with
@@ -221,10 +240,19 @@ def main(argv: list[str] | None = None) -> int:
     # adds the stability spread of the headline metrics (RQ1 NMI, RQ2 F1, RQ3 MAE)
     # into results/runs/multi_seed_summary.json.
     if args.seeds and len(args.seeds) > 1:
-        rc = _run("10/10 multi_seed (headline mean+/-std over seeds)",
+        rc = _run("10/11 multi_seed (train one full pipeline per seed)",
                   [PY, "-m", "src.modeling.orchestration.multi_seed",
                    "--seeds", *[str(s) for s in args.seeds], *q], log)
         record("10 multi_seed", rc)
+
+        # --- Step 11: per-seed localization CV spread + cross-seed aggregate --
+        # multi_seed trained one encoder per seed; run LOPO + cross-session on
+        # EACH (the localization headline's seed spread) and aggregate into
+        # results/reports/multiseed_complete_*.{json,md}.
+        rc = _run("11/11 run_multiseed_complete (per-seed LOPO+cross + aggregate)",
+                  [PY, "-m", "scripts.run_multiseed_complete",
+                   "--seeds", *[str(s) for s in args.seeds], *q], log)
+        record("11 run_multiseed_complete", rc)
 
     # --- Summary ------------------------------------------------------------
     print("\n" + "=" * 70)

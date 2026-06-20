@@ -114,6 +114,10 @@ def _save_predictions(
     )
 
 
+def _qualify(s) -> str:
+    return f"{Path(s.source_dir).name}/{s.recording_id}"
+
+
 def _train_one_v4(
     name: str,
     channel_mode: str,
@@ -123,39 +127,85 @@ def _train_one_v4(
     out_dir: Path,
     log,
 ) -> dict:
-    log(f"\n=== V4-{name} (channel_mode={channel_mode}) ===")
+    """Leave-one-recording-out CV for one paradigm (channel mode).
+
+    Each labelled recording is held out in turn; the head trains on the rest and
+    the held-out recording's per-knock predictions are event-aggregated into one
+    estimate.  We report the mean ± std of the per-recording (aggregated) MAE
+    across folds — a cross-validated, low-variance paradigm number, NOT the
+    single random 70/30 split this used to do (which gave one high-variance
+    estimate whose ranking could flip with the split).
+    """
+    log(f"\n=== V4-{name} (channel_mode={channel_mode}) — leave-one-recording-out CV ===")
     cfg = replace(base_cfg, channel_mode=channel_mode)
+    rec_keys = sorted({_qualify(s) for s in samples})
+    fold_maes: list[float] = []
+    fold_rows: list[dict] = []
+    acc_pred, acc_tgt, acc_init, acc_res, acc_keys = [], [], [], [], []
     t0 = time.time()
-    try:
-        result = train_v4_localization(samples, cfg=cfg, grid=grid)
-        dt = time.time() - t0
-        # result.val_mae_3d is the event-aggregated headline; per-window kept.
-        mae_headline = float(result.val_mae_3d)
-        log(f"V4-{name} done in {dt:.0f}s — val MAE = {mae_headline:.4f} m "
-            f"(per-window {result.val_mae_3d_per_window:.4f} m), p95 = {result.val_p95_3d:.4f} m")
-        _save_predictions(out_dir / f"v4_{name}", result, samples)
-        return {
-            "channel_mode": channel_mode,
-            "val_mae_3d": mae_headline,
-            "val_p95_3d": float(result.val_p95_3d),
+    for hold in rec_keys:
+        tr = [s for s in samples if _qualify(s) != hold]
+        va = [s for s in samples if _qualify(s) == hold]
+        if len(va) < 1 or len(tr) < 4:
+            continue
+        try:
+            result = train_v4_localization(samples, cfg=cfg, grid=grid, explicit_split=(tr, va))
+        except Exception as e:
+            log(f"  fold {hold}: FAILED {type(e).__name__}: {e}")
+            continue
+        fold_maes.append(float(result.val_mae_3d))  # event-aggregated, per held-out recording
+        fold_rows.append({
+            "hold_out": hold,
+            "val_mae_3d": float(result.val_mae_3d),
             "val_mae_3d_per_window": float(result.val_mae_3d_per_window),
             "n_val": int(result.val_predictions.shape[0]),
-            "n_train_recordings": len(result.train_recording_ids),
-            "n_val_recordings": len(result.val_recording_ids),
-            "train_loss_final": float(result.train_loss_history[-1])
-            if result.train_loss_history else float("nan"),
-            "val_loss_final": float(result.val_loss_history[-1])
-            if result.val_loss_history else float("nan"),
-        }
-    except Exception as e:
-        log(f"V4-{name} FAILED: {type(e).__name__}: {e}")
-        return {"channel_mode": channel_mode, "error": f"{type(e).__name__}: {e}"}
+        })
+        if result.val_predictions.size:
+            acc_pred.append(result.val_predictions)
+            acc_tgt.append(result.val_targets)
+            acc_init.append(result.val_init_xyz)
+            acc_res.append(result.val_residuals)
+            acc_keys.extend([hold] * result.val_predictions.shape[0])
+    if not fold_maes:
+        log(f"V4-{name} FAILED: no valid LORO folds")
+        return {"channel_mode": channel_mode, "error": "no valid LORO folds"}
+    # Persist the concatenated held-out predictions across folds (for figures).
+    if acc_pred:
+        pdir = out_dir / f"v4_{name}"
+        pdir.mkdir(parents=True, exist_ok=True)
+        np.savez(
+            pdir / "val_predictions.npz",
+            predictions=np.concatenate(acc_pred, axis=0),
+            targets=np.concatenate(acc_tgt, axis=0),
+            init_xyz=np.concatenate(acc_init, axis=0),
+            residuals=np.concatenate(acc_res, axis=0),
+            recording_keys=np.asarray(acc_keys, dtype="U64"),
+        )
+    arr = np.asarray(fold_maes, dtype=np.float64)
+    log(f"V4-{name}: {len(fold_maes)} folds in {time.time()-t0:.0f}s — "
+        f"MAE = {arr.mean():.4f} ± {arr.std():.4f} m (median {np.median(arr):.4f})")
+    return {
+        "channel_mode": channel_mode,
+        "protocol": "leave_one_recording_out",
+        "n_folds": len(fold_maes),
+        "val_mae_3d": float(arr.mean()),
+        "val_mae_3d_std": float(arr.std()),
+        "val_mae_3d_median": float(np.median(arr)),
+        "val_mae_3d_min": float(arr.min()),
+        "val_mae_3d_max": float(arr.max()),
+        "val_p95_3d": float(np.percentile(arr, 95)),
+        "n_val": int(sum(r["n_val"] for r in fold_rows)),
+        "per_fold": fold_rows,
+    }
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--source-run", required=True,
+    ap.add_argument("--source-run", "--encoder-run", dest="source_run", required=True,
                     help="Run dir containing v1/{acoustic,vibration}.pt + v2/encoder.pt")
+    ap.add_argument("--out-dir", default=None,
+                    help="Output dir (default: results/runs/<ts>__v4_three_paradigms). "
+                         "Pass the encoder run's paradigms/ dir for multi-seed aggregation.")
     ap.add_argument("--quick", action="store_true", help="15-epoch V4 smoke instead of 30")
     args = ap.parse_args()
 
@@ -163,8 +213,11 @@ def main() -> None:
     if not src_run.exists():
         raise SystemExit(f"--source-run {src_run} does not exist")
 
-    timestamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_dir = REPO / "results" / "runs" / f"{timestamp}__v4_three_paradigms"
+    if args.out_dir:
+        out_dir = Path(args.out_dir).resolve()
+    else:
+        timestamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_dir = REPO / "results" / "runs" / f"{timestamp}__v4_three_paradigms"
     (out_dir / "classical").mkdir(parents=True, exist_ok=True)
 
     def log(msg: str) -> None:
@@ -313,15 +366,16 @@ def main() -> None:
         } for k, v in v0_multilat.items()},
     }
 
-    # Headline side-by-side summary.
-    log("\n=== V4 four-paradigm headline ===")
-    log(f"{'paradigm':<32} | {'MAE (m)':>9} | {'p95 (m)':>9} | n_val")
+    # Headline side-by-side summary (leave-one-recording-out CV: mean ± std).
+    log("\n=== V4 four-paradigm headline (leave-one-recording-out CV) ===")
+    log(f"{'paradigm':<32} | {'MAE (m)':>9} | {'± std':>8} | {'p95 (m)':>9} | folds")
     for name, _ in pipelines:
         m = metrics["pipelines"][name]
         if "error" in m:
             log(f"V4-{name:<28} | ERROR: {m['error']}")
             continue
-        log(f"V4-{name:<28} | {m['val_mae_3d']:>9.4f} | {m['val_p95_3d']:>9.4f} | {m['n_val']}")
+        log(f"V4-{name:<28} | {m['val_mae_3d']:>9.4f} | {m.get('val_mae_3d_std', 0.0):>8.4f} | "
+            f"{m['val_p95_3d']:>9.4f} | {m.get('n_folds', 0)}")
     log("\nClassical:")
     for ds, s in v0_srp_results.items():
         if isinstance(s, dict) and "mean_error_m" in s:
