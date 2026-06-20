@@ -66,10 +66,37 @@ from src.modeling.orchestration.full_run import (
     v4_config,
 )
 
-ALL_VARIANTS = ["baseline", "heatmap_aux", "drop_outliers", "gcc_oversample",
-                "synthetic_pretrain"]
+# Default set (outliers kept — `drop_outliers` removed per the small impact it
+# showed).  New techniques harvested from the pysoundlocalization clone:
+#   gcc_oversample  — interp the GCC below the voxel grid (they use interp=16)
+#   sharp_gcc       — linear (non-circular) GCC + β-PHAT + oversample
+#   bandpass        — Butterworth band-pass the crop before SRP
+#   tta_crops       — multi-crop test-time augmentation per knock (amplifies the
+#                     per-position aggregation win)
+#   synthetic_pretrain — reverberant synthetic-knock pretraining
+ALL_VARIANTS = ["baseline", "gcc_oversample", "sharp_gcc", "bandpass",
+                "tta_crops", "heatmap_aux", "synthetic_pretrain"]
+# Variants whose effect is a different per-knock SAMPLE build (vs a training-only
+# or scoring-only change).  Each gets its own precomputed sample set.
+_SAMPLE_BUILD_VARIANTS = {"gcc_oversample", "sharp_gcc", "bandpass", "tta_crops"}
 ALL_SCORINGS = ["per_window", "mean_agg", "median_agg", "psr_agg"]
 _BASELINE_LOPO = {"tdoa_only": 0.132, "both": 0.171, "srp_only": 0.168}
+
+
+def _knock_cfg_for_variant(variant: str, args) -> KnockEventConfig:
+    """The per-knock sample-build config for a variant (base for non-build ones)."""
+    common = dict(crop_seconds=args.crop_seconds)
+    if variant == "gcc_oversample":
+        return KnockEventConfig(**common, gcc_oversample=args.gcc_oversample)
+    if variant == "sharp_gcc":
+        return KnockEventConfig(**common, gcc_oversample=args.gcc_oversample,
+                                linear_corr=True, phat_beta=args.phat_beta)
+    if variant == "bandpass":
+        return KnockEventConfig(**common, bandpass_hz=(args.bandpass_lo, args.bandpass_hi))
+    if variant == "tta_crops":
+        return KnockEventConfig(**common, crops_per_knock=args.tta_crops,
+                                crop_jitter_seconds=args.tta_jitter)
+    return KnockEventConfig(**common)  # baseline / heatmap_aux / synthetic_pretrain
 
 
 # --------------------------------------------------------------------------- #
@@ -129,10 +156,9 @@ def _score_fold(preds: np.ndarray, targets: np.ndarray, va_samples) -> dict[str,
 # One (variant, channel_mode, seed) LOPO pass
 # --------------------------------------------------------------------------- #
 def _run_variant(
-    variant, channel_mode, seed, *, base_samples, over_samples, fold_keys,
-    in_hull_keys, grid, v4_cfg, heatmap_weight, pretrained_state,
+    variant, channel_mode, seed, *, samples, fold_keys, grid, v4_cfg,
+    heatmap_weight, pretrained_state,
 ):
-    samples = over_samples if variant == "gcc_oversample" else base_samples
     cfg = replace(v4_cfg, seed=seed, channel_mode=channel_mode)
     if variant == "heatmap_aux":
         cfg = replace(cfg, heatmap_aux_weight=heatmap_weight)
@@ -142,8 +168,6 @@ def _run_variant(
     for hold in fold_keys:
         va = [s for s in samples if _position_key(s.target_xyz) == hold]
         tr = [s for s in samples if _position_key(s.target_xyz) != hold]
-        if variant == "drop_outliers":
-            tr = [s for s in tr if _position_key(s.target_xyz) in in_hull_keys]
         if not tr or not va:
             continue
         assert_no_position_leak(tr, va)
@@ -163,7 +187,11 @@ def _run_variant(
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__)
+    ap = argparse.ArgumentParser(
+        description="RQ3 localization ablation: LOPO over the per-knock cohort, "
+        "toggling each technique; prints which lowers MAE. See module docstring.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
     ap.add_argument("--encoder-run", required=True, type=Path)
     ap.add_argument("--variants", default=",".join(ALL_VARIANTS))
     ap.add_argument("--scorings", default=",".join(ALL_SCORINGS))
@@ -173,9 +201,18 @@ def main() -> None:
                     help="Fold only over in-hull positions (outliers excluded everywhere)")
     ap.add_argument("--hull-margin-m", type=float, default=0.05)
     ap.add_argument("--crop-seconds", type=float, default=0.12)
-    ap.add_argument("--gcc-oversample", type=int, default=4)
+    ap.add_argument("--gcc-oversample", type=int, default=8)
+    ap.add_argument("--phat-beta", type=float, default=0.7,
+                    help="PHAT exponent for sharp_gcc (beta<1 more robust at low SNR)")
+    ap.add_argument("--bandpass-lo", type=float, default=200.0)
+    ap.add_argument("--bandpass-hi", type=float, default=6000.0)
+    ap.add_argument("--tta-crops", type=int, default=3,
+                    help="crops per knock for the tta_crops variant")
+    ap.add_argument("--tta-jitter", type=float, default=0.02)
     ap.add_argument("--heatmap-weight", type=float, default=0.1)
     ap.add_argument("--synth-positions", type=int, default=60)
+    ap.add_argument("--synth-reflections", type=int, default=4,
+                    help="reverberation reflections in synthetic pretraining (0=free-field)")
     ap.add_argument("--quick", action="store_true")
     ap.add_argument("--out-dir", default=None, type=Path)
     args = ap.parse_args()
@@ -200,29 +237,26 @@ def main() -> None:
     out_keys = [p for p, g in geom.items() if not g["inside"]]
     print(f"  {len(geom)} positions, {len(out_keys)} out-of-hull")
 
-    # Base per-knock sample set (shared by most variants).
-    t0 = time.time()
-    base_samples = precompute_v4_knock_event_samples(
-        encoder, segments, v2_cfg=v2_cfg, grid=grid,
-        spatial_label_overrides=overrides,
-        cfg=KnockEventConfig(crop_seconds=args.crop_seconds),
-    )
-    print(f"[base] {len(base_samples)} knock samples in {time.time()-t0:.0f}s")
+    # Build one per-knock sample set per distinct KnockEventConfig among the
+    # requested variants (variants sharing a config reuse the set).  baseline /
+    # heatmap_aux / synthetic_pretrain all use the base config.
+    samples_by_variant: dict[str, list] = {}
+    cfg_cache: dict[KnockEventConfig, list] = {}
+    for variant in variants:
+        kcfg = _knock_cfg_for_variant(variant, args)
+        if kcfg not in cfg_cache:
+            t0 = time.time()
+            cfg_cache[kcfg] = precompute_v4_knock_event_samples(
+                encoder, segments, v2_cfg=v2_cfg, grid=grid,
+                spatial_label_overrides=overrides, cfg=kcfg,
+            )
+            tag = variant if variant in _SAMPLE_BUILD_VARIANTS else "base"
+            print(f"[{tag}] {len(cfg_cache[kcfg])} knock samples in {time.time()-t0:.0f}s")
+        samples_by_variant[variant] = cfg_cache[kcfg]
+    base_samples = samples_by_variant.get("baseline") or next(iter(cfg_cache.values()))
 
-    # Oversampled-GCC sample set (only if that variant is requested).
-    over_samples = None
-    if "gcc_oversample" in variants:
-        t0 = time.time()
-        over_samples = precompute_v4_knock_event_samples(
-            encoder, segments, v2_cfg=v2_cfg, grid=grid,
-            spatial_label_overrides=overrides,
-            cfg=KnockEventConfig(crop_seconds=args.crop_seconds,
-                                 gcc_oversample=args.gcc_oversample),
-        )
-        print(f"[oversample x{args.gcc_oversample}] {len(over_samples)} samples "
-              f"in {time.time()-t0:.0f}s")
-
-    # Fold keys (positions with >= 2 windows).
+    # Fold keys (positions with >= 2 windows).  Outliers are KEPT (folded over)
+    # unless --exclude-out-of-hull is explicitly passed.
     pos_counts: dict[tuple, int] = {}
     for s in base_samples:
         pos_counts[_position_key(s.target_xyz)] = pos_counts.get(_position_key(s.target_xyz), 0) + 1
@@ -241,6 +275,7 @@ def main() -> None:
                 arrays, grid, c_dim=c_dim,
                 n_positions_per_array=args.synth_positions,
                 crop_seconds=args.crop_seconds, seed=seed,
+                n_reflections=args.synth_reflections,
             )
             t0 = time.time()
             res = train_v4_localization(
@@ -262,8 +297,8 @@ def main() -> None:
                 t0 = time.time()
                 fold_means = _run_variant(
                     variant, cm, seed,
-                    base_samples=base_samples, over_samples=over_samples,
-                    fold_keys=fold_keys, in_hull_keys=in_hull_keys, grid=grid,
+                    samples=samples_by_variant[variant],
+                    fold_keys=fold_keys, grid=grid,
                     v4_cfg=v4_cfg, heatmap_weight=args.heatmap_weight,
                     pretrained_state=pretrained_by_seed.get(seed),
                 )
@@ -291,8 +326,14 @@ def main() -> None:
         "exclude_out_of_hull": bool(args.exclude_out_of_hull),
         "n_fold_positions": len(fold_keys),
         "out_of_hull_positions": [list(p) for p in out_keys],
-        "gcc_oversample": args.gcc_oversample, "heatmap_weight": args.heatmap_weight,
-        "synth_positions": args.synth_positions,
+        "knobs": {
+            "gcc_oversample": args.gcc_oversample, "phat_beta": args.phat_beta,
+            "bandpass_hz": [args.bandpass_lo, args.bandpass_hi],
+            "tta_crops": args.tta_crops, "tta_jitter": args.tta_jitter,
+            "heatmap_weight": args.heatmap_weight,
+            "synth_positions": args.synth_positions,
+            "synth_reflections": args.synth_reflections,
+        },
         "baseline_published_lopo": _BASELINE_LOPO,
         "v4_cfg": asdict(v4_cfg), "results": results,
     }

@@ -62,6 +62,9 @@ def _place_coherent_impulse(
     source_sig: np.ndarray,
     snr_db: float,
     rng: np.random.Generator,
+    n_reflections: int = 0,
+    reflection_gain: float = 0.5,
+    reflection_max_delay_s: float = 0.004,
 ) -> np.ndarray:
     """Build ``(n_sensors, n_samples)`` with `source_sig` delayed per sensor.
 
@@ -69,6 +72,12 @@ def _place_coherent_impulse(
     fs)`` (a 1/distance amplitude falloff), plus independent Gaussian noise at
     the requested SNR.  This is the discrete form of pysoundlocalization's
     per-microphone construction (delay = distance / speed of sound).
+
+    ``n_reflections > 0`` adds that many attenuated, randomly-delayed echoes of
+    the direct arrival per sensor — a lightweight image-source proxy for the
+    rig's reverberation, which smears the GCC-PHAT peak the way real recordings
+    do.  Free-field synthetic SRP volumes (no echoes) are unrealistically clean;
+    adding multipath narrows the synthetic-to-real domain gap for pretraining.
     """
     n_sensors = sensor_xyz.shape[0]
     out = np.zeros((n_sensors, n_samples), dtype=np.float64)
@@ -77,14 +86,22 @@ def _place_coherent_impulse(
     delays = np.round(dists / c * fs).astype(int)
     base = n_samples // 2 - burst // 2 - int(delays.max())
     base = max(0, base)
+    max_refl_d = max(1, int(round(reflection_max_delay_s * fs)))
     sig_rms = float(np.sqrt(np.mean(source_sig**2)) + 1e-12)
     noise_std = sig_rms / (10.0 ** (snr_db / 20.0))
     for m in range(n_sensors):
-        start = base + int(delays[m])
-        end = start + burst
-        if 0 <= start and end <= n_samples:
-            amp = 1.0 / max(dists[m], 1e-3)
-            out[m, start:end] += amp * source_sig
+        amp = 1.0 / max(dists[m], 1e-3)
+        # Direct path + per-sensor reflections (independent extra delays).
+        arrivals = [(int(delays[m]), amp)]
+        for k in range(n_reflections):
+            extra = int(rng.integers(1, max_refl_d + 1))
+            g = amp * (reflection_gain ** (k + 1)) * float(rng.choice([-1.0, 1.0]))
+            arrivals.append((int(delays[m]) + extra, g))
+        for d, g in arrivals:
+            start = base + d
+            end = start + burst
+            if 0 <= start and end <= n_samples:
+                out[m, start:end] += g * source_sig
     out += noise_std * rng.standard_normal(out.shape)
     return out
 
@@ -123,6 +140,8 @@ def generate_synthetic_knock_samples(
     c_air: float = C_AIR_MS,
     c_plastic: float = C_PLASTIC_3DP_MS,
     gcc_oversample: int = 1,
+    n_reflections: int = 0,
+    reflection_gain: float = 0.5,
     hull_margin_m: float = 0.03,
     seed: int = 0,
 ) -> list[V4Sample]:
@@ -152,6 +171,7 @@ def generate_synthetic_knock_samples(
                 mic = _place_coherent_impulse(
                     spec.mic_xyz, pos, spec.mic_fs, c_air,
                     n_samples=n_mic, source_sig=src, snr_db=snr_db, rng=rng,
+                    n_reflections=n_reflections, reflection_gain=reflection_gain,
                 )
                 # Accel burst spans a few low-rate samples; reuse a short kernel.
                 burst_acc = max(2, int(round(burst_seconds * spec.accel_fs)) + 1)
@@ -159,6 +179,7 @@ def generate_synthetic_knock_samples(
                 acc = _place_coherent_impulse(
                     spec.vib_xyz, pos, spec.accel_fs, c_plastic,
                     n_samples=n_acc, source_sig=src_a, snr_db=snr_db, rng=rng,
+                    n_reflections=n_reflections, reflection_gain=reflection_gain,
                 )
                 vol = compute_srp_phat_volume(
                     mic, spec.mic_xyz, fs=spec.mic_fs, grid=grid,

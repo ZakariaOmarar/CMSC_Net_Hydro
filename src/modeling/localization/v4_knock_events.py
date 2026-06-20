@@ -59,6 +59,7 @@ from ..context.v2_fusion import V2FusionEncoder
 from ..context.v2_ssl import V2SSLConfig, _dataset_idx
 from .v4_features import (
     GridSpec,
+    bandpass_filter,
     compute_accel_tdoa_tokens,
     compute_srp_phat_volume,
     find_burst_window,
@@ -91,6 +92,20 @@ class KnockEventConfig:
     # Acoustic GCC up-sampling factor for the per-knock SRP volume (1 = off).
     # See `compute_srp_phat_volume`; sharpens the SRP peak below the voxel grid.
     gcc_oversample: int = 1
+    # PHAT whitening exponent (1.0 = full PHAT) and linear-vs-circular GCC.
+    # Both forwarded to `compute_srp_phat_volume`; defaults preserve behaviour.
+    phat_beta: float = 1.0
+    linear_corr: bool = False
+    # Band-pass the crop before SRP (Hz); None disables.  Isolates the knock's
+    # informative band, dropping rig rumble + HF hiss that PHAT over-weights.
+    bandpass_hz: tuple[float, float] | None = None
+    # Test-time-augmentation multi-crop: emit `crops_per_knock` crops per knock,
+    # their centres spread symmetrically over ±`crop_jitter_seconds`.  Each is an
+    # independent localization estimate of the SAME knock, so aggregating them at
+    # inference multiplies the √n sharpening the per-position aggregation already
+    # exploits.  `crops_per_knock=1` reproduces the single-crop behaviour.
+    crops_per_knock: int = 1
+    crop_jitter_seconds: float = 0.02
 
 
 def _event_centres(
@@ -215,34 +230,29 @@ def precompute_v4_knock_event_samples(
         ac_xyz = torch.from_numpy(s.mic_positions.astype(np.float32)).unsqueeze(0).to(device)
         vib_xyz = torch.from_numpy(s.vib_positions.astype(np.float32)).unsqueeze(0).to(device)
 
-        for centre_s in centres:
-            # Tight raw crops for SRP / TDOA, centred on the knock and clamped.
-            mic_start = int(round(centre_s * mic_fs)) - n_crop_mic // 2
-            mic_start = int(np.clip(mic_start, 0, max(0, T_mic - n_crop_mic)))
-            acc_start = int(round(centre_s * accel_fs)) - n_crop_acc // 2
-            acc_start = int(np.clip(acc_start, 0, max(0, T_acc - n_crop_acc)))
-            mic_crop = mic[:, mic_start : mic_start + n_crop_mic]
-            acc_crop = accel[:, acc_start : acc_start + n_crop_acc]
-            if mic_crop.shape[1] < 8 or acc_crop.shape[1] < 2:
-                continue
+        # TTA crop offsets: symmetric, deterministic spread over ±jitter.
+        if cfg.crops_per_knock <= 1:
+            crop_offsets = [0.0]
+        else:
+            crop_offsets = list(
+                np.linspace(-cfg.crop_jitter_seconds, cfg.crop_jitter_seconds,
+                            cfg.crops_per_knock)
+            )
 
-            # V2 context window, centred on the same knock (clamped to bounds).
+        for centre_s in centres:
+            # V2 context window, centred on the knock (clamped to bounds).
+            # Computed once per knock and reused across its TTA crops.
             ac_w0 = int(round(centre_s * ac_fs)) - n_ac // 2
             ac_w0 = int(np.clip(ac_w0, 0, max(0, T_ac - n_ac)))
             vib_w0 = int(round(centre_s * vib_fs)) - n_vib // 2
             vib_w0 = int(np.clip(vib_w0, 0, max(0, T_vib - n_vib)))
-
             ac_win = (
                 torch.from_numpy(np.ascontiguousarray(ac_feats[..., ac_w0 : ac_w0 + n_ac]))
-                .unsqueeze(0)
-                .float()
-                .to(device)
+                .unsqueeze(0).float().to(device)
             )
             vib_win = (
                 torch.from_numpy(np.ascontiguousarray(vib_feats[..., vib_w0 : vib_w0 + n_vib]))
-                .unsqueeze(0)
-                .float()
-                .to(device)
+                .unsqueeze(0).float().to(device)
             )
             with torch.no_grad():
                 out = v2_encoder(ac_win, ac_xyz, vib_win, vib_xyz, ds_idx, mask_p=0.0)
@@ -250,42 +260,59 @@ def precompute_v4_knock_event_samples(
             fused = torch.cat([out["a_fused"], out["v_fused"]], dim=1)
             x_for_v3 = fused.mean(dim=1).squeeze(0).cpu().numpy().astype(np.float32)
 
-            volume = compute_srp_phat_volume(
-                mic_crop, s.mic_positions, fs=mic_fs, grid=grid,
-                gcc_oversample=cfg.gcc_oversample,
-            )
-            psr = srp_peak_sharpness(volume)
-            tdoa = compute_accel_tdoa_tokens(acc_crop, s.vib_positions, fs=accel_fs)
-
-            multilat_xyz: np.ndarray | None = None
-            if acc_crop.shape[0] >= 4:
-                try:
-                    from .multilateration import accel_tdoa_multilateration_v0
-
-                    pos, _residual = accel_tdoa_multilateration_v0(
-                        acc_crop, s.vib_positions, fs=accel_fs
+            for off in crop_offsets:
+                cc = centre_s + off
+                # Tight raw crops for SRP / TDOA, centred on the (jittered) knock.
+                mic_start = int(round(cc * mic_fs)) - n_crop_mic // 2
+                mic_start = int(np.clip(mic_start, 0, max(0, T_mic - n_crop_mic)))
+                acc_start = int(round(cc * accel_fs)) - n_crop_acc // 2
+                acc_start = int(np.clip(acc_start, 0, max(0, T_acc - n_crop_acc)))
+                mic_crop = mic[:, mic_start : mic_start + n_crop_mic]
+                acc_crop = accel[:, acc_start : acc_start + n_crop_acc]
+                if mic_crop.shape[1] < 8 or acc_crop.shape[1] < 2:
+                    continue
+                if cfg.bandpass_hz is not None:
+                    mic_crop = bandpass_filter(
+                        mic_crop, float(mic_fs), cfg.bandpass_hz[0], cfg.bandpass_hz[1]
                     )
-                    multilat_xyz = pos.astype(np.float32)
-                except Exception:
-                    multilat_xyz = None
 
-            samples.append(
-                V4Sample(
-                    srp_volume=volume,
-                    tdoa_tokens=tdoa,
-                    context=c_t,
-                    x_for_v3=x_for_v3,
-                    target_xyz=target,
-                    scada=None,
-                    mode_label=s.mode_label,
-                    recording_id=s.recording_id,
-                    source_dir=str(s.source_dir),
-                    dataset_id=s.dataset_id,
-                    multilat_xyz=multilat_xyz,
-                    window_start_s=float(centre_s),
-                    srp_psr=float(psr),
+                volume = compute_srp_phat_volume(
+                    mic_crop, s.mic_positions, fs=mic_fs, grid=grid,
+                    gcc_oversample=cfg.gcc_oversample,
+                    phat_beta=cfg.phat_beta, linear_corr=cfg.linear_corr,
                 )
-            )
+                psr = srp_peak_sharpness(volume)
+                tdoa = compute_accel_tdoa_tokens(acc_crop, s.vib_positions, fs=accel_fs)
+
+                multilat_xyz: np.ndarray | None = None
+                if acc_crop.shape[0] >= 4:
+                    try:
+                        from .multilateration import accel_tdoa_multilateration_v0
+
+                        pos, _residual = accel_tdoa_multilateration_v0(
+                            acc_crop, s.vib_positions, fs=accel_fs
+                        )
+                        multilat_xyz = pos.astype(np.float32)
+                    except Exception:
+                        multilat_xyz = None
+
+                samples.append(
+                    V4Sample(
+                        srp_volume=volume,
+                        tdoa_tokens=tdoa,
+                        context=c_t,
+                        x_for_v3=x_for_v3,
+                        target_xyz=target,
+                        scada=None,
+                        mode_label=s.mode_label,
+                        recording_id=s.recording_id,
+                        source_dir=str(s.source_dir),
+                        dataset_id=s.dataset_id,
+                        multilat_xyz=multilat_xyz,
+                        window_start_s=float(cc),
+                        srp_psr=float(psr),
+                    )
+                )
     return samples
 
 

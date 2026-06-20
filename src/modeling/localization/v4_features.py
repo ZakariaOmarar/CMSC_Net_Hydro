@@ -79,6 +79,8 @@ def compute_srp_phat_volume(
     c: float = C_AIR_MS,
     max_delay_seconds: float | None = None,
     gcc_oversample: int = 1,
+    phat_beta: float = 1.0,
+    linear_corr: bool = False,
 ) -> np.ndarray:
     """Compute the SRP-PHAT 3-D power volume on a fixed grid.
 
@@ -127,6 +129,8 @@ def compute_srp_phat_volume(
             mic_data[j].astype(np.float64),
             max_delay_samples=max_delay_samples,
             oversample=oversample,
+            phat_beta=phat_beta,
+            linear=linear_corr,
         )
 
     grid_x, grid_y, grid_z = grid.axes()
@@ -144,6 +148,33 @@ def compute_srp_phat_volume(
     if peak > 1e-12:
         vol = vol / peak
     return vol.astype(np.float32)
+
+
+def bandpass_filter(
+    data: np.ndarray, fs: float, lo_hz: float, hi_hz: float, *, order: int = 4
+) -> np.ndarray:
+    """Zero-phase Butterworth band-pass over the last axis (per channel).
+
+    Mirrors the pysoundlocalization preprocessing filters (scipy Butterworth),
+    but uses ``filtfilt`` for zero phase so the inter-channel TDOA the SRP peak
+    depends on is preserved exactly.  Cutoffs are clamped to ``(0, Nyquist)``;
+    a degenerate band returns the input unchanged.  Isolating the knock's
+    informative band (dropping sub-100 Hz rig rumble and the high-frequency
+    hiss that PHAT over-weights) sharpens the GCC-PHAT peak before SRP.
+    """
+    from scipy.signal import butter, filtfilt
+
+    data = np.asarray(data, dtype=np.float64)
+    nyq = 0.5 * float(fs)
+    lo = max(1e-3, float(lo_hz)) / nyq
+    hi = min(float(hi_hz), nyq * 0.999) / nyq
+    if not (0.0 < lo < hi < 1.0):
+        return data
+    b, a = butter(order, [lo, hi], btype="band")
+    # filtfilt needs length > 3*max(len(a),len(b)); fall back if the crop is short.
+    if data.shape[-1] <= 3 * max(len(a), len(b)):
+        return data
+    return filtfilt(b, a, data, axis=-1)
 
 
 def srp_peak_sharpness(volume: np.ndarray) -> float:
@@ -312,6 +343,7 @@ __all__ = [
     "C_AIR_MS",
     "C_PLASTIC_3DP_MS",
     "GridSpec",
+    "bandpass_filter",
     "compute_accel_tdoa_tokens",
     "compute_burst_aware_srp_phat_volume",
     "compute_srp_phat_volume",

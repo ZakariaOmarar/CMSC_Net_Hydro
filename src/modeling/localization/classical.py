@@ -27,6 +27,8 @@ def gcc_phat(
     max_delay_samples: int,
     n_fft: int | None = None,
     oversample: int = 1,
+    phat_beta: float = 1.0,
+    linear: bool = False,
 ) -> np.ndarray:
     """Compute the GCC-PHAT cross-correlation vector for one mic pair.
 
@@ -46,33 +48,50 @@ def gcc_phat(
             16 kHz acoustic path's main precision bottleneck; the accel
             multilateration already does this with parabolic interpolation).
             The caller must pass ``fs * O`` to :func:`srp_phat_3d` so the
-            steered-delay indexing matches the finer grid.
+            steered-delay indexing matches the finer grid.  pysoundlocalization
+            (Haller & Länzlinger) uses ``interp = 16`` by default.
+        phat_beta: PHAT whitening exponent in ``G / |G|**β`` (default 1.0 = full
+            PHAT).  ``β < 1`` keeps some magnitude weighting, more robust than
+            full whitening at low SNR (full PHAT amplifies empty noise bins);
+            ``β = 0`` is plain cross-correlation.
+        linear: when True, zero-pad to ``len(x_i) + len(x_j)`` so the inverse
+            transform is a **linear** (non-circular) correlation — the
+            pysoundlocalization convention, which removes the wrap-around
+            artefact circular correlation introduces when the impulse sits near
+            a crop edge.  Default False preserves the legacy circular form.
 
     Returns:
         gcc: float32 array of shape (L,), where ``L = 2 * max_delay_samples * O
             + 1``.  Index ``max_delay_samples * O`` corresponds to zero lag.
     """
-    if n_fft is None:
-        n_fft = len(x_i)
     oversample = max(1, int(oversample))
+    if linear:
+        base_n = len(x_i) + len(x_j)
+    elif n_fft is None:
+        base_n = len(x_i)
+    else:
+        base_n = n_fft
 
-    Xi = np.fft.rfft(x_i, n=n_fft)
-    Xj = np.fft.rfft(x_j, n=n_fft)
+    Xi = np.fft.rfft(x_i, n=base_n)
+    Xj = np.fft.rfft(x_j, n=base_n)
     G = Xi * np.conj(Xj)
-    G_phat = G / (np.abs(G) + 1e-8)  # PHAT whitening
+    mag = np.abs(G)
+    if phat_beta != 1.0:
+        mag = mag ** float(phat_beta)
+    G_phat = G / (mag + 1e-8)  # PHAT whitening (β-weighted)
 
     if oversample > 1:
         # Zero-pad the one-sided spectrum to upsample the IFFT in time → a
         # lag grid O× finer.  Multiply by O to preserve the peak amplitude
         # (irfft divides by the output length).
-        n_out = n_fft * oversample
+        n_out = base_n * oversample
         n_bins_out = n_out // 2 + 1
         G_pad = np.zeros(n_bins_out, dtype=G_phat.dtype)
         G_pad[: G_phat.shape[0]] = G_phat
         gcc_full = np.fft.irfft(G_pad, n=n_out) * oversample
         half = max_delay_samples * oversample
     else:
-        gcc_full = np.fft.irfft(G_phat, n=n_fft)
+        gcc_full = np.fft.irfft(G_phat, n=base_n)
         half = max_delay_samples
     gcc_full = np.fft.fftshift(gcc_full)  # center at zero lag
 

@@ -235,7 +235,11 @@ def _evaluate_sampleset(name, samples, modes, seeds, grid, v4_cfg, geom,
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__)
+    ap = argparse.ArgumentParser(
+        description="RQ3 probe: per-knock expansion + outlier-aware LOPO vs "
+        "baseline. See module docstring.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
     ap.add_argument("--encoder-run", required=True, type=Path,
                     help="Run dir containing v2/encoder.pt")
     ap.add_argument("--modes", default="window,knock",

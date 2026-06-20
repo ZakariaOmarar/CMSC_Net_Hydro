@@ -30,6 +30,8 @@ from src.modeling.localization import (
     srp_peak_sharpness,
     train_v4_localization,
 )
+from src.modeling.localization.classical import gcc_phat
+from src.modeling.localization.v4_features import bandpass_filter
 from src.modeling.localization.v4_trainer import V4Config
 
 
@@ -272,6 +274,86 @@ def test_synthetic_generator_srp_peak_near_source() -> None:
 # --------------------------------------------------------------------------- #
 # trainer hooks: heatmap aux loss + warm-start
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# new front-end techniques harvested from pysoundlocalization
+# --------------------------------------------------------------------------- #
+def test_gcc_phat_variants_recover_lag() -> None:
+    rng = np.random.default_rng(0)
+    N, lag, burst = 512, 7, rng.standard_normal(32)
+    x_j = np.zeros(N)
+    x_i = np.zeros(N)
+    x_j[100:132] = burst
+    x_i[100 + lag : 132 + lag] = burst
+    for kw in (dict(), dict(phat_beta=0.7), dict(linear=True), dict(oversample=4)):
+        os_ = kw.get("oversample", 1)
+        g = gcc_phat(x_i, x_j, max_delay_samples=32, **kw)
+        assert g.shape[0] == 2 * 32 * os_ + 1
+        est = (int(np.argmax(g)) - 32 * os_) / os_
+        assert min(abs(est - lag), abs(est + lag)) <= 1.0, f"{kw}: est={est}"
+
+
+def test_bandpass_filter_attenuates_out_of_band() -> None:
+    fs, T = 16000, 16000
+    t = np.arange(T) / fs
+    in_band = np.sin(2 * np.pi * 1000 * t)        # 1 kHz, inside [200, 6000]
+    out_band = np.sin(2 * np.pi * 50 * t)         # 50 Hz, below the low cut
+    sig = np.stack([in_band + out_band])          # (1, T)
+    filt = bandpass_filter(sig, fs, 200.0, 6000.0)
+    assert filt.shape == sig.shape and np.all(np.isfinite(filt))
+    # In-band energy retained, out-of-band (50 Hz) strongly attenuated.
+    assert np.std(filt[0]) > 0.5 * np.std(in_band)
+    only_low = bandpass_filter(np.stack([out_band]), fs, 200.0, 6000.0)
+    assert np.std(only_low[0]) < 0.2 * np.std(out_band)
+
+
+def test_tta_crops_multiplies_samples() -> None:
+    encoder, v2_cfg = _smoke_v2()
+    grid = GridSpec(lo=(-0.1, -0.1, -0.05), hi=(0.3, 0.3, 0.2), n=(8, 8, 4))
+    seg = _two_knock_segment()
+    one = precompute_v4_knock_event_samples(
+        encoder, [seg], v2_cfg=v2_cfg, grid=grid,
+        cfg=KnockEventConfig(crop_seconds=0.12), device="cpu",
+    )
+    three = precompute_v4_knock_event_samples(
+        encoder, [seg], v2_cfg=v2_cfg, grid=grid,
+        cfg=KnockEventConfig(crop_seconds=0.12, crops_per_knock=3, crop_jitter_seconds=0.02),
+        device="cpu",
+    )
+    assert len(three) == 3 * len(one)  # 3 crops per detected knock
+    # Bandpass option runs and yields finite SRP volumes.
+    bp = precompute_v4_knock_event_samples(
+        encoder, [seg], v2_cfg=v2_cfg, grid=grid,
+        cfg=KnockEventConfig(crop_seconds=0.12, bandpass_hz=(200.0, 6000.0)),
+        device="cpu",
+    )
+    assert bp and all(np.all(np.isfinite(s.srp_volume)) for s in bp)
+
+
+def test_synthetic_reverb_still_localizes() -> None:
+    spec = SyntheticArraySpec(
+        dataset_id="d5",
+        mic_xyz=np.array([[0, 0, 0], [0.2, 0, 0], [0, 0.2, 0], [0.2, 0.2, 0],
+                          [0.1, 0.1, 0.15]], float),
+        vib_xyz=np.array([[0.05, 0.05, 0], [0.15, 0.05, 0], [0.05, 0.15, 0],
+                          [0.15, 0.15, 0]], float),
+        mic_fs=16000, accel_fs=376,
+    )
+    grid = GridSpec(lo=(-0.05, -0.05, -0.05), hi=(0.25, 0.25, 0.2), n=(16, 16, 10))
+    samples = generate_synthetic_knock_samples(
+        [spec], grid, c_dim=16, n_positions_per_array=6, snr_db=20.0,
+        n_reflections=4, reflection_gain=0.5, seed=0,
+    )
+    assert len(samples) >= 4
+    ax = grid.axes()
+    errs = []
+    for s in samples:
+        idx = np.unravel_index(int(np.argmax(s.srp_volume)), s.srp_volume.shape)
+        peak = np.array([ax[0][idx[0]], ax[1][idx[1]], ax[2][idx[2]]])
+        errs.append(float(np.linalg.norm(peak - s.target_xyz)))
+    # Reflections smear the peak but it must still track the source loosely.
+    assert np.median(errs) < 0.12
+
+
 def test_train_v4_heatmap_aux_and_warmstart_run() -> None:
     encoder, v2_cfg = _smoke_v2()
     grid = GridSpec(lo=(-0.1, -0.1, -0.05), hi=(0.3, 0.3, 0.2), n=(8, 8, 4))
