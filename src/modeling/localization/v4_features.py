@@ -273,6 +273,21 @@ def compute_burst_aware_srp_phat_volume(
     )
 
 
+def _parabolic_delta(y: np.ndarray, p: int) -> float:
+    """Sub-sample peak offset by parabolic interpolation around index ``p``.
+
+    Returns ``delta`` in ``[-0.5, 0.5]`` to add to ``p``; 0 at the array edges
+    (where the three-point fit is undefined).  Jacovitti & Scarano (1993).
+    """
+    if p <= 0 or p >= len(y) - 1:
+        return 0.0
+    a, b, cc = float(y[p - 1]), float(y[p]), float(y[p + 1])
+    denom = a - 2.0 * b + cc
+    if abs(denom) < 1e-12:
+        return 0.0
+    return float(np.clip(0.5 * (a - cc) / denom, -0.5, 0.5))
+
+
 def compute_accel_tdoa_tokens(
     accel_data: np.ndarray,
     accel_xyz: np.ndarray,
@@ -280,6 +295,7 @@ def compute_accel_tdoa_tokens(
     *,
     c: float = C_PLASTIC_3DP_MS,
     max_delay_seconds: float | None = None,
+    gcc_oversample: int = 1,
 ) -> np.ndarray:
     """Per-pair structure-borne TDOA features.
 
@@ -299,9 +315,18 @@ def compute_accel_tdoa_tokens(
 
     Variable `n_pairs` is the channel-agnostic interface for the V4 head's
     Set-Transformer TDOA pool.
+
+    ``gcc_oversample`` (+ parabolic sub-sample refinement, always on) is the fix
+    for the low accel sample rate: at 376 Hz one integer lag is ~2.7 ms, so a
+    plain ``argmax`` quantises ``path_diff_m`` to ``±c/fs`` (~5 m at c=2000) —
+    useless on a 0.1 m rig.  Oversampling the GCC ``O×`` then parabolically
+    refining the peak recovers a continuous sub-sample TDOA, so the token's
+    ``path_diff_m`` column finally carries real structure-borne timing instead
+    of a 3-valued noise feature.  Pair with a physically-plausible (lower) ``c``.
     """
     if accel_data.ndim != 2:
         raise ValueError(f"accel_data must be (n_vib, T); got {accel_data.shape}")
+    oversample = max(1, int(gcc_oversample))
     n = accel_data.shape[0]
     if n < 2:
         # Single-channel accelerometer — emit an empty token sequence; the
@@ -317,6 +342,7 @@ def compute_accel_tdoa_tokens(
         max_delay_seconds = max(1.0 / fs, (max_dist / c) * 1.5)
 
     max_delay_samples = max(1, int(round(max_delay_seconds * fs)))
+    centre = max_delay_samples * oversample  # zero-lag index in the (oversampled) GCC
     pairs = _all_pairs(n)
     tokens = np.zeros((len(pairs), 8), dtype=np.float32)
     for k, (i, j) in enumerate(pairs):
@@ -324,10 +350,13 @@ def compute_accel_tdoa_tokens(
             accel_data[i].astype(np.float64),
             accel_data[j].astype(np.float64),
             max_delay_samples=max_delay_samples,
+            oversample=oversample,
         )
         peak_idx = int(np.argmax(gcc))
-        tdoa_samples = peak_idx - max_delay_samples
-        tdoa_s = tdoa_samples / float(fs)
+        # Sub-sample peak: integer lag + parabolic refinement, in oversampled
+        # samples, converted back to seconds via the oversampled rate.
+        refined = (peak_idx - centre) + _parabolic_delta(gcc, peak_idx)
+        tdoa_s = refined / (float(fs) * oversample)
         path_diff_m = float(tdoa_s * c)  # in metres, same units as positions
         pos_i = accel_xyz[i].astype(np.float32)
         pos_j = accel_xyz[j].astype(np.float32)

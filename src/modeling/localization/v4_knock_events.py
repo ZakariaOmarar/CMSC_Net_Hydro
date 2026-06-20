@@ -92,6 +92,14 @@ class KnockEventConfig:
     # Acoustic GCC up-sampling factor for the per-knock SRP volume (1 = off).
     # See `compute_srp_phat_volume`; sharpens the SRP peak below the voxel grid.
     gcc_oversample: int = 1
+    # Accel-TDOA token sub-sample resolution.  The low accel rate (376 Hz)
+    # quantises the integer-lag path_diff to ~±5 m at c=2000 — `tdoa_gcc_oversample
+    # > 1` (+ parabolic) recovers a real sub-sample structure-borne TDOA.
+    # `accel_c_ms` overrides the assumed structure-borne wave speed (None =
+    # default 2000); flexural plate waves in thin 3D-printed plastic are slower
+    # (~300-800 m/s), which both rescales the feature and makes TDOA resolvable.
+    tdoa_gcc_oversample: int = 1
+    accel_c_ms: float | None = None
     # PHAT whitening exponent (1.0 = full PHAT) and linear-vs-circular GCC.
     # Both forwarded to `compute_srp_phat_volume`; defaults preserve behaviour.
     phat_beta: float = 1.0
@@ -106,6 +114,11 @@ class KnockEventConfig:
     # exploits.  `crops_per_knock=1` reproduces the single-crop behaviour.
     crops_per_knock: int = 1
     crop_jitter_seconds: float = 0.02
+    # Multi-scale crops: one well-CENTRED crop per width (e.g. (0.08, 0.12, 0.20)).
+    # Unlike TTA jitter this keeps the impulse centred, so every estimate stays
+    # high-quality while still giving the per-position aggregation more
+    # independent views.  Takes precedence over `crops_per_knock` when set.
+    crop_scales_seconds: tuple[float, ...] | None = None
 
 
 def _event_centres(
@@ -224,20 +237,28 @@ def precompute_v4_knock_event_samples(
         if T_ac < n_ac or T_vib < n_vib:
             continue
 
-        n_crop_mic = max(8, int(round(cfg.crop_seconds * mic_fs)))
-        n_crop_acc = max(2, int(round(cfg.crop_seconds * accel_fs)))
         ds_idx = torch.tensor([_dataset_idx(s.dataset_id)], dtype=torch.long, device=device)
         ac_xyz = torch.from_numpy(s.mic_positions.astype(np.float32)).unsqueeze(0).to(device)
         vib_xyz = torch.from_numpy(s.vib_positions.astype(np.float32)).unsqueeze(0).to(device)
 
-        # TTA crop offsets: symmetric, deterministic spread over ±jitter.
-        if cfg.crops_per_knock <= 1:
-            crop_offsets = [0.0]
+        # Per-knock crop "views" = (crop_seconds, time_offset).  Three mutually
+        # exclusive modes:
+        #   - multi-scale (`crop_scales_seconds`): one well-CENTRED crop per
+        #     width — complementary integration windows, no decentering.
+        #   - TTA jitter (`crops_per_knock>1`): same width, centres spread over
+        #     ±jitter (cheap but decenters the impulse → hurts the SRP peak).
+        #   - single crop (default).
+        if cfg.crop_scales_seconds:
+            crop_views = [(float(sc), 0.0) for sc in cfg.crop_scales_seconds]
+        elif cfg.crops_per_knock > 1:
+            crop_views = [
+                (cfg.crop_seconds, float(off))
+                for off in np.linspace(
+                    -cfg.crop_jitter_seconds, cfg.crop_jitter_seconds, cfg.crops_per_knock
+                )
+            ]
         else:
-            crop_offsets = list(
-                np.linspace(-cfg.crop_jitter_seconds, cfg.crop_jitter_seconds,
-                            cfg.crops_per_knock)
-            )
+            crop_views = [(cfg.crop_seconds, 0.0)]
 
         for centre_s in centres:
             # V2 context window, centred on the knock (clamped to bounds).
@@ -260,8 +281,10 @@ def precompute_v4_knock_event_samples(
             fused = torch.cat([out["a_fused"], out["v_fused"]], dim=1)
             x_for_v3 = fused.mean(dim=1).squeeze(0).cpu().numpy().astype(np.float32)
 
-            for off in crop_offsets:
+            for view_crop_s, off in crop_views:
                 cc = centre_s + off
+                n_crop_mic = max(8, int(round(view_crop_s * mic_fs)))
+                n_crop_acc = max(2, int(round(view_crop_s * accel_fs)))
                 # Tight raw crops for SRP / TDOA, centred on the (jittered) knock.
                 mic_start = int(round(cc * mic_fs)) - n_crop_mic // 2
                 mic_start = int(np.clip(mic_start, 0, max(0, T_mic - n_crop_mic)))
@@ -282,7 +305,11 @@ def precompute_v4_knock_event_samples(
                     phat_beta=cfg.phat_beta, linear_corr=cfg.linear_corr,
                 )
                 psr = srp_peak_sharpness(volume)
-                tdoa = compute_accel_tdoa_tokens(acc_crop, s.vib_positions, fs=accel_fs)
+                tdoa_kw = {} if cfg.accel_c_ms is None else {"c": cfg.accel_c_ms}
+                tdoa = compute_accel_tdoa_tokens(
+                    acc_crop, s.vib_positions, fs=accel_fs,
+                    gcc_oversample=cfg.tdoa_gcc_oversample, **tdoa_kw,
+                )
 
                 multilat_xyz: np.ndarray | None = None
                 if acc_crop.shape[0] >= 4:

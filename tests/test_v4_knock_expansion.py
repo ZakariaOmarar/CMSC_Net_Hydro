@@ -17,6 +17,7 @@ from src.ingestion.test_dataset_loader import TestDatasetSegment
 from src.modeling.context.v2_fusion import V2FusionEncoder
 from src.modeling.context.v2_ssl import V2SSLConfig
 from src.modeling.localization import (
+    C_PLASTIC_3DP_MS,
     GridSpec,
     KnockEventConfig,
     SyntheticArraySpec,
@@ -31,7 +32,7 @@ from src.modeling.localization import (
     train_v4_localization,
 )
 from src.modeling.localization.classical import gcc_phat
-from src.modeling.localization.v4_features import bandpass_filter
+from src.modeling.localization.v4_features import bandpass_filter, compute_accel_tdoa_tokens
 from src.modeling.localization.v4_trainer import V4Config
 
 
@@ -292,6 +293,37 @@ def test_gcc_phat_variants_recover_lag() -> None:
         assert min(abs(est - lag), abs(est + lag)) <= 1.0, f"{kw}: est={est}"
 
 
+def test_accel_tdoa_subsample_beats_integer_quantization() -> None:
+    """At a low accel rate the integer-lag TDOA quantises to ~±c/fs; oversampling
+    + parabolic must recover a finer, non-quantised path_diff for a sub-sample
+    true delay."""
+    fs = 376.0
+    n_ch, T = 4, 64
+    xyz = np.array([[0, 0, 0], [0.1, 0, 0], [0, 0.1, 0], [0.1, 0.1, 0]], float)
+    rng = np.random.default_rng(0)
+    # One coherent burst, shifted by a genuinely SUB-sample fractional delay
+    # across channels via fractional resampling.
+    base = rng.standard_normal(T)
+    accel = np.stack([np.interp(np.arange(T) - 0.3 * k, np.arange(T), base)
+                      for k in range(n_ch)])
+    # Old behaviour (the bug): integer argmax, no oversample, no parabolic.
+    md = max(1, int(round(max(1.0 / fs, (0.1414 / C_PLASTIC_3DP_MS) * 1.5) * fs)))
+    pairs = [(a, b) for a in range(n_ch) for b in range(a + 1, n_ch)]
+    old = np.array([
+        (int(np.argmax(gcc_phat(accel[i], accel[j], max_delay_samples=md))) - md)
+        / fs * C_PLASTIC_3DP_MS
+        for i, j in pairs
+    ])
+    fine = compute_accel_tdoa_tokens(accel, xyz, fs=fs, gcc_oversample=16)
+    assert fine.shape == (len(pairs), 8)
+    step = C_PLASTIC_3DP_MS / fs  # one integer-lag path-difference quantum
+    frac_old = np.abs((old / step) - np.round(old / step))
+    frac_fine = np.abs((fine[:, 0] / step) - np.round(fine[:, 0] / step))
+    assert frac_old.max() < 1e-6   # old argmax is grid-locked (the bug)
+    assert frac_fine.max() > 1e-3  # fixed version resolves between grid lines
+    assert np.all(np.isfinite(fine))
+
+
 def test_bandpass_filter_attenuates_out_of_band() -> None:
     fs, T = 16000, 16000
     t = np.arange(T) / fs
@@ -320,6 +352,14 @@ def test_tta_crops_multiplies_samples() -> None:
         device="cpu",
     )
     assert len(three) == 3 * len(one)  # 3 crops per detected knock
+    # Multi-scale: one centred crop per width (no jitter).
+    ms = precompute_v4_knock_event_samples(
+        encoder, [seg], v2_cfg=v2_cfg, grid=grid,
+        cfg=KnockEventConfig(crop_scales_seconds=(0.08, 0.12, 0.20)), device="cpu",
+    )
+    assert len(ms) == 3 * len(one)
+    assert all(s.window_start_s in {s2.window_start_s for s2 in one} for s in ms), \
+        "multi-scale crops must stay centred on the knock (no time offset)"
     # Bandpass option runs and yields finite SRP volumes.
     bp = precompute_v4_knock_event_samples(
         encoder, [seg], v2_cfg=v2_cfg, grid=grid,

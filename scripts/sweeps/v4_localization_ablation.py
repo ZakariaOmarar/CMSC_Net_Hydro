@@ -74,11 +74,17 @@ from src.modeling.orchestration.full_run import (
 #   tta_crops       — multi-crop test-time augmentation per knock (amplifies the
 #                     per-position aggregation win)
 #   synthetic_pretrain — reverberant synthetic-knock pretraining
-ALL_VARIANTS = ["baseline", "gcc_oversample", "sharp_gcc", "bandpass",
-                "tta_crops", "heatmap_aux", "synthetic_pretrain"]
+# Default set after two runs: aggregation is the bedrock; sharp_gcc (linear +
+# β-PHAT) is the front-end winner; multi-scale replaces the decentering TTA.
+# bandpass / tta_crops / synthetic_pretrain / heatmap_aux stay SELECTABLE but
+# left the default since they didn't earn their cost.
+ALL_VARIANTS = ["baseline", "gcc_oversample", "sharp_gcc", "multiscale",
+                "sharp_multiscale"]
 # Variants whose effect is a different per-knock SAMPLE build (vs a training-only
 # or scoring-only change).  Each gets its own precomputed sample set.
-_SAMPLE_BUILD_VARIANTS = {"gcc_oversample", "sharp_gcc", "bandpass", "tta_crops"}
+_SAMPLE_BUILD_VARIANTS = {"gcc_oversample", "sharp_gcc", "bandpass", "tta_crops",
+                          "multiscale", "sharp_multiscale", "tdoa_subsample",
+                          "tdoa_slow_c"}
 ALL_SCORINGS = ["per_window", "mean_agg", "median_agg", "psr_agg"]
 _BASELINE_LOPO = {"tdoa_only": 0.132, "both": 0.171, "srp_only": 0.168}
 
@@ -86,16 +92,29 @@ _BASELINE_LOPO = {"tdoa_only": 0.132, "both": 0.171, "srp_only": 0.168}
 def _knock_cfg_for_variant(variant: str, args) -> KnockEventConfig:
     """The per-knock sample-build config for a variant (base for non-build ones)."""
     common = dict(crop_seconds=args.crop_seconds)
+    scales = tuple(float(x) for x in args.multiscale_seconds.split(",") if x.strip())
+    sharp = dict(gcc_oversample=args.gcc_oversample, linear_corr=True,
+                 phat_beta=args.phat_beta)
     if variant == "gcc_oversample":
         return KnockEventConfig(**common, gcc_oversample=args.gcc_oversample)
     if variant == "sharp_gcc":
-        return KnockEventConfig(**common, gcc_oversample=args.gcc_oversample,
-                                linear_corr=True, phat_beta=args.phat_beta)
+        return KnockEventConfig(**common, **sharp)
+    if variant == "multiscale":
+        return KnockEventConfig(**common, crop_scales_seconds=scales)
+    if variant == "sharp_multiscale":
+        return KnockEventConfig(**common, **sharp, crop_scales_seconds=scales)
     if variant == "bandpass":
         return KnockEventConfig(**common, bandpass_hz=(args.bandpass_lo, args.bandpass_hi))
     if variant == "tta_crops":
         return KnockEventConfig(**common, crops_per_knock=args.tta_crops,
                                 crop_jitter_seconds=args.tta_jitter)
+    if variant == "tdoa_subsample":
+        # Fix the integer-quantised accel TDOA: oversample + parabolic.
+        return KnockEventConfig(**common, tdoa_gcc_oversample=args.tdoa_oversample)
+    if variant == "tdoa_slow_c":
+        # As tdoa_subsample, but with a slow (flexural) structure-borne speed.
+        return KnockEventConfig(**common, tdoa_gcc_oversample=args.tdoa_oversample,
+                                accel_c_ms=args.accel_c)
     return KnockEventConfig(**common)  # baseline / heatmap_aux / synthetic_pretrain
 
 
@@ -162,6 +181,13 @@ def _run_variant(
     cfg = replace(v4_cfg, seed=seed, channel_mode=channel_mode)
     if variant == "heatmap_aux":
         cfg = replace(cfg, heatmap_aux_weight=heatmap_weight)
+    elif variant == "low_temp":
+        # Sharper soft-argmax → less centroid bias toward the grid centre.
+        cfg = replace(cfg, soft_argmax_temperature=0.5)
+    elif variant == "no_residual":
+        # Ablate the FiLM residual: does it still help once the GCC is sharp,
+        # or is it overfitting?  residual_scale_m=0 → pred = pure soft-argmax.
+        cfg = replace(cfg, residual_scale_m=0.0)
     init_state = pretrained_state if variant == "synthetic_pretrain" else None
 
     per_scoring: dict[str, list[float]] = {sc: [] for sc in ALL_SCORINGS}
@@ -201,14 +227,21 @@ def main() -> None:
                     help="Fold only over in-hull positions (outliers excluded everywhere)")
     ap.add_argument("--hull-margin-m", type=float, default=0.05)
     ap.add_argument("--crop-seconds", type=float, default=0.12)
-    ap.add_argument("--gcc-oversample", type=int, default=8)
+    ap.add_argument("--gcc-oversample", type=int, default=4,
+                    help="GCC interp factor (4 beat 8 on srp_only — 8 over-fits the peak)")
     ap.add_argument("--phat-beta", type=float, default=0.7,
                     help="PHAT exponent for sharp_gcc (beta<1 more robust at low SNR)")
+    ap.add_argument("--multiscale-seconds", default="0.08,0.12,0.20",
+                    help="crop widths for the multiscale variants (same centre)")
     ap.add_argument("--bandpass-lo", type=float, default=200.0)
     ap.add_argument("--bandpass-hi", type=float, default=6000.0)
     ap.add_argument("--tta-crops", type=int, default=3,
                     help="crops per knock for the tta_crops variant")
     ap.add_argument("--tta-jitter", type=float, default=0.02)
+    ap.add_argument("--tdoa-oversample", type=int, default=16,
+                    help="accel-GCC interp for tdoa_subsample/tdoa_slow_c variants")
+    ap.add_argument("--accel-c", type=float, default=500.0,
+                    help="structure-borne wave speed (m/s) for the tdoa_slow_c variant")
     ap.add_argument("--heatmap-weight", type=float, default=0.1)
     ap.add_argument("--synth-positions", type=int, default=60)
     ap.add_argument("--synth-reflections", type=int, default=4,
