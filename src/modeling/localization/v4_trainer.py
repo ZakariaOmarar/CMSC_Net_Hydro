@@ -43,6 +43,7 @@ from .v4_features import (
     compute_srp_phat_volume,
 )
 from .v4_loc_head import V4LocalizationHead
+from .v4_metrics import event_aggregated_mae
 
 # ---------------------------------------------------------------------------
 # Sample + config
@@ -611,9 +612,10 @@ class V4Result:
     val_loss_history: list[float]
     # Headline MAE is EVENT-AGGREGATED (deployment-faithful): one estimate per
     # recording = mean of its per-knock predictions, error against the GT, then
-    # meaned over recordings.  The per-window value is kept as
-    # `val_mae_3d_per_window` for diagnostics.  `val_predictions`/`val_targets`
-    # remain per-window so component analysis and CIs still see every knock.
+    # meaned over recordings (computed via `event_aggregated_mae`).  Strictly NaN
+    # when there are no val groups — never falls back to a per-window value.
+    # `val_predictions`/`val_targets` remain per-knock so component analysis and
+    # the window-level bootstrap CI still see every knock.
     val_mae_3d: float
     val_p95_3d: float
     val_predictions: np.ndarray  # (n_val, 3)
@@ -648,10 +650,6 @@ class V4Result:
     # spatial target instead of their recording, exposing position-level
     # error for failure-mode analysis (Table 12 in analyze_ablation).
     val_position_breakdown: dict = field(default_factory=dict)
-    # Per-window MAE/P95 — the legacy "every knock scored independently" metric,
-    # kept for diagnostics now that the headline (`val_mae_3d`) is aggregated.
-    val_mae_3d_per_window: float = float("nan")
-    val_p95_3d_per_window: float = float("nan")
     # Per-recording aggregated errors (||mean(recording's per-knock preds) − GT||),
     # the samples behind the headline; drivers bootstrap a CI over these.
     val_agg_errors: np.ndarray = field(default_factory=lambda: np.zeros((0,), dtype=np.float32))
@@ -949,8 +947,7 @@ def train_v4_localization(
         val_delta = np.concatenate(val_deltas, axis=0)
         val_targets = np.concatenate(val_tgts, axis=0)
         errs = np.linalg.norm(val_predictions - val_targets, axis=-1)
-        val_mae = float(errs.mean())
-        val_p95 = float(np.percentile(errs, 95))
+        val_mae = float(errs.mean())  # per-knock error mean — backs the window-level CI only
         # 95 % percentile-bootstrap CI on MAE, 1000 window-level resamples.
         # Standard small-sample uncertainty quantification on a regression
         # head (Efron & Tibshirani, 1993).  Resamples at the window level
@@ -989,13 +986,11 @@ def train_v4_localization(
                 "delta_xyz_mean": val_delta[mask].mean(axis=0).astype(float).tolist(),
             }
 
-        # Event-aggregated MAE (headline): one estimate per recording =
-        # mean of its per-knock predictions, error against its GT.
-        agg_errs = np.array([
-            float(np.linalg.norm(np.asarray(b["pred_xyz_mean"]) - np.asarray(b["target_xyz"])))
-            for b in breakdown.values()
-        ]) if breakdown else np.array([])
-        val_mae_agg = float(agg_errs.mean()) if agg_errs.size else float("nan")
+        # Event-aggregated MAE (headline): one estimate per recording = mean of
+        # its per-knock predictions, error against its GT.  Shared helper so the
+        # trainer, the V3-gated CV metric, and Stage 5b aggregate identically.
+        val_mae_agg, agg_errs, _ = event_aggregated_mae(
+            val_predictions, val_targets, val_samples)
         val_p95_agg = float(np.percentile(agg_errs, 95)) if agg_errs.size else float("nan")
 
         # Per-POSITION breakdown (failure-mode analysis).  Groups val
@@ -1027,8 +1022,6 @@ def train_v4_localization(
         val_init = np.zeros((0, 3), dtype=np.float32)
         val_delta = np.zeros((0, 3), dtype=np.float32)
         val_targets = np.zeros((0, 3), dtype=np.float32)
-        val_mae = float("nan")
-        val_p95 = float("nan")
         val_mae_agg = float("nan")
         val_p95_agg = float("nan")
         agg_errs = np.zeros((0,), dtype=np.float64)
@@ -1076,9 +1069,10 @@ def train_v4_localization(
         head=head,
         train_loss_history=train_history,
         val_loss_history=val_history,
-        # Headline = event-aggregated (per-recording); per-window kept below.
-        val_mae_3d=(val_mae_agg if np.isfinite(val_mae_agg) else val_mae),
-        val_p95_3d=(val_p95_agg if np.isfinite(val_p95_agg) else val_p95),
+        # Headline = event-aggregated (per-recording).  Strictly NaN when there
+        # are no val groups — never falls back to a per-window value.
+        val_mae_3d=val_mae_agg,
+        val_p95_3d=val_p95_agg,
         val_predictions=val_predictions,
         val_targets=val_targets,
         train_recording_ids=sorted({_qualify(s) for s in train_samples}),
@@ -1094,8 +1088,6 @@ def train_v4_localization(
         train_mae_3d=train_mae_3d_v,
         train_p95_3d=train_p95_3d_v,
         val_position_breakdown=pos_breakdown,
-        val_mae_3d_per_window=val_mae,
-        val_p95_3d_per_window=val_p95,
         val_agg_errors=np.asarray(agg_errs, dtype=np.float32),
     )
 

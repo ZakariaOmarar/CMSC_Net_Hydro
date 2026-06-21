@@ -127,6 +127,8 @@ def _evaluate(res, v2_encoder, anom_loaders, anom_segments, v2_cfg, v3_cfg) -> d
             v2_encoder, res.flow, res.thresholds, anom_segments,
             v2_cfg=v2_cfg, percentile=v3_cfg.threshold_percentile,
             xt_pool=res.xt_pool, device=v3_cfg.device,
+            anchor_norm=((res.anchor_mean, res.anchor_std)
+                         if getattr(res, "anchor_mean", None) is not None else None),
         )
         out["real_anomaly"] = real
     except Exception as e:

@@ -48,7 +48,12 @@ from ..localization import (
 )
 from ..localization.v4_trainer import _position_key
 from .full_run import REPO_ROOT, v2_config, v4_config
-from .v4_cv_common import CHANNEL_MODES, load_or_precompute_cv_samples
+from .v4_cv_common import (
+    CHANNEL_MODES,
+    gated_fold_mae,
+    load_or_precompute_cv_samples,
+    load_v3_for_gating,
+)
 
 
 def _qualify_position(s) -> tuple[float, float, float]:
@@ -90,11 +95,18 @@ def run_lopo(
     print(f"V4 LOPO: loading V2 encoder from {encoder_run}/v2/encoder.pt")
     encoder = V2FusionEncoder.from_checkpoint(encoder_run / "v2" / "encoder.pt", v2_cfg)
 
+    # Load the trained fusion V3 (from --v3-run, else the encoder run dir) so each
+    # fold also reports the deployment-faithful V3-gated MAE — the same filtering
+    # full_run Stage 5b applies.  Degrades to ungated-only if V3 is absent.
+    v3 = load_v3_for_gating(
+        v3_run or encoder_run, embed_dim=int(v2_cfg.embed_dim), log_prefix="V4 LOPO")
+
     samples = load_or_precompute_cv_samples(
         encoder, v2_cfg,
         samples_cache=samples_cache,
         burst_aware_srp=burst_aware_srp,
         log_prefix="V4 LOPO",
+        v3=v3,
     )
     grid = V4_CANDIDATE_GRID
 
@@ -143,8 +155,11 @@ def run_lopo(
                 ci = percentile_bootstrap_ci(errs, n_boot=1000, seed=seed)
                 ci_low, ci_high = ci.ci_low, ci.ci_high
             # res.val_mae_3d is the event-aggregated headline (one estimate per
-            # recording = mean of its per-knock predictions); per-window kept.
+            # recording = mean of its per-knock predictions).
             mae_headline = float(res.val_mae_3d)
+            # Deployment-faithful V3-gated MAE on this fold's holdout knocks
+            # (same event-aggregation as the headline); does not touch mae_headline.
+            gated = gated_fold_mae(v3, va, res.val_predictions, res.val_targets)
             rec = {
                 "fold": fi, "position_xyz": list(hold),
                 "channel_mode": mode,
@@ -152,18 +167,21 @@ def run_lopo(
                 "n_val_windows": len(va),
                 "val_mae_3d_m": mae_headline,
                 "val_p95_3d_m": float(res.val_p95_3d),
-                "val_mae_3d_per_window_m": float(res.val_mae_3d_per_window),
                 "train_mae_3d_m": float(res.train_mae_3d),
                 "ci95_low_m": ci_low,
                 "ci95_high_m": ci_high,
                 "elapsed_seconds": float(time.time() - t0),
+                **gated,
             }
             per_mode_results[mode].append(rec)
             with folds_path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(rec) + "\n")
+            g_mae = gated["val_mae_3d_v3gated_m"]
+            g_str = (f"{g_mae:.3f}m on {gated['n_val_gated']}/{gated['n_val_total']}"
+                     if g_mae is not None else f"n/a ({gated['n_val_gated']}/{gated['n_val_total']} gated)")
             print(f"  fold {fi}/{len(fold_keys)} [{mode}] @ {_position_str(hold)}: "
-                  f"MAE={mae_headline:.3f}m (per-window {res.val_mae_3d_per_window:.3f}m, "
-                  f"train {res.train_mae_3d:.3f}m) n_val={len(va)} in {time.time()-t0:.0f}s")
+                  f"MAE(ungated)={mae_headline:.3f}m (train {res.train_mae_3d:.3f}m) "
+                  f"| MAE(V3-gated)={g_str} n_val={len(va)} in {time.time()-t0:.0f}s")
 
     # #15 — late-fusion paradigm: uniform average of the two unimodal heads'
     # predictions on each held-out position, then EVENT-aggregated (mean over
@@ -194,6 +212,13 @@ def run_lopo(
                                "std_mae_m": float("nan")}
             continue
         maes = np.array([r["val_mae_3d_m"] for r in ok])
+        # V3-gated aggregate: mean over folds that produced a gated MAE (some
+        # folds may have zero V3-flagged holdout knocks -> None), plus the pooled
+        # kept/total knock tally.  Reported alongside, never replacing, ungated.
+        gated_maes = np.array(
+            [r["val_mae_3d_v3gated_m"] for r in ok if r.get("val_mae_3d_v3gated_m") is not None])
+        n_gated = int(sum(r.get("n_val_gated", 0) for r in ok))
+        n_gated_total = int(sum(r.get("n_val_total", 0) for r in ok))
         aggregate[mode] = {
             "n_folds": int(len(ok)),
             "n_skipped_or_failed": int(len(rows) - len(ok)),
@@ -202,6 +227,11 @@ def run_lopo(
             "min_mae_m": float(maes.min()),
             "max_mae_m": float(maes.max()),
             "median_mae_m": float(np.median(maes)),
+            "n_folds_v3gated": int(gated_maes.size),
+            "mean_mae_v3gated_m": float(gated_maes.mean()) if gated_maes.size else float("nan"),
+            "std_mae_v3gated_m": float(gated_maes.std()) if gated_maes.size else float("nan"),
+            "n_val_gated": n_gated,
+            "n_val_total": n_gated_total,
         }
 
     summary = {
@@ -217,9 +247,14 @@ def run_lopo(
         "method": "leave_one_position_out_cv",
     }
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2, default=str))
-    print("V4 LOPO: per-mode mean MAE — "
+    print("V4 LOPO: per-mode mean MAE (ungated) — "
           + ", ".join(f"{m}={aggregate[m].get('mean_mae_m', float('nan')):.3f}m "
                       f"± {aggregate[m].get('std_mae_m', float('nan')):.3f}m"
+                      for m in modes))
+    print("V4 LOPO: per-mode mean MAE (V3-gated) — "
+          + ", ".join(f"{m}={aggregate[m].get('mean_mae_v3gated_m', float('nan')):.3f}m "
+                      f"± {aggregate[m].get('std_mae_v3gated_m', float('nan')):.3f}m "
+                      f"[{aggregate[m].get('n_val_gated', 0)}/{aggregate[m].get('n_val_total', 0)} knocks]"
                       for m in modes))
     print(f"V4 LOPO: summary written to {out_dir / 'summary.json'}")
     return summary
@@ -230,8 +265,9 @@ def main() -> None:
     p.add_argument("--encoder-run", required=True, type=Path,
                    help="Run dir containing v2/encoder.pt")
     p.add_argument("--v3-run", default=None, type=Path,
-                   help="Phase-1 V3 winner dir (recorded in summary; not yet "
-                        "used for gating in this driver)")
+                   help="Dir with the trained fusion V3 (v3/ or v3_fusion/) used "
+                        "to compute the per-fold V3-gated MAE. Defaults to "
+                        "--encoder-run (full_run saves V3 there).")
     p.add_argument("--samples-cache", default=None, type=Path,
                    help="Shared V4Sample pickle (re-used across folds)")
     p.add_argument("--all-channel-modes", action="store_true",

@@ -41,7 +41,12 @@ from ..localization import (
     train_v4_localization,
 )
 from .full_run import REPO_ROOT, v2_config, v4_config
-from .v4_cv_common import CHANNEL_MODES, load_or_precompute_cv_samples
+from .v4_cv_common import (
+    CHANNEL_MODES,
+    gated_fold_mae,
+    load_or_precompute_cv_samples,
+    load_v3_for_gating,
+)
 
 # Direction = (label, train_dataset_ids, test_dataset_ids).
 # Primary: train on the four older sessions, test on the newer D5 session.
@@ -55,6 +60,7 @@ _DEFAULT_DIRECTIONS: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = 
 def run_cross_dataset(
     *,
     encoder_run: Path,
+    v3_run: Path | None = None,
     samples_cache: Path | None = None,
     all_channel_modes: bool = False,
     directions: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = _DEFAULT_DIRECTIONS,
@@ -72,11 +78,18 @@ def run_cross_dataset(
     print(f"V4 cross-dataset: loading V2 encoder from {encoder_run}/v2/encoder.pt")
     encoder = V2FusionEncoder.from_checkpoint(encoder_run / "v2" / "encoder.pt", v2_cfg)
 
+    # Trained fusion V3 (from --v3-run, else the encoder run dir) for the
+    # deployment-faithful V3-gated MAE column; degrades to ungated-only if absent.
+    v3 = load_v3_for_gating(
+        v3_run or encoder_run, embed_dim=int(v2_cfg.embed_dim),
+        log_prefix="V4 cross-dataset")
+
     samples = load_or_precompute_cv_samples(
         encoder, v2_cfg,
         samples_cache=samples_cache,
         burst_aware_srp=burst_aware_srp,
         log_prefix="V4 cross-dataset",
+        v3=v3,
     )
     grid = V4_CANDIDATE_GRID
     modes = list(CHANNEL_MODES) if all_channel_modes else ["both"]
@@ -113,17 +126,23 @@ def run_cross_dataset(
                 ci = percentile_bootstrap_ci(errs, n_boot=1000, seed=seed)
                 ci_low, ci_high = ci.ci_low, ci.ci_high
             mae_headline = float(res.val_mae_3d)  # event-aggregated headline
+            # Deployment-faithful V3-gated MAE on the test split's knocks (same
+            # event-aggregation as the headline); reported beside, not over, ungated.
+            gated = gated_fold_mae(v3, te, res.val_predictions, res.val_targets)
             per_mode[mode] = {
                 "val_mae_3d_m": mae_headline,
                 "val_p95_3d_m": float(res.val_p95_3d),
-                "val_mae_3d_per_window_m": float(res.val_mae_3d_per_window),
                 "train_mae_3d_m": float(res.train_mae_3d),
                 "ci95_low_m": ci_low,
                 "ci95_high_m": ci_high,
                 "elapsed_seconds": float(time.time() - t0),
+                **gated,
             }
-            print(f"  [{label}/{mode}] MAE={mae_headline:.3f}m "
-                  f"(per-window {res.val_mae_3d_per_window:.3f}m, train {res.train_mae_3d:.3f}m) "
+            g_mae = gated["val_mae_3d_v3gated_m"]
+            g_str = (f"{g_mae:.3f}m on {gated['n_val_gated']}/{gated['n_val_total']}"
+                     if g_mae is not None else f"n/a ({gated['n_val_gated']}/{gated['n_val_total']} gated)")
+            print(f"  [{label}/{mode}] MAE(ungated)={mae_headline:.3f}m "
+                  f"(train {res.train_mae_3d:.3f}m) | MAE(V3-gated)={g_str} "
                   f"n_train_pos={n_train_positions} n_test_pos={n_test_positions} "
                   f"in {time.time()-t0:.0f}s")
         results[label] = {
@@ -153,6 +172,10 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--encoder-run", required=True, type=Path,
                    help="Run dir containing v2/encoder.pt")
+    p.add_argument("--v3-run", default=None, type=Path,
+                   help="Dir with the trained fusion V3 (v3/ or v3_fusion/) used "
+                        "for the per-direction V3-gated MAE. Defaults to "
+                        "--encoder-run (full_run saves V3 there).")
     p.add_argument("--samples-cache", default=None, type=Path,
                    help="Shared V4Sample pickle (re-used; precomputed once)")
     p.add_argument("--all-channel-modes", action="store_true",
@@ -163,6 +186,7 @@ def main() -> None:
     args = p.parse_args()
     run_cross_dataset(
         encoder_run=args.encoder_run,
+        v3_run=args.v3_run,
         samples_cache=args.samples_cache,
         all_channel_modes=args.all_channel_modes,
         out_dir=args.out_dir, seed=args.seed, quick=args.quick,

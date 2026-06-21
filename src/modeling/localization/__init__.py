@@ -38,6 +38,7 @@ from .v4_loc_head import (
     V4LocalizationHead,
     soft_argmax_3d,
 )
+from .v4_metrics import event_aggregated_mae
 from .v4_synthetic import (
     SyntheticArraySpec,
     generate_synthetic_knock_samples,
@@ -83,6 +84,7 @@ __all__ = [
     "compute_srp_phat_volume",
     "detect_alert_bursts",
     "evaluate_burst_localization",
+    "event_aggregated_mae",
     "find_burst_window",
     "generate_synthetic_knock_samples",
     "precompute_v4_knock_event_samples",

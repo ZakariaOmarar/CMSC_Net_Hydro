@@ -468,10 +468,20 @@ def train_v3_cnf(
     if len(train_ds) == 0:
         raise RuntimeError("V3: zero training windows after splitting")
     if len(val_fit_ds) == 0 or len(val_eval_ds) == 0:
+        # HARD ERROR — no fallback.  The threshold-fit cohort and the reportable
+        # val cohort MUST stay disjoint (Chapter 5 protocol: per-cluster
+        # percentile thresholds are fitted on a held-out healthy subset, and
+        # recall / FPR are reported on a *disjoint* subset).  Reusing one cohort
+        # for both would fit and evaluate the thresholds on the same windows and
+        # silently inflate the held-out FPR, so we refuse rather than degrade the
+        # evaluation protocol.  Too-small cohorts must be fixed at the data /
+        # config level (more recordings, longer recordings, or a smaller V3
+        # window so the nested split's windowed cohorts are non-empty).
         raise RuntimeError(
             "V3: threshold-fit nested split produced an empty cohort "
             f"(val_fit={len(val_fit_ds)}, val_eval={len(val_eval_ds)}); "
-            "reduce `threshold_fit_val_ratio` or increase `val_ratio`."
+            "reduce `threshold_fit_val_ratio`, increase `val_ratio`, or provide "
+            "longer/more recordings so the disjoint fit/eval split is non-empty."
         )
 
     pin = device.type == "cuda"

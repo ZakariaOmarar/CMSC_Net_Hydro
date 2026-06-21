@@ -111,7 +111,10 @@ def _smoke_v2_cfg() -> V2SSLConfig:
 
 def _build_pipeline_for_smoke():
     """Train tiny V2 (random init) → V3 → V4, then assemble the pipeline."""
-    segments = _truncated_segments(max_seconds=5.0)
+    # 10 s (not 5 s): D1's vibration feature rate is ~1 frame/s, so V3's nested
+    # disjoint threshold-fit/eval split (two halvings) needs the length to keep
+    # both sub-cohorts non-empty (Chapter-5 protocol; V3 hard-errors otherwise).
+    segments = _truncated_segments(max_seconds=10.0)
     v2_cfg = _smoke_v2_cfg()
     grid = GridSpec(lo=(-0.5, -0.5, 0.0), hi=(0.5, 0.5, 0.5), n=(8, 8, 4))
 
@@ -166,6 +169,10 @@ def _build_pipeline_for_smoke():
         grid=grid,
         v2_cfg=v2_cfg,
         threshold_percentile=95,
+        # Match the trained flow: PMA-2 pooling + impulse anchor (if enabled).
+        xt_pool=getattr(v3, "xt_pool", None),
+        anchor_norm=((v3.anchor_mean, v3.anchor_std)
+                     if getattr(v3, "anchor_mean", None) is not None else None),
     )
     return pipeline, segments
 

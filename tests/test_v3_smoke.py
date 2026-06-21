@@ -261,7 +261,11 @@ def _trained_v2_encoder(v2_cfg: V2SSLConfig) -> V2FusionEncoder:
 
 
 def test_train_v3_cnf_end_to_end() -> None:
-    loader, _ = _truncated_loader(max_seconds=5.0)
+    # 10 s (not 5 s): D1's vibration feature rate is ~1 frame/s, so the nested
+    # train/val → fit/eval split (two halvings) needs enough length for both
+    # disjoint sub-cohorts to still window a vibration frame.  Keeps the
+    # Chapter-5 disjoint fit/eval protocol genuine instead of crashing.
+    loader, _ = _truncated_loader(max_seconds=10.0)
     v2_cfg = _smoke_v2_cfg()
     v3_cfg = _smoke_v3_cfg()
     encoder = _trained_v2_encoder(v2_cfg)
@@ -279,6 +283,10 @@ def test_train_v3_cnf_end_to_end() -> None:
     fit_ids = set(result.threshold_fit_recording_ids)
     assert train_ids.isdisjoint(val_ids)
     assert train_ids.isdisjoint(fit_ids)
+    # Chapter-5 protocol: per-cluster thresholds are fitted on a held-out healthy
+    # subset and recall/FPR are reported on a DISJOINT subset.  Enforce that the
+    # threshold-fit cohort and the reportable val cohort never overlap — V3 has
+    # no fallback that would reuse one for both (it hard-errors instead).
     assert fit_ids.isdisjoint(val_ids), (
         "F1 invariant: threshold-fit cohort must be disjoint from reportable val "
         f"cohort (overlap = {fit_ids & val_ids})"
@@ -313,7 +321,7 @@ def test_train_v3_cnf_end_to_end() -> None:
 
 
 def test_train_v3_unconditional_a2_ablation() -> None:
-    loader, _ = _truncated_loader(max_seconds=5.0)
+    loader, _ = _truncated_loader(max_seconds=10.0)  # see end_to_end: disjoint nested split needs the length
     v2_cfg = _smoke_v2_cfg()
     v3_cfg = _smoke_v3_cfg(unconditional=True)
     encoder = _trained_v2_encoder(v2_cfg)
@@ -346,7 +354,7 @@ def test_train_v3_unconditional_a2_ablation() -> None:
 
 def test_v3_synthetic_transition() -> None:
     """End-to-end synthetic transition: make_transition_segment + transition_fpr."""
-    loader, segs = _truncated_loader(max_seconds=5.0)
+    loader, segs = _truncated_loader(max_seconds=10.0)  # disjoint nested split needs the length
     v2_cfg = _smoke_v2_cfg()
     v3_cfg = _smoke_v3_cfg()
     encoder = _trained_v2_encoder(v2_cfg)
@@ -373,6 +381,10 @@ def test_v3_synthetic_transition() -> None:
         v2_cfg=v2_cfg,
         crossfade_seconds=0.5,
         percentile=95,
+        # Match the trained flow: PMA-2 pooling + impulse anchor (if enabled).
+        xt_pool=getattr(result, "xt_pool", None),
+        anchor_norm=((result.anchor_mean, result.anchor_std)
+                     if getattr(result, "anchor_mean", None) is not None else None),
     )
     assert out["n_windows"] >= 1
     assert 0.0 <= out["fpr"] <= 1.0

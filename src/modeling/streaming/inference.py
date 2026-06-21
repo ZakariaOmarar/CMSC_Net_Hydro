@@ -30,6 +30,7 @@ from ...features.audio_spectral import compute_encoder_input_stack, compute_log_
 from ...features.vibration_temporal import compute_vibration_input_stack
 from ...ingestion.test_dataset_loader import TestDatasetSegment
 from ..anomaly.cnf_head import ConditionalRealNVP
+from ..anomaly.impulse_anchor import append_anchor
 from ..anomaly.threshold import PerClusterThresholds
 from ..context.v2_fusion import V2FusionEncoder
 from ..context.v2_ssl import V2SSLConfig, _dataset_idx
@@ -109,6 +110,11 @@ class GatedPipeline:
     # When None, `x_t` falls back to the legacy `fused.mean(dim=1)` (only
     # valid if the flow was trained with `xt_pool="mean"`).
     xt_pool: nn.Module | None = None
+    # Impulse+spectral anchor standardization (healthy mean/std) from V3 when
+    # `inject_impulse_anchor` was on — mirrors `V3Result.anchor_mean/anchor_std`.
+    # When set, the standardized anchor is appended to `x_t` before scoring so the
+    # flow input matches its trained dimension; None reproduces a no-anchor flow.
+    anchor_norm: tuple[np.ndarray, np.ndarray] | None = None
     # Per-stage window override mirroring `V3Config.window_seconds_override`.
     # When set the streaming window cadence is overridden per-dataset; the
     # `v2_cfg` is not mutated.  Use a float for "single override for all
@@ -236,8 +242,12 @@ class GatedPipeline:
             c_t = v2_out["context"]
 
             # ── V3: anomaly score + per-cluster gate ─────────────────
+            # Append the impulse+spectral anchor (RQ2) so the flow input matches
+            # its trained dimension; no-op when anchor_norm is None.  Uses the
+            # SAME windowed log-mel+CWT features the encoder consumed.
             c_for_flow = torch.zeros_like(c_t) if self.unconditional_anomaly else c_t
-            score = float(self.flow.anomaly_score(x_t, c_for_flow).item())
+            x_for_flow = append_anchor(x_t, ac_win, vib_win, self.anchor_norm)
+            score = float(self.flow.anomaly_score(x_for_flow, c_for_flow).item())
 
             c_np = c_t.squeeze(0).cpu().numpy()
             cluster_id = int(self.thresholds.assign(c_np[None, :])[0])

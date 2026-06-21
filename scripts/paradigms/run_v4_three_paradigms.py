@@ -157,7 +157,6 @@ def _train_one_v4(
         fold_rows.append({
             "hold_out": hold,
             "val_mae_3d": float(result.val_mae_3d),
-            "val_mae_3d_per_window": float(result.val_mae_3d_per_window),
             "n_val": int(result.val_predictions.shape[0]),
         })
         if result.val_predictions.size:

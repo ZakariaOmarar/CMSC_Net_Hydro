@@ -96,6 +96,7 @@ from ..localization import (
     V4_CANDIDATE_GRID,
     V4Config,
     V4Sample,
+    event_aggregated_mae,
     precompute_v4_knock_event_samples,
     train_v4_localization,
 )
@@ -1205,6 +1206,8 @@ def main(
                 v2.encoder, v3.flow, v3.thresholds, rf_segments,
                 v2_cfg=v2_cfg, percentile=v3_cfg.threshold_percentile,
                 inference_stride_s=0.25, xt_pool=v3.xt_pool, device=v3_cfg.device,
+                anchor_norm=((v3.anchor_mean, v3.anchor_std)
+                             if getattr(v3, "anchor_mean", None) is not None else None),
             )
             v3_depth["real_anomaly_detection"] = real_det
             metrics["stages"]["v3_real_anomaly"] = real_det
@@ -1212,7 +1215,8 @@ def main(
                 f"R={real_det['recall']:.3f} F1={real_det['f1']:.3f} "
                 f"onset_err={real_det['median_onset_error_s']:.3f}s "
                 f"(scored {real_det['n_recordings_scored']} recs, "
-                f"{real_det['n_recordings_no_weak_gt']} had no weak GT)")
+                f"{real_det['n_recordings_no_weak_gt']} had no weak GT, "
+                f"{real_det['n_recordings_inference_failed']} inference-failed)")
         except Exception as e:
             log(f"V3 real-anomaly detection skipped: {type(e).__name__}: {e}")
             metrics["stages"]["v3_real_anomaly"] = {"skipped": f"{type(e).__name__}: {e}"}
@@ -1373,16 +1377,23 @@ def main(
                     keep = gres.keep_mask
                     sh["v3_gating_diagnostic"] = gres.per_recording
                     if keep.shape[0] == res_sh.val_predictions.shape[0] and keep.any():
-                        err = np.linalg.norm(
-                            res_sh.val_predictions[keep] - res_sh.val_targets[keep], axis=-1)
-                        sh["holdout_mae_v3gated_m"] = float(np.mean(err))
+                        # keep is a numpy bool array but holdout_pos is a list ->
+                        # comprehension, never holdout_pos[keep].  Event-aggregate
+                        # the kept knocks (same aggregation as the ungated headline).
+                        kept = [s for s, k in zip(holdout_pos, keep) if k]
+                        g_mae, _g_agg, g_recs = event_aggregated_mae(
+                            res_sh.val_predictions[keep], res_sh.val_targets[keep], kept)
+                        sh["holdout_mae_v3gated_m"] = float(g_mae) if np.isfinite(g_mae) else None
                         sh["n_holdout_gated"] = int(keep.sum())
-                        log(f"  holdout MAE (V3-gated) = {np.mean(err):.4f} m "
-                            f"on {int(keep.sum())}/{keep.shape[0]} V3-flagged windows")
+                        sh["n_holdout_gated_recordings"] = int(g_recs)
+                        log(f"  holdout MAE (V3-gated, event-agg) = {g_mae:.4f} m on "
+                            f"{int(keep.sum())}/{keep.shape[0]} V3-flagged knocks "
+                            f"across {int(g_recs)} recordings")
                     else:
                         sh["holdout_mae_v3gated_m"] = None
                         sh["n_holdout_gated"] = int(keep.sum()) if keep.size else 0
-                        log("  V3-gated holdout: no windows flagged (or shape mismatch)")
+                        sh["n_holdout_gated_recordings"] = 0
+                        log("  V3-gated holdout: no knocks flagged (or shape mismatch)")
                 except Exception as e:
                     log(f"  V3-gated holdout skipped: {type(e).__name__}: {e}")
                     sh["holdout_mae_v3gated_m"] = None

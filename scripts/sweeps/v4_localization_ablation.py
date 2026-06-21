@@ -15,8 +15,8 @@ TRAINING variants (each retrains the head):
                              localization forward model) then fine-tuned (#6).
 
 SCORING variants (free — applied to every trained head's val predictions):
-  * ``per_window`` — per-knock MAE (the current, hardest metric).
-  * ``mean_agg``   — average a position's knock predictions into one estimate (#1).
+  * ``mean_agg``   — event-aggregated: average a position's knock predictions
+    into one estimate (the canonical, deployment-faithful metric).
   * ``median_agg`` — robust version of the above.
   * ``psr_agg``    — SRP-sharpness-weighted aggregation (#5).
 
@@ -85,7 +85,7 @@ ALL_VARIANTS = ["baseline", "gcc_oversample", "sharp_gcc", "multiscale",
 _SAMPLE_BUILD_VARIANTS = {"gcc_oversample", "sharp_gcc", "bandpass", "tta_crops",
                           "multiscale", "sharp_multiscale", "tdoa_subsample",
                           "tdoa_slow_c", "sharp_all"}
-ALL_SCORINGS = ["per_window", "mean_agg", "median_agg", "psr_agg"]
+ALL_SCORINGS = ["mean_agg", "median_agg", "psr_agg"]
 _BASELINE_LOPO = {"tdoa_only": 0.132, "both": 0.171, "srp_only": 0.168}
 
 
@@ -166,13 +166,11 @@ def _synthetic_arrays(segments) -> list[SyntheticArraySpec]:
 def _score_fold(preds: np.ndarray, targets: np.ndarray, va_samples) -> dict[str, float]:
     """Per-fold error for each scoring variant (val set = one held-out position)."""
     gt = targets.mean(axis=0)  # all val windows share the GT position
-    per_window = float(np.linalg.norm(preds - targets, axis=-1).mean())
     mean_agg = float(np.linalg.norm(preds.mean(axis=0) - gt))
     median_agg = float(np.linalg.norm(np.median(preds, axis=0) - gt))
     w = np.array([max(s.srp_psr, 1e-6) for s in va_samples], dtype=np.float64)
     psr_agg = float(np.linalg.norm((preds * w[:, None]).sum(0) / w.sum() - gt))
-    return {"per_window": per_window, "mean_agg": mean_agg,
-            "median_agg": median_agg, "psr_agg": psr_agg}
+    return {"mean_agg": mean_agg, "median_agg": median_agg, "psr_agg": psr_agg}
 
 
 # --------------------------------------------------------------------------- #
@@ -383,22 +381,22 @@ def main() -> None:
               f"(median MAE m over {len(seeds)} seed[s]) ====================")
         header = f"{'variant':<20}" + "".join(f"{sc:>13}" for sc in scorings)
         print(header)
-        base_pw = results["baseline"][cm]["per_window"]["median_mae_m"] if "baseline" in results else None
+        base_ma = results["baseline"][cm]["mean_agg"]["median_mae_m"] if "baseline" in results else None
         for variant in variants:
             row = f"{variant:<20}"
             for sc in scorings:
                 v = results[variant][cm][sc]["median_mae_m"]
                 row += f"{v:>13.3f}"
             print(row)
-        if base_pw is not None and not np.isnan(base_pw):
-            # Best cell overall vs baseline per_window.
+        if base_ma is not None and not np.isnan(base_ma):
+            # Best cell overall vs baseline mean_agg (event-aggregated).
             best = min(
                 (results[v][cm][sc]["median_mae_m"], v, sc)
                 for v in variants for sc in scorings
                 if not np.isnan(results[v][cm][sc]["median_mae_m"])
             )
-            print(f"  baseline per_window = {base_pw:.3f} m  |  best = {best[0]:.3f} m "
-                  f"via [{best[1]} + {best[2]}]  (Δ {best[0]-base_pw:+.3f} m)")
+            print(f"  baseline mean_agg = {base_ma:.3f} m  |  best = {best[0]:.3f} m "
+                  f"via [{best[1]} + {best[2]}]  (Δ {best[0]-base_ma:+.3f} m)")
     print(f"\nWrote {out_dir / 'summary.json'}")
 
 

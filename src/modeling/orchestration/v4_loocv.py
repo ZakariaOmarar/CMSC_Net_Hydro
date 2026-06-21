@@ -61,6 +61,7 @@ from .full_run import (
     v2_config,
     v4_config,
 )
+from .v4_cv_common import gated_fold_mae, load_v3_for_gating
 
 
 def _qualify(s) -> str:
@@ -114,6 +115,10 @@ def run_loocv(
 
     encoder = V2FusionEncoder.from_checkpoint(v2_path, v2_cfg)
 
+    # Trained fusion V3 (saved in the same run dir) for the deployment-faithful
+    # V3-gated per-fold MAE; degrades to ungated-only if the artefacts are absent.
+    v3 = load_v3_for_gating(out_dir, embed_dim=int(v2_cfg.embed_dim), log_prefix="V4 LOOCV")
+
     print("V4 LOOCV: gathering labeled segments ...")
     D2 = resolved_loader("d2.yaml")
     D3 = resolved_loader("d3.yaml")
@@ -141,6 +146,11 @@ def run_loocv(
         encoder, all_labeled,
         v2_cfg=v2_cfg, grid=grid,
         spatial_label_overrides=overrides,
+        # Build x_for_v3 the way V3 scores it (pool + anchor) so the per-fold
+        # V3-gate is on-distribution; only affects the gating input, not the
+        # SRP/TDOA/c_t features the head trains on (ungated MAE unchanged).
+        v3_xt_pool=(v3.xt_pool if v3 is not None else None),
+        v3_anchor_norm=(v3.anchor_norm if v3 is not None else None),
     )
     print(f"  {len(samples)} per-knock candidate samples in {time.time() - t0:.1f}s")
 
@@ -148,6 +158,7 @@ def run_loocv(
     print(f"V4 LOOCV: running {len(fold_keys)} folds ...")
     fold_results: list[dict] = []
     per_fold_maes: list[float] = []
+    per_fold_gated_maes: list[float] = []
 
     for i, hold in enumerate(fold_keys, start=1):
         tr, va = _split_loocv_holdout(samples, hold)
@@ -164,8 +175,8 @@ def run_loocv(
         t0 = time.time()
         # Train on the explicit (train, val) split so the held-out recording is
         # honoured exactly.  Uses the canonical trainer (same as LOPO /
-        # cross-dataset), so the event-aggregated headline + per-window
-        # diagnostics + channel-mode handling all match the rest of RQ3.
+        # cross-dataset), so the event-aggregated headline + channel-mode
+        # handling all match the rest of RQ3.
         result = train_v4_localization(
             samples, cfg=v4_cfg, grid=grid, explicit_split=(tr, va)
         )
@@ -177,6 +188,9 @@ def run_loocv(
         # result.val_mae_3d is the event-aggregated headline (one estimate per
         # held-out recording = mean of its per-knock predictions).
         mae_headline = float(result.val_mae_3d)
+        # Deployment-faithful V3-gated MAE on this fold's holdout knocks (same
+        # event-aggregation as the headline); reported beside, not over, ungated.
+        gated = gated_fold_mae(v3, va, result.val_predictions, result.val_targets)
         fold_results.append({
             "fold": i,
             "hold_out": hold,
@@ -187,15 +201,20 @@ def run_loocv(
             "n_val_windows": len(va),
             "val_mae_3d": mae_headline,
             "val_p95_3d": float(result.val_p95_3d),
-            "val_mae_3d_per_window": float(result.val_mae_3d_per_window),
             "val_mae_ci95_low": ci.ci_low if ci else float("nan"),
             "val_mae_ci95_high": ci.ci_high if ci else float("nan"),
             "elapsed_seconds": elapsed,
+            **gated,
         })
         per_fold_maes.append(mae_headline)
+        if gated["val_mae_3d_v3gated_m"] is not None:
+            per_fold_gated_maes.append(gated["val_mae_3d_v3gated_m"])
+        g_mae = gated["val_mae_3d_v3gated_m"]
+        g_str = (f"{g_mae:.3f} m on {gated['n_val_gated']}/{gated['n_val_total']}"
+                 if g_mae is not None else f"n/a ({gated['n_val_gated']}/{gated['n_val_total']} gated)")
         print(
-            f"  fold {i:02d} ({hold}): MAE={mae_headline:.3f} m "
-            f"(per-window {result.val_mae_3d_per_window:.3f} m) in {elapsed:.1f}s"
+            f"  fold {i:02d} ({hold}): MAE(ungated)={mae_headline:.3f} m "
+            f"| MAE(V3-gated)={g_str} in {elapsed:.1f}s"
         )
 
     summary = {
@@ -211,6 +230,19 @@ def run_loocv(
                 "n": len(per_fold_maes),
             }
         ),
+        "aggregate_mae_v3gated_m": (
+            {
+                "mean": float(np.mean(per_fold_gated_maes)) if per_fold_gated_maes else float("nan"),
+                "std": float(np.std(per_fold_gated_maes)) if per_fold_gated_maes else float("nan"),
+                "min": float(np.min(per_fold_gated_maes)) if per_fold_gated_maes else float("nan"),
+                "max": float(np.max(per_fold_gated_maes)) if per_fold_gated_maes else float("nan"),
+                "n": len(per_fold_gated_maes),
+                "n_val_gated": int(sum(r.get("n_val_gated", 0)
+                                       for r in fold_results if not r.get("skipped"))),
+                "n_val_total": int(sum(r.get("n_val_total", 0)
+                                       for r in fold_results if not r.get("skipped"))),
+            }
+        ),
         "burst_aware_srp": burst_aware_srp,
         "v4_epochs": v4_cfg.epochs,
         "method": "leave_one_recording_out_cv",
@@ -218,9 +250,14 @@ def run_loocv(
     json_path = out_dir / "v4_loocv.json"
     json_path.write_text(json.dumps(summary, indent=2))
     print(
-        f"V4 LOOCV: mean MAE = {summary['aggregate_mae_m']['mean']:.3f} m "
+        f"V4 LOOCV: mean MAE (ungated) = {summary['aggregate_mae_m']['mean']:.3f} m "
         f"± {summary['aggregate_mae_m']['std']:.3f} m "
         f"(n={summary['aggregate_mae_m']['n']} folds)"
+    )
+    g = summary["aggregate_mae_v3gated_m"]
+    print(
+        f"V4 LOOCV: mean MAE (V3-gated) = {g['mean']:.3f} m ± {g['std']:.3f} m "
+        f"(n={g['n']} folds, {g['n_val_gated']}/{g['n_val_total']} knocks gated)"
     )
     print(f"V4 LOOCV: summary written to {json_path}")
     return summary
