@@ -355,6 +355,7 @@ def v3_real_anomaly_detection(
     min_duration_s: float = 0.10,
     xt_pool=None,
     device: str = "auto",
+    anchor_norm=None,
 ) -> dict:
     """Score V3's temporal detections against weak knock ground-truth (B4).
 
@@ -401,7 +402,7 @@ def v3_real_anomaly_detection(
             times, scores, contexts = sliding_window_v3_inference(
                 v2_encoder, flow, paired,
                 v2_cfg=v2_cfg, inference_stride_s=inference_stride_s,
-                xt_pool=xt_pool, device=dev,
+                xt_pool=xt_pool, device=dev, anchor_norm=anchor_norm,
             )
         except Exception:
             # Best-effort per recording: a single failed inference skips that

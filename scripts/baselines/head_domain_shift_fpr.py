@@ -72,7 +72,7 @@ def _log(msg: str) -> None:
         print(line.encode("ascii", "replace").decode("ascii"), flush=True)
 
 
-def _score_healthy_per_recording(encoder, flow, xt_pool, loaders, v2_cfg, device, win_override, anomaly: bool = False):
+def _score_healthy_per_recording(encoder, flow, xt_pool, loaders, v2_cfg, device, win_override, anomaly: bool = False, anchor_norm=None):
     """Score every healthy window under one pipeline, tagged by dataset+recording.
 
     Returns ``(scores, contexts, rec_key, ds_id)`` aligned per window.  Each
@@ -92,7 +92,7 @@ def _score_healthy_per_recording(encoder, flow, xt_pool, loaders, v2_cfg, device
                 continue
             s, c, _ = score_segments(
                 encoder, flow, [ps], v2_cfg=v2_cfg, xt_pool=xt_pool, device=device,
-                window_seconds_override=win_override,
+                window_seconds_override=win_override, anchor_norm=anchor_norm,
             )
             if s.size == 0:
                 continue
@@ -229,9 +229,18 @@ def main() -> int:
     for name, enc in pipelines.items():
         _log(f"training V3-{name} ...")
         res = train_v3_cnf(enc, loaders, v2_cfg=v2_cfg, v3_cfg=v3_cfg)
-        _log(f"  V3-{name} val NLL final = {res.val_nll[-1]:+.2f}  (xt_pool={'yes' if res.xt_pool is not None else 'mean'})")
+        # When the flow was trained with the impulse+spectral anchor, it has
+        # +N_ANCHOR input dims; the same standardized anchor MUST be appended at
+        # scoring time or flow.dim (e.g. 72) won't match the scored x (e.g. 64).
+        anchor_norm = (
+            (res.anchor_mean, res.anchor_std) if res.anchor_mean is not None else None
+        )
+        _log(f"  V3-{name} val NLL final = {res.val_nll[-1]:+.2f}  "
+             f"(xt_pool={'yes' if res.xt_pool is not None else 'mean'}, "
+             f"anchor={'yes' if anchor_norm is not None else 'no'})")
         s, c, rec, ds = _score_healthy_per_recording(
             enc, res.flow, res.xt_pool, loaders, v2_cfg, device, v3_cfg.window_seconds_override,
+            anchor_norm=anchor_norm,
         )
         _log(f"  scored {s.size} healthy windows; NLL p50={np.percentile(s,50):+.1f} p95={np.percentile(s,95):+.1f}")
         scored[name] = {"scores": s, "ctx": c, "rec": rec, "ds": ds}
@@ -241,7 +250,7 @@ def main() -> int:
         deployed_thr[name] = res.thresholds
         sa, ca, _, dsa = _score_healthy_per_recording(
             enc, res.flow, res.xt_pool, loaders, v2_cfg, device,
-            v3_cfg.window_seconds_override, anomaly=True,
+            v3_cfg.window_seconds_override, anomaly=True, anchor_norm=anchor_norm,
         )
         scored_anom[name] = {"scores": sa, "ctx": ca, "ds": dsa}
         _log(f"  scored {sa.size} anomaly windows (D2/D3/D4 recall via deployed threshold)")
@@ -251,6 +260,7 @@ def main() -> int:
             ev = v3_real_anomaly_detection(
                 enc, res.flow, res.thresholds, anom_segs,
                 v2_cfg=v2_cfg, xt_pool=res.xt_pool, device=device,
+                anchor_norm=anchor_norm,
             )
             event_f1[name] = {k: ev.get(k) for k in ("precision", "recall", "f1")}
             _log(f"  event-level (#16): P={ev.get('precision')} R={ev.get('recall')} F1={ev.get('f1')}")
