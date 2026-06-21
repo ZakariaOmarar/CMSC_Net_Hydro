@@ -114,6 +114,14 @@ def _load_v3(pipeline_dir: Path, x_dim: int, c_dim: int):
     anchor_norm = None
     flow_dim = x_dim
     if "anchor_mean" in th_npz.files:
+        persisted = int(th_npz["anchor_mean"].shape[0])
+        if persisted != N_ANCHOR:
+            raise ValueError(
+                f"{pipeline_dir.name}: trained with a {persisted}-feature impulse "
+                f"anchor but the current code defines {N_ANCHOR} (the anchor feature "
+                "set changed).  Re-train V3 with the current code (the anchor must "
+                "match), or check out the commit that produced this run."
+            )
         anchor_norm = (th_npz["anchor_mean"], th_npz["anchor_std"])
         flow_dim = x_dim + N_ANCHOR
     flow = ConditionalRealNVP(
