@@ -52,7 +52,20 @@ class PerClusterThresholds:
         *,
         n_clusters: int = 4,
         seed: int = 0,
+        shrinkage: float = 0.0,
     ) -> PerClusterThresholds:
+        """Fit per-cluster percentile thresholds, optionally shrunk to global.
+
+        With ``shrinkage > 0`` each cluster's p95/p99 is pulled toward the
+        global (pooled) percentile by an empirical-Bayes weight
+        ``w = n_k / (n_k + shrinkage)``: small / noisy clusters borrow strength
+        from the stable global boundary, large clusters keep their own.  This
+        stops a single small cluster's mis-fit percentile from blowing the
+        held-out healthy alert rate to 0.7+ (observed on the conditional V3's
+        acoustic arm) while preserving the context-conditional design.  An
+        empty cluster falls back to the global percentile (not +inf, which
+        would silently suppress all alerts in that regime at inference).
+        """
         contexts = np.asarray(contexts, dtype=np.float64)
         scores = np.asarray(scores, dtype=np.float64).ravel()
         if contexts.ndim != 2:
@@ -66,6 +79,8 @@ class PerClusterThresholds:
             )
         km = KMeans(n_clusters=n_clusters, random_state=seed, n_init=10).fit(contexts)
         cluster_ids = km.labels_
+        global_p95 = float(np.percentile(scores, 95))
+        global_p99 = float(np.percentile(scores, 99))
         p95 = np.zeros(n_clusters, dtype=np.float64)
         p99 = np.zeros(n_clusters, dtype=np.float64)
         n = np.zeros(n_clusters, dtype=np.int64)
@@ -73,12 +88,19 @@ class PerClusterThresholds:
             mask = cluster_ids == k
             n[k] = int(mask.sum())
             if n[k] == 0:
-                p95[k] = np.inf
-                p99[k] = np.inf
+                p95[k] = global_p95
+                p99[k] = global_p99
+                continue
+            bucket = scores[mask]
+            raw95 = float(np.percentile(bucket, 95))
+            raw99 = float(np.percentile(bucket, 99))
+            if shrinkage > 0:
+                w = n[k] / (n[k] + float(shrinkage))
+                p95[k] = w * raw95 + (1.0 - w) * global_p95
+                p99[k] = w * raw99 + (1.0 - w) * global_p99
             else:
-                bucket = scores[mask]
-                p95[k] = float(np.percentile(bucket, 95))
-                p99[k] = float(np.percentile(bucket, 99))
+                p95[k] = raw95
+                p99[k] = raw99
         return cls(
             centroids=km.cluster_centers_.astype(np.float64),
             p95=p95,

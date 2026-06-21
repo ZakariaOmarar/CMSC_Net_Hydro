@@ -158,6 +158,7 @@ class V3Config:
     # Threshold fit — fully unsupervised on healthy data.
     n_threshold_clusters: int = V3_ANOMALY.n_threshold_clusters
     threshold_percentile: int = V3_ANOMALY.threshold_percentile
+    threshold_shrinkage: float = V3_ANOMALY.threshold_shrinkage
 
     # Nested held-out split inside `val_segs`: a `threshold_fit_val_ratio`
     # fraction of val recordings goes to *fitting* the K-means centroids and
@@ -760,6 +761,7 @@ def train_v3_cnf(
         scores_val_fit,
         n_clusters=n_clusters,
         seed=v3_cfg.seed,
+        shrinkage=v3_cfg.threshold_shrinkage,
     )
 
     def _qualify(seg: _PairedSegment) -> str:

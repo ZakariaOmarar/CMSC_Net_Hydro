@@ -291,6 +291,16 @@ class _V3Anomaly:
     n_threshold_clusters: int = 3
     threshold_percentile: int = 95
 
+    # Empirical-Bayes shrinkage of each cluster's percentile toward the global
+    # one (weight n_k/(n_k+shrinkage)).  Stops a single small/mis-fit cluster
+    # from blowing the held-out healthy alert rate to 0.7+ (observed on the
+    # conditional V3 acoustic arm).  0 = pure per-cluster (legacy).  At the
+    # typical fit-cluster size (~200-400 windows) shrinkage=300 pulls a cluster
+    # ~40-60 % toward the stable global boundary — enough to kill the blowup
+    # while keeping meaningful per-regime adaptation.  Tune up if a cluster
+    # still over-fires, down toward 0 for the pure context-conditional ablation.
+    threshold_shrinkage: float = 300.0
+
     # xt_pool kind: PMA-2 = publication (chapter 4 §A.3); mean = legacy.
     xt_pool: Literal["pma2", "mean"] = "pma2"
     xt_pool_num_heads: int = 4
