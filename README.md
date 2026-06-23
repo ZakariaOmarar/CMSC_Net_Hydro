@@ -1,7 +1,5 @@
 # CMSC_Net_Hydro
 
-[![CI](https://github.com/Zakaria08/CMSC_Net_Hydro/actions/workflows/ci.yml/badge.svg)](https://github.com/Zakaria08/CMSC_Net_Hydro/actions/workflows/ci.yml)
-
 Multimodal acoustic + vibration anomaly detection and source localization for
 reversible Francis pump-turbines. This is the implementation accompanying a
 Master's thesis; it realizes the chained **V0 → V5** label-free pipeline.
@@ -127,7 +125,7 @@ src/
 
 configs/datasets/   per-dataset registration YAMLs (d1–d5 + illwerke_raw stub) — the only configs code loads
 scripts/            runnable experiment drivers (campaigns, sweeps, diagnostics) — see scripts/README.md
-tests/              pytest suite (tests/unit/ = focused unit tests; tests/ = smoke tests; ~178 run without data, ~102 marked requires_data)
+tests/              pytest suite (tests/unit/ = focused unit tests; tests/ = smoke tests; 219 run without data, 109 marked requires_data)
 docs/, results/     thesis text and run artifacts — NOT version-controlled (see .gitignore)
 ```
 
@@ -142,6 +140,23 @@ pip install -e ".[dev,dl]"                           # editable install + dev/DL
 `requirements-lock.txt` is the frozen environment that produced the reported
 results (Python 3.11.9, numpy 2.x); `pyproject.toml` carries the looser
 supported ranges for day-to-day development.
+
+## Running the pipeline
+
+The recordings under `data/` are required. The whole V0–V5 chain runs from one
+entry point:
+
+```bash
+# End-to-end run; add --quick for a ~25 min CPU smoke run:
+python -m src.modeling.orchestration.full_run
+
+# Repeat across seeds for the mean ± std numbers in the thesis tables:
+python -m src.modeling.orchestration.multi_seed --seeds 42 1337 2718
+```
+
+Each run writes a timestamped directory under `results/runs/`. The sweeps,
+ablations, and diagnostics in [`scripts/`](scripts/README.md) are supporting
+investigations around this run, not prerequisites for it.
 
 ## Tests
 
@@ -171,16 +186,15 @@ off because the modelling code uses maths/ML conventions (`X`, `W`,
 
 The package ships `py.typed` and is type-checked with `pyright` in *basic* mode
 (config in `[tool.pyright]`); a handful of numpy/torch-driven categories are
-relaxed with documented reasons. Lint, type-check, and the data-free tests all
-run in [CI](.github/workflows/ci.yml) on every push. See
-[`CONTRIBUTING.md`](CONTRIBUTING.md) for the developer workflow.
+relaxed with documented reasons. `make check` bundles the same lint, type-check,
+and data-free test gate into one command to run before pushing.
 
 ## Notes on the previous repo state
 
-A prior iteration implemented an Illwerke-specific 5-layer physics pipeline +
-Plotly.js dashboard. That code is preserved in commit `51b77db`
-(`git checkout 51b77db -- <path>` to recover any file) and was removed when the
-thesis architecture pivoted to the V0–V5 chained label-free system above. The
-frozen Illwerke pipeline outputs under `results/illwerke/` feed the V5.2
-SCADA-mining analysis; like all of `results/`, they are kept locally and are
-not tracked in git.
+A prior iteration implemented an Illwerke-specific 5-layer physics pipeline and
+a Plotly.js dashboard. It was removed when the thesis architecture pivoted to
+the V0–V5 chained label-free system above; the removal is recorded in the git
+history (the commit titled "Remove the old Illwerke pipeline and dashboard").
+The frozen Illwerke pipeline outputs under `results/illwerke/` still feed the
+V5.2 SCADA-mining analysis; like all of `results/`, they are kept locally and
+are not tracked in git.
