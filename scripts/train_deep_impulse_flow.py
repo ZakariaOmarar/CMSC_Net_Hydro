@@ -36,9 +36,9 @@ REPO = Path(__file__).resolve().parents[1]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from src.modeling.anomaly.deep_impulse_flow import DeepImpulseConfig, DeepImpulseFlow  # noqa: E402
-from src.modeling.anomaly.raw_impulse_detector import window_features  # noqa: E402
-from src.modeling.anomaly.weak_labels import derive_knock_events, window_overlaps_any  # noqa: E402
+from src.modeling.anomaly.deep_impulse_flow import DeepImpulseConfig, DeepImpulseFlow
+from src.modeling.anomaly.raw_impulse_detector import window_features
+from src.modeling.anomaly.weak_labels import derive_knock_events, window_overlaps_any
 
 CACHE_DIR = REPO / "results" / "cache"
 

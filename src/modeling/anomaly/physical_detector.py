@@ -126,7 +126,7 @@ class PhysicalFeatureDetector:
         m.score_mean, m.score_std = float(s.mean()), float(s.std() + 1e-8)
         return m
 
-    def fit(self, phys: dict[str, np.ndarray], ctx: np.ndarray) -> "PhysicalFeatureDetector":
+    def fit(self, phys: dict[str, np.ndarray], ctx: np.ndarray) -> PhysicalFeatureDetector:
         """Fit on healthy windows.  `phys` = {modality: (N, n_feat)}; `ctx` = (N, c_dim)."""
         self.models = {
             mod: self._fit_modality(phys[mod], ctx, self.normalizer, self.k, self.ridge_alpha)
@@ -146,4 +146,4 @@ class PhysicalFeatureDetector:
         return self.fused_score(phys, ctx) > self.threshold
 
 
-__all__ = ["PhysicalFeatureDetector", "physical_features", "PHYS_FEATS"]
+__all__ = ["PHYS_FEATS", "PhysicalFeatureDetector", "physical_features"]

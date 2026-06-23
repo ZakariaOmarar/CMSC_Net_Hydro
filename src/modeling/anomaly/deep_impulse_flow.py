@@ -147,7 +147,7 @@ class DeepImpulseFlow(nn.Module):
         self.n_anchor = n_anchor
 
     @classmethod
-    def from_config(cls, cfg: "DeepImpulseConfig") -> "DeepImpulseFlow":
+    def from_config(cls, cfg: DeepImpulseConfig) -> DeepImpulseFlow:
         return cls(cfg.n_anchor, front="spectro", emb_dim=cfg.emb_dim,
                    ctx_dim=cfg.ctx_dim, dropout=cfg.dropout,
                    flow_layers=cfg.flow_layers, flow_hidden=cfg.flow_hidden)

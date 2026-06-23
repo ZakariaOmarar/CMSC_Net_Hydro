@@ -10,8 +10,8 @@ Run with:  python -m scripts.figures.fig_classical
 
 from __future__ import annotations
 
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
 from matplotlib.lines import Line2D
 
 from scripts.figures import style
@@ -22,7 +22,6 @@ from scripts.figures.style import (
     VIBRATION,
     save,
 )
-
 from src.modeling.localization.classical import gcc_phat, srp_phat_3d
 from src.modeling.localization.multilateration import (
     accel_tdoa_multilateration_v0,

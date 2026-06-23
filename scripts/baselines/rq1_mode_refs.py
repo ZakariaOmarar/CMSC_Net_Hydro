@@ -34,12 +34,12 @@ LGBM_IDS = ("d1", "d2")  # only D1/D2 have enough labelled recordings for the ce
 def main() -> int:
     # Imported lazily so `-h` / import errors are cheap and the heavy deps load
     # only when we actually compute.
+    from src.config.dataset_registry import REGISTRY
     from src.modeling.anomaly_baselines import (
         V0ModeConfig,
         cluster_mode_floor,
         train_v0_mode_lgbm,
     )
-    from src.config.dataset_registry import REGISTRY
     from src.modeling.orchestration.full_run import resolved_loader
 
     loaders = []
@@ -75,7 +75,7 @@ def main() -> int:
         }
         print(f"  floor (K-means): NMI={floor.nmi:.3f} ARI={floor.ari:.3f} "
               f"purity={floor.purity:.3f}", flush=True)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         out["mode_floor"] = {"skipped": f"{type(e).__name__}: {e}"}
         print(f"  floor skipped: {type(e).__name__}: {e}", flush=True)
 
@@ -93,7 +93,7 @@ def main() -> int:
                 "n_val_recordings": len(r.val_recording_ids),
             }
             print(f"  ceiling {L.spec.id} (LightGBM): macro-F1={r.val_macro_f1:.3f}", flush=True)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             out["lgbm_ceiling"][L.spec.id] = {"skipped": f"{type(e).__name__}: {e}"}
             print(f"  ceiling {L.spec.id} skipped: {type(e).__name__}: {e}", flush=True)
 

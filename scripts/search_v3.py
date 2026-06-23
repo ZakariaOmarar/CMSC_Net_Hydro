@@ -34,11 +34,14 @@ REPO = Path(__file__).resolve().parents[1]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from src.modeling.anomaly.v3_trainer import V3Config, score_segments, train_v3_cnf  # noqa: E402
-from src.modeling.eval.rq2_three_paradigm_eval import (  # noqa: E402
-    _build_v2, _load_state, _loader, _segments_for,
+from src.modeling.anomaly.v3_trainer import V3Config, score_segments, train_v3_cnf
+from src.modeling.eval.rq2_three_paradigm_eval import (
+    _build_v2,
+    _load_state,
+    _loader,
+    _segments_for,
 )
-from src.modeling.orchestration.stage_configs import v2_config  # noqa: E402
+from src.modeling.orchestration.stage_configs import v2_config
 
 DS_ANOM = ("d2", "d3", "d4")
 

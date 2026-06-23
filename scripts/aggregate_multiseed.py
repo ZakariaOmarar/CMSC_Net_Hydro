@@ -56,7 +56,7 @@ def _get(d, *path, default=None):
 def _load(p: Path):
     try:
         return json.loads(p.read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001
+    except Exception:
         return None
 
 

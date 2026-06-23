@@ -42,9 +42,8 @@ from pathlib import Path
 try:  # ``datetime.UTC`` is Python 3.11+; shim it for 3.10 and earlier.
     from datetime import UTC
 except ImportError:  # pragma: no cover
-    from datetime import timezone as _timezone
 
-    UTC = _timezone.utc
+    UTC = UTC
 
 import numpy as np
 from sklearn.feature_selection import mutual_info_classif

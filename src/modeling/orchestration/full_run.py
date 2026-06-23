@@ -60,7 +60,6 @@ from ...ingestion.test_dataset_loader import DatasetSpec, TestDatasetLoader, Tes
 from ..anomaly import (
     V3Config,
     train_v3_cnf,
-    transition_fpr,
 )
 from ..anomaly.event_detection import (
     detect_events_from_score_timeline,

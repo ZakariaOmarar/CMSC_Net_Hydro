@@ -103,7 +103,7 @@ class _ModalityMaha:
     score_std: float
 
     @classmethod
-    def fit(cls, X: np.ndarray) -> "_ModalityMaha":
+    def fit(cls, X: np.ndarray) -> _ModalityMaha:
         mean = X.mean(0); std = X.std(0) + 1e-8
         Z = (X - mean) / std
         rm = Z.mean(0)
@@ -127,7 +127,7 @@ class RawImpulseDetector:
     models: dict[str, _ModalityMaha] = field(default_factory=dict)
     threshold: float = 0.0
 
-    def fit(self, healthy: dict[str, np.ndarray]) -> "RawImpulseDetector":
+    def fit(self, healthy: dict[str, np.ndarray]) -> RawImpulseDetector:
         """`healthy` = {modality: (N_windows, n_feats)} from healthy recordings."""
         self.models = {m: _ModalityMaha.fit(X) for m, X in healthy.items()}
         fused = self.fused_score(healthy)
@@ -144,5 +144,11 @@ class RawImpulseDetector:
         return self.fused_score(feats) > self.threshold
 
 
-__all__ = ["RawImpulseDetector", "window_features", "recording_windows",
-           "FEATS", "IMPULSE_FEATS", "SPECTRAL_FEATS"]
+__all__ = [
+    "FEATS",
+    "IMPULSE_FEATS",
+    "SPECTRAL_FEATS",
+    "RawImpulseDetector",
+    "recording_windows",
+    "window_features",
+]

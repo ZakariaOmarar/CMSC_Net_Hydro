@@ -29,17 +29,14 @@ import torch
 
 from scripts.figures import style
 from scripts.figures.style import (
-    ACOUSTIC,
     ANOMALY,
     HEALTHY,
     INTERMEDIATE,
     LATE_FUSION,
     MODE_COLORS,
     REPO_ROOT,
-    VIBRATION,
     save,
 )
-
 from src.modeling.anomaly.v3_per_modality import (
     V3AcousticOnlyAdapter,
     V3VibrationOnlyAdapter,
@@ -56,7 +53,6 @@ from src.modeling.context.v2_ssl import (
     _gather_paired_segments,
     _PairedGroupedBatchSampler,
     _PairedWindowedDataset,
-    _split_segments_by_recording,
 )
 from src.modeling.encoders import PerModalityEncoder
 from src.modeling.orchestration.full_run import resolved_loader

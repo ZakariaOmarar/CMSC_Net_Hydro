@@ -28,10 +28,14 @@ REPO = Path(__file__).resolve().parents[2]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from src.modeling.eval.rq2_three_paradigm_eval import (  # noqa: E402
-    _build_loader, _build_v2, _load_state, _loader, _segments_for,
+from src.modeling.eval.rq2_three_paradigm_eval import (
+    _build_loader,
+    _build_v2,
+    _load_state,
+    _loader,
+    _segments_for,
 )
-from src.modeling.orchestration.full_run import v2_config  # noqa: E402
+from src.modeling.orchestration.full_run import v2_config
 
 DEFAULT_RUN = REPO / "results" / "runs" / "20260616_022513__full_pipeline_b5_cma"
 FEATS = ["mean", "std", "max", "crest", "kurt"]
@@ -91,7 +95,7 @@ def main() -> int:
     def _norm(feat: np.ndarray) -> np.ndarray:
         """Subtract context-local healthy mean (drop self for healthy rows)."""
         out = np.empty_like(feat)
-        _, idx_h = nn.kneighbors(ctx[h]);
+        _, idx_h = nn.kneighbors(ctx[h])
         out[h] = feat[h] - feat[h][idx_h[:, 1:]].mean(axis=1)
         _, idx_a = nn.kneighbors(ctx[~h])
         out[~h] = feat[~h] - feat[h][idx_a[:, :K]].mean(axis=1)

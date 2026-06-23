@@ -42,7 +42,7 @@ from ..context.v2_ssl import (
 )
 from ..encoders.set_transformer import PMA
 from .cnf_head import ConditionalRealNVP
-from .impulse_anchor import N_ANCHOR, append_anchor, impulse_spectral_anchor
+from .impulse_anchor import append_anchor, impulse_spectral_anchor
 from .threshold import PerClusterThresholds
 
 XtPoolKind = Literal["mean", "pma2"]

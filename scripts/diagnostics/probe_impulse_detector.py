@@ -32,8 +32,8 @@ REPO = Path(__file__).resolve().parents[2]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from src.modeling.anomaly.weak_labels import derive_knock_events, window_overlaps_any  # noqa: E402
-from src.modeling.eval.rq2_three_paradigm_eval import _loader  # noqa: E402
+from src.modeling.anomaly.weak_labels import derive_knock_events, window_overlaps_any
+from src.modeling.eval.rq2_three_paradigm_eval import _loader
 
 WIN_S, STRIDE_S = 1.0, 0.5
 FIT_DS = ("d2", "d3", "d4")     # healthy pool the detector is fit on

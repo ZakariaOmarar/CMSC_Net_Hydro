@@ -28,8 +28,8 @@ REPO = Path(__file__).resolve().parents[1]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from src.modeling.anomaly.deep_impulse_flow import DeepImpulseConfig  # noqa: E402
-from scripts.train_deep_impulse_flow import collect_features, train_and_eval  # noqa: E402
+from scripts.train_deep_impulse_flow import collect_features, train_and_eval
+from src.modeling.anomaly.deep_impulse_flow import DeepImpulseConfig
 
 # Search space — the model/training knobs (feature knobs fixed for the cache).
 SPACE = {

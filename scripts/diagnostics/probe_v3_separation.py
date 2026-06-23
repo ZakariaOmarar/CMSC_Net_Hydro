@@ -24,24 +24,22 @@ REPO = Path(__file__).resolve().parents[2]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from src.modeling.anomaly.threshold import PerClusterThresholds  # noqa: E402
-from src.modeling.eval.rq2_three_paradigm_eval import (  # noqa: E402
+from src.modeling.anomaly.v3_per_modality import (
+    V3AcousticOnlyAdapter,
+    V3VibrationOnlyAdapter,
+)
+from src.modeling.eval.rq2_three_paradigm_eval import (
     _build_loader,
     _build_v1,
     _build_v2,
     _load_state,
     _load_v3,
-    _score_cohort_three_paradigms,
-    _segments_for,
     _loader,
     _PipelineState,
-    REPO as EVAL_REPO,
+    _score_cohort_three_paradigms,
+    _segments_for,
 )
-from src.modeling.anomaly.v3_per_modality import (  # noqa: E402
-    V3AcousticOnlyAdapter,
-    V3VibrationOnlyAdapter,
-)
-from src.modeling.orchestration.full_run import v1_config, v2_config  # noqa: E402
+from src.modeling.orchestration.full_run import v1_config, v2_config
 
 DEFAULT_RUN = REPO / "results" / "runs" / "20260616_022513__full_pipeline_b5_cma"
 

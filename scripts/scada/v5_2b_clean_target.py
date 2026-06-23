@@ -32,21 +32,20 @@ from pathlib import Path
 try:  # ``datetime.UTC`` is Python 3.11+; shim it for 3.10 and earlier.
     from datetime import UTC
 except ImportError:  # pragma: no cover
-    from datetime import timezone as _timezone
 
-    UTC = _timezone.utc
+    UTC = UTC
 
 import numpy as np
 from scipy.ndimage import median_filter
 from scipy.stats import rankdata
 
-from src.ingestion.illwerke_loader import load_campaign
-from src.modeling.scada import physical_family
 from scripts.scada.v5_2_channel_mining import (
     SIG_Q,
     _benjamini_hochberg,
     _permutation_test,
 )
+from src.ingestion.illwerke_loader import load_campaign
+from src.modeling.scada import physical_family
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OUT = REPO_ROOT / "results" / "illwerke" / "scada"

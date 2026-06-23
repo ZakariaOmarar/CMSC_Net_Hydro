@@ -266,7 +266,7 @@ class TestDatasetLoader:
         for g in groups:
             try:
                 tds = self._load_one(g)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 # Skip recordings that don't match the strict adapter (e.g., a
                 # subfolder that has the wrong channel count for this spec).
                 n_failed += 1

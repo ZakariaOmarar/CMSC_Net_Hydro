@@ -60,7 +60,7 @@ CANONICAL_SEEDS = (42, 1337, 2024, 7, 99)
 def _load(p: Path):
     try:
         return json.loads(p.read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001
+    except Exception:
         return None
 
 
@@ -134,7 +134,7 @@ def main(argv=None) -> int:
 
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
 
     # Resolve the encoder runs.
@@ -162,7 +162,7 @@ def main(argv=None) -> int:
         steps.append("strict-nmi" if needs(run, "rq1_strict_nmi.json") else "strict-nmi(skip)")
         steps.append("LOPO" if needs(run, "lopo/summary.json") else "LOPO(skip)")
         steps.append("cross" if needs(run, "cross_dataset/summary.json") else "cross(skip)")
-        print(f"    seed {str(seed):<5} {run.name:42} -> {', '.join(steps)}")
+        print(f"    seed {seed!s:<5} {run.name:42} -> {', '.join(steps)}")
     refs_exist = bool(glob.glob(str(V0_DIR / "rq1_mode_refs_*.json")))
     print(f"  rq1_mode_refs (floor+ceiling): "
           f"{'skip (exists)' if refs_exist and not args.force else 'run (once)'}")
@@ -184,7 +184,7 @@ def main(argv=None) -> int:
         else:
             banner = ("*** WARNING: no CUDA device - the LOPO/cross CV will run on CPU "
                       "(slow). Check your torch CUDA build before proceeding. ***")
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         banner = f"*** WARNING: could not query torch for GPU ({e}); proceeding. ***"
     print(banner, flush=True); log.write(banner + "\n"); log.flush()
 

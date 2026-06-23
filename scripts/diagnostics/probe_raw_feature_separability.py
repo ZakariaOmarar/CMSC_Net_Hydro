@@ -31,10 +31,12 @@ REPO = Path(__file__).resolve().parents[2]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from src.modeling.eval.rq2_three_paradigm_eval import (  # noqa: E402
-    _build_loader, _loader, _segments_for,
+from src.modeling.eval.rq2_three_paradigm_eval import (
+    _build_loader,
+    _loader,
+    _segments_for,
 )
-from src.modeling.orchestration.full_run import v2_config  # noqa: E402
+from src.modeling.orchestration.full_run import v2_config
 
 
 def _auc(healthy: np.ndarray, anom: np.ndarray) -> float:

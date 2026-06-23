@@ -37,26 +37,29 @@ REPO = Path(__file__).resolve().parents[2]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from src.config import resolve_device  # noqa: E402
-from src.modeling.anomaly.threshold import PerClusterThresholds  # noqa: E402
-from src.modeling.anomaly.v3_per_modality import (  # noqa: E402
+from scripts.paradigms.run_v3_three_paradigms import (
+    _build_v1_encoder,
+    _build_v2_encoder,
+    _load_state,
+)
+from src.config import resolve_device
+from src.modeling.anomaly.event_detection import v3_real_anomaly_detection
+from src.modeling.anomaly.threshold import PerClusterThresholds
+from src.modeling.anomaly.v3_per_modality import (
     V3AcousticOnlyAdapter,
     V3VibrationOnlyAdapter,
 )
-from src.modeling.anomaly.v3_trainer import score_segments, train_v3_cnf  # noqa: E402
-from src.modeling.anomaly.event_detection import v3_real_anomaly_detection  # noqa: E402
-from src.modeling.anomaly_baselines.v0_evaluation import _plain_split, _wilson_interval  # noqa: E402
-from src.modeling.context.v2_ssl import _precompute_paired  # noqa: E402
-from src.modeling.orchestration.full_run import (  # noqa: E402
+from src.modeling.anomaly.v3_trainer import score_segments, train_v3_cnf
+from src.modeling.anomaly_baselines.v0_evaluation import (
+    _plain_split,
+    _wilson_interval,
+)
+from src.modeling.context.v2_ssl import _precompute_paired
+from src.modeling.orchestration.full_run import (
     resolved_loader,
     v1_config,
     v2_config,
     v3_config,
-)
-from scripts.paradigms.run_v3_three_paradigms import (  # noqa: E402
-    _build_v1_encoder,
-    _build_v2_encoder,
-    _load_state,
 )
 
 DATASETS = ("d1", "d2", "d3", "d4")
@@ -264,7 +267,7 @@ def main() -> int:
             )
             event_f1[name] = {k: ev.get(k) for k in ("precision", "recall", "f1")}
             _log(f"  event-level (#16): P={ev.get('precision')} R={ev.get('recall')} F1={ev.get('f1')}")
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             event_f1[name] = {"error": f"{type(e).__name__}: {e}"}
             _log(f"  event-level F1 FAILED ({type(e).__name__}: {e})")
 
@@ -345,7 +348,7 @@ def main() -> int:
 
     try:
         alert_table = _compute_alert_table()
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         alert_table = {"error": f"{type(e).__name__}: {e}"}
         _log(f"RQ2 alert table FAILED ({type(e).__name__}: {e})")
 

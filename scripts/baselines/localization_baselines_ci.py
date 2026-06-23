@@ -26,8 +26,8 @@ REPO = Path(__file__).resolve().parents[2]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from src.ingestion.test_dataset_loader import DatasetSpec, TestDatasetLoader  # noqa: E402
-from src.modeling.anomaly_baselines.srp_phat_baseline import (  # noqa: E402
+from src.ingestion.test_dataset_loader import DatasetSpec, TestDatasetLoader
+from src.modeling.anomaly_baselines.srp_phat_baseline import (
     SRPConfig,
     evaluate_srp_phat,
 )
@@ -59,7 +59,7 @@ def main(argv: list[str] | None = None) -> int:
     for ds in args.datasets:
         try:
             recs = evaluate_srp_phat(_loader(ds), SRPConfig())
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             rows[ds] = {"error": f"{type(e).__name__}: {e}"}
             print(f"{ds}: SRP-PHAT FAILED ({type(e).__name__}: {e})", flush=True)
             continue

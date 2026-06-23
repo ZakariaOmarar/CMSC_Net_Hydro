@@ -109,7 +109,7 @@ def main(argv: list[str] | None = None) -> int:
     # Make this driver's own console output encoding-proof on a cp1252 terminal.
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
 
     LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -128,7 +128,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             banner = ("*** WARNING: no CUDA device detected - this run will use the CPU "
                       "(very slow). Check your GPU driver / `torch` CUDA build before proceeding. ***")
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         banner = f"*** WARNING: could not query torch for GPU ({e}); proceeding. ***"
     print(banner, flush=True)
     log.write(banner + "\n"); log.flush()

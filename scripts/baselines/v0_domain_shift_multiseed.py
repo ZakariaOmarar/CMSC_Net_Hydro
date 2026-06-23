@@ -29,9 +29,9 @@ REPO = Path(__file__).resolve().parents[2]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from src.ingestion.test_dataset_loader import DatasetSpec, TestDatasetLoader  # noqa: E402
-from src.modeling.anomaly_baselines.lstm_ae import V0Config  # noqa: E402
-from src.modeling.anomaly_baselines.v0_evaluation import evaluate_v0_anomaly  # noqa: E402
+from src.ingestion.test_dataset_loader import DatasetSpec, TestDatasetLoader
+from src.modeling.anomaly_baselines.lstm_ae import V0Config
+from src.modeling.anomaly_baselines.v0_evaluation import evaluate_v0_anomaly
 
 DATASETS = ("d1", "d2", "d3", "d4", "d5")
 COLLAPSE_THRESHOLD = 0.20  # held-out shift FPR above this means calibration broke (4x target)
@@ -71,7 +71,7 @@ def main(argv: list[str] | None = None) -> int:
                 t0 = time.time()
                 try:
                     res = evaluate_v0_anomaly(loaders, model, modality, cfg, n_boot=0)
-                except Exception as e:  # noqa: BLE001
+                except Exception as e:
                     _log(f"seed {seed} {modality}/{model} FAILED: {type(e).__name__}: {e}")
                     continue
                 shift_ds = sorted((res.details.get("domain_shift_fpr_by_dataset") or {}).keys())

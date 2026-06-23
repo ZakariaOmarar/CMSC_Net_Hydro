@@ -168,4 +168,4 @@ def append_anchor(x, ac_feat, vib_feat, anchor_norm):
     return np.concatenate([np.asarray(x), a.astype(np.asarray(x).dtype)], axis=1)
 
 
-__all__ = ["impulse_spectral_anchor", "append_anchor", "ANCHOR_FEATURES", "N_ANCHOR"]
+__all__ = ["ANCHOR_FEATURES", "N_ANCHOR", "append_anchor", "impulse_spectral_anchor"]

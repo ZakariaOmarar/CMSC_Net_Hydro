@@ -15,8 +15,8 @@ Run with:  python -m scripts.figures.fig_signals
 
 from __future__ import annotations
 
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
 from scipy.signal import welch
 
 from scripts.figures import style
@@ -27,9 +27,8 @@ from scripts.figures.style import (
     VIBRATION,
     save,
 )
-
-from src.features.audio_spectral import compute_log_mel_spectrogram
 from src.features.acoustic_representations import compute_cwt_scalogram
+from src.features.audio_spectral import compute_log_mel_spectrogram
 from src.features.vibration_temporal import compute_vibration_input_stack
 from src.ingestion.sync_verification import (
     _decimate_to_rate,

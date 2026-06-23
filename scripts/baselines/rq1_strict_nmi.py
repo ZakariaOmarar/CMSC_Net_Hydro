@@ -32,15 +32,15 @@ REPO = Path(__file__).resolve().parents[2]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-import scripts.diagnostics.reeval_k3 as R  # noqa: E402
-from src.modeling.context.cluster_metric import cluster_purity_and_nmi  # noqa: E402
-from src.modeling.context.v2_ssl import (  # noqa: E402
+import scripts.diagnostics.reeval_k3 as R
+from src.modeling.context.cluster_metric import cluster_purity_and_nmi
+from src.modeling.context.v2_ssl import (
     _collate,
     _PairedGroupedBatchSampler,
     _PairedWindowedDataset,
 )
-from src.modeling.encoders import PerModalityEncoder  # noqa: E402
-from src.modeling.orchestration.full_run import v2_config  # noqa: E402
+from src.modeling.encoders import PerModalityEncoder
+from src.modeling.orchestration.full_run import v2_config
 
 
 def _newest_run() -> Path | None:
@@ -104,7 +104,7 @@ def main(argv: list[str] | None = None) -> int:
     for name in ("acoustic", "vibration"):
         try:
             out["strict"][f"v1_{name}"] = _v1_strict(run, name, segs, cfg_clean)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             out["strict"][f"v1_{name}"] = {"error": f"{type(e).__name__}: {e}"}
     try:
         enc = R._load_encoder(run / "v2" / "encoder.pt", cfg_clean, context_mode="joint_pma")
@@ -116,7 +116,7 @@ def main(argv: list[str] | None = None) -> int:
                 "nmi": float(m["nmi"]), "purity": float(m["purity"]),
                 "n_windows": int(m["n_windows"]),
             }
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         out["strict"]["v2_fusion"] = {"error": f"{type(e).__name__}: {e}"}
 
     out_path = run / "rq1_strict_nmi.json"

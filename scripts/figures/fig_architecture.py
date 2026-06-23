@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.patches import Circle, FancyArrowPatch
+from matplotlib.patches import Circle
 
 from scripts.figures import style
 from scripts.figures.fig_schematics import arrow, blank_axes, box

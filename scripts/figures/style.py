@@ -16,7 +16,7 @@ from pathlib import Path
 import matplotlib
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
+import matplotlib.pyplot as plt
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIG_DIR = REPO_ROOT / "docs" / "final_thesis" / "figures"
@@ -93,7 +93,7 @@ def apply_style() -> None:
     )
 
 
-def save(fig: "plt.Figure", name: str, *, png_only: bool = False) -> None:
+def save(fig: plt.Figure, name: str, *, png_only: bool = False) -> None:
     """Save a figure as PDF (vector, for LaTeX) and PNG (preview)."""
     FIG_DIR.mkdir(parents=True, exist_ok=True)
     png = FIG_DIR / f"{name}.png"
