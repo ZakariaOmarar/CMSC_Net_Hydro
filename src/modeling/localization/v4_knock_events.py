@@ -109,7 +109,7 @@ class KnockEventConfig:
     bandpass_hz: tuple[float, float] | None = None
     # Test-time-augmentation multi-crop: emit `crops_per_knock` crops per knock,
     # their centres spread symmetrically over ±`crop_jitter_seconds`.  Each is an
-    # independent localization estimate of the SAME knock, so aggregating them at
+    # independent localization estimate of the same knock, so aggregating them at
     # inference multiplies the √n sharpening the per-position aggregation already
     # exploits.  `crops_per_knock=1` reproduces the single-crop behaviour.
     crops_per_knock: int = 1
@@ -178,7 +178,7 @@ def precompute_v4_knock_event_samples(
     impulse+spectral anchor is appended, so the V4 gate scores exactly the input
     the conditional V3 flow trained on.
 
-    Returns the expanded sample list.  Feed it ONLY to position- or recording-
+    Returns the expanded sample list.  Feed it only to position- or recording-
     grouped splitters (see module docstring); `assert_no_position_leak` checks
     that invariant downstream.
     """
@@ -368,7 +368,7 @@ def precompute_v4_knock_event_samples(
 def assert_no_position_leak(
     train: list[V4Sample], val: list[V4Sample], *, ndigits: int = 3
 ) -> None:
-    """Raise if any target position appears in BOTH splits (the leak guard).
+    """Raise if any target position appears in both splits (the leak guard).
 
     Per-knock expansion is only honest under a position-disjoint split; this is
     the cheap runtime check that a caller actually used one.

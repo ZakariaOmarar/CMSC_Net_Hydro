@@ -9,7 +9,6 @@ scripts/
 ├── paradigms/          RQ2 / RQ3 paradigm-comparison trainers
 ├── sweeps/             single-stage hyperparameter sweeps
 ├── diagnostics/        one-off investigations (run, never imported)
-├── hop_length_study/   concluded acoustic-feature study (historical)
 └── utils/              small reusable tools
 ```
 
@@ -62,8 +61,8 @@ Sequence many training runs into one end-to-end experiment.
 
 ## `diagnostics/` — one-off investigations
 
-Run, never imported. Relocated here from `src/modeling/orchestration/` during
-the thesis-submission cleanup.
+Run, never imported. These live outside `src/` so they stay out of the importable
+library.
 
 | Script | Purpose |
 |---|---|
@@ -79,22 +78,3 @@ the thesis-submission cleanup.
 |---|---|
 | `derive_dataset_sampling_rate.py` | Canonical way to fill a new dataset's `accel_target_sr` from raw CSV timestamps. `--apply` writes it back into the YAML. |
 | `visualize_sensor_knock_positions.py` | Plots sensor + knock positions for a dataset (figure helper). |
-
-## `hop_length_study/` — concluded, historical
-
-The acoustic-feature grid search is **settled**: it selected
-`n_fft=4096, hop_length=2048, n_mels=96`, now hard-wired in
-[`ACOUSTIC_FEATURES`](../src/config/architecture.py) (chapter 3 §3.4.2). These
-scripts are retained for provenance and are not part of the live pipeline.
-`analyze_hop_length_full_grid.py` is the canonical run that produced the
-decision; the rest are earlier or narrower probes of the same question.
-
-| Script | Role |
-|---|---|
-| `analyze_hop_length_full_grid.py` | **Canonical** full-grid (n_fft × hop × n_mels) sweep on all 5 datasets → `results/hop_grid_sweep.json`. |
-| `analyze_hop_length_empirical.py` | Earlier evidence-driven hop analysis on real data (mode separability + knock SNR). |
-| `ablation_hop_length.py` | Pre-registered hop-length ablation runner (synthetic-AUC protocol). |
-| `analyze_hop_ablation.py` | Hypothesis test + effect sizes on the `ablation_hop_length.py` output. |
-| `full_run_hop43.py` | Re-runs the full pipeline at the alternative `hop=43` condition for head-to-head comparison. |
-| `compare_hop43_vs_baseline.py` | Side-by-side `hop=43` vs `hop=512` metric table. |
-| `hop_comparison_d4.py` | Quick single-recording hop=512 vs hop=43 spot check on a D4 knock. |

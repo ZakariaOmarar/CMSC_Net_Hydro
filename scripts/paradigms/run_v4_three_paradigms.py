@@ -16,7 +16,7 @@ Paradigms (per the approved plan):
     chained-system "Intermediate Fusion" paradigm).
 
 All four learned trainings share the same precomputed V4 samples
-(`precompute_v4_samples` is called ONCE — multilateration is included in
+(`precompute_v4_samples` is called once — multilateration is included in
 the sample object per R3.3, so paradigm switching is just a config swap).
 This keeps per-window predictions directly comparable across paradigms.
 
@@ -98,7 +98,7 @@ def _save_predictions(
     # window order, which lives in `result.val_targets` order.  Since
     # `_split_samples_by_recording` keeps insertion order within val_keys,
     # we just iterate val samples in the order they appear in `samples`
-    # AFTER filtering to val_recording_ids.
+    # after filtering to val_recording_ids.
     val_set = set(result.val_recording_ids)
     for s in samples:
         key = f"{Path(s.source_dir).name}/{s.recording_id}"
@@ -132,7 +132,7 @@ def _train_one_v4(
     Each labelled recording is held out in turn; the head trains on the rest and
     the held-out recording's per-knock predictions are event-aggregated into one
     estimate.  We report the mean ± std of the per-recording (aggregated) MAE
-    across folds — a cross-validated, low-variance paradigm number, NOT the
+    across folds — a cross-validated, low-variance paradigm number, not the
     single random 70/30 split this used to do (which gave one high-variance
     estimate whose ranking could flip with the split).
     """

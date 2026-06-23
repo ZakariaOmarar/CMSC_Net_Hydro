@@ -487,7 +487,7 @@ def main() -> None:
     if not top5:
         log("FATAL: no valid cells to promote to Phase 4 — aborting.")
         return
-    # Phase 4 = re-run each cell on FULL pipeline (no --skip flags).  Cells
+    # Phase 4 = re-run each cell on full pipeline (no --skip flags).  Cells
     # picked from p3_/p7a_/p7b_ keep the same base_cell (p2_winner); a
     # p2_winner picked here uses no --base-cell.
     p4_results: dict[str, tuple[Path | None, dict | None]] = {}

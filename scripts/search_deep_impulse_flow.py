@@ -1,7 +1,7 @@
 """Hyperparameter search for the deep impulse-aware anomaly detector.
 
-Collects the (cached) features ONCE, then random-searches the model/training
-hyperparameters, training each config with the SAME pipeline as production
+Collects the (cached) features once, then random-searches the model/training
+hyperparameters, training each config with the same pipeline as production
 (scripts.train_deep_impulse_flow.train_and_eval).  Ranks configs by the mean
 recording-level ROC over the test datasets, prints the leaderboard, a
 per-hyperparameter marginal-effect analysis ("which value helps most"), and the
@@ -114,7 +114,7 @@ def main() -> int:
     if best:
         print(f"\nBEST objective={best['objective']:.4f}  per-ds={best['per_ds']}")
         print(f"BEST params = {best['params']}")
-        # write the FULL config (with full epochs) so the multi-seed run loads it
+        # write the full config (with full epochs) so the multi-seed run loads it
         full = replace(base, epochs=40, **best["params"])
         best_cfg_path.parent.mkdir(parents=True, exist_ok=True)
         best_cfg_path.write_text(json.dumps(asdict(full), indent=2), encoding="utf-8")

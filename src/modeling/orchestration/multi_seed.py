@@ -101,7 +101,7 @@ def main(seeds: list[int], quick: bool = False, run_v0_baselines: bool = False) 
         print(f"Seed {seed} finished in {elapsed_min:.1f} min")
 
         per_seed_metrics.append(metrics)
-        # Build the headline directly from the metrics full_run returned.  Do NOT
+        # Build the headline directly from the metrics full_run returned.  Do not
         # read it back via list_runs(): full_run writes its run dir without
         # updating results/runs/index.json, so the index is stale and
         # `list_runs()[0]` is not this seed's run.

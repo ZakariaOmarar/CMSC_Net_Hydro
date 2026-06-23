@@ -1,23 +1,23 @@
-"""Deep impulse-aware anomaly flow — learned raw front-end + anchored flow.
+"""Deep impulse-aware anomaly flow: a learned raw front-end plus an anchored flow.
 
-Why this exists: the SSL/CMA encoders optimise away the impulsive/spectral cues
-a knock produces (Ridge bottleneck probe: embedding can't predict crest, R²≈0).
-This model fixes that at the source:
+The SSL/CMA encoders tend to discard the impulsive and spectral cues a knock
+produces; a Ridge bottleneck probe shows the embedding cannot predict crest
+factor (R² close to 0). This model addresses that directly:
 
-  * a 1-D CNN reads the RAW waveform window directly (per modality) and is
-    trained END-TO-END with a conditional normalizing flow on the HEALTHY
-    negative-log-likelihood — a ONE-CLASS density objective, NOT contrastive /
-    CMA, so transients are preserved instead of collapsed;
-  * the validated hand-crafted impulse + spectral features are CONCATENATED to
-    the learned embedding as a recall ANCHOR — they cannot be optimised away, so
-    no knock slips through even if a new campaign looks different, and they also
-    prevent the deep one-class objective from collapsing to a trivial solution;
-  * a learned low-dim context head + the flow's context-conditional base
-    normalise the healthy density per operating regime, so one global threshold
-    transfers across campaigns.
+  - A 1-D CNN reads the raw waveform window per modality and is trained
+    end-to-end with a conditional normalizing flow on the healthy
+    negative-log-likelihood. Because the objective is one-class density rather
+    than contrastive/CMA, transients are preserved instead of collapsed.
+  - The hand-crafted impulse and spectral features are concatenated to the
+    learned embedding as a recall anchor. They cannot be optimised away, so a
+    knock still registers even when a new campaign looks different, and they
+    keep the one-class objective from collapsing to a trivial solution.
+  - A learned low-dimensional context head and the flow's context-conditional
+    base normalise the healthy density per operating regime, so one global
+    threshold transfers across campaigns.
 
-Anomaly score = -log p([cnn_emb ⊕ anchor] | context).  Fit on healthy only;
-sum-fuse the per-modality scores.
+The anomaly score is -log p([cnn_emb ⊕ anchor] | context). The model is fit on
+healthy windows only, and the per-modality scores are sum-fused.
 """
 from __future__ import annotations
 

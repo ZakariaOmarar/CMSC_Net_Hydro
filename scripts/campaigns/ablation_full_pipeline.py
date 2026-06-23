@@ -107,8 +107,8 @@ _EMBED_DIM_LEVELS: dict[str, int] = {
 }
 
 # Phase 7a — SSL hyperparameter neighborhood around b5_cma.  The NT-Xent
-# temperature is set on BOTH V1SSLConfig and V2SSLConfig (V1→V2 weight
-# transfer does NOT enforce parity here, but a mismatch would change the
+# temperature is set on both V1SSLConfig and V2SSLConfig (V1→V2 weight
+# transfer does not enforce parity here, but a mismatch would change the
 # contrastive geometry mid-pipeline; sweeping them jointly keeps the
 # interpretation clean).  CMA weight applies only to V2 (the cross-modal
 # alignment loss lives there).
@@ -141,7 +141,7 @@ _LMM_WEIGHT_LEVELS: dict[str, float] = {
 }
 
 # Acoustic-improvement axes (vibration is a settled dead-end for fusion, so the
-# representation lever is the acoustic pathway).  These two knobs were NEVER
+# representation lever is the acoustic pathway).  These two knobs were never
 # swept by the breadth campaign:
 #   * acoustic_cnn_width_mult — R1a tested 2× and reverted it because the wider
 #     CNN over-fit; now that early-stop + weight-decay + dropout control
@@ -256,7 +256,7 @@ def _apply_pa_cell(
 
     Standalone (no base cell): builds on the orchestrator defaults, which are
     the post-baseline_v2 settings (early-stop + wd=1e-4 + dropout).  Width +
-    CWT scales are set on BOTH V1 and V2 so the V1→V2 weight transfer matches.
+    CWT scales are set on both V1 and V2 so the V1→V2 weight transfer matches.
     """
     parts = cell_id.split("_")
     if len(parts) != 3 or parts[0] != "pa":

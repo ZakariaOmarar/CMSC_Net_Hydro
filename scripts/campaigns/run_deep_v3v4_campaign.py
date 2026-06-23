@@ -242,7 +242,7 @@ def main() -> None:
     v3_winner_dir = _find_run_dir("v3deep", v3_winner, 42)
 
     # ---- Phase 2: deep V4 gated by best V3 ----
-    # Shared sample cache so the 27 cells precompute V4 samples exactly ONCE
+    # Shared sample cache so the 27 cells precompute V4 samples exactly once
     # (the first cell writes it, the rest load it) instead of 27× redundant
     # SRP-PHAT precompute.  Keyed by encoder so a different encoder-run won't
     # reuse a stale cache.

@@ -254,7 +254,7 @@ def main(argv: list[str] | None = None) -> int:
 
         # --- Step 11: per-seed localization CV spread + cross-seed aggregate --
         # multi_seed trained one encoder per seed; run LOPO + cross-session on
-        # EACH (the localization headline's seed spread) and aggregate into
+        # each (the localization headline's seed spread) and aggregate into
         # results/reports/multiseed_complete_*.{json,md}.
         rc = _run("11/11 run_multiseed_complete (per-seed LOPO+cross + aggregate)",
                   [PY, "-m", "scripts.run_multiseed_complete",

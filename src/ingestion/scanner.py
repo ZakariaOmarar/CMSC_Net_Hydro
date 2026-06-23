@@ -8,7 +8,7 @@ from pathlib import Path
 
 # NOTE on the `sensor` capture group: `[^_]+` matches a single underscore-free
 # token.  For D3 stereo filenames like `recorded_D_l_Pump.wav` this matches
-# `sensor="D"` and `recording="l_Pump"` — the `D_l` stereo-channel ID is NOT
+# `sensor="D"` and `recording="l_Pump"` — the `D_l` stereo-channel ID is not
 # preserved by the scanner.  This is harmless in practice because:
 #   - The scanner only uses `sensor` for flat-layout *recording grouping*, where
 #     the per-recording sensor identity is rebuilt downstream by

@@ -173,7 +173,7 @@ class V4Config:
 
     # Early stopping on val total loss.  Patience=5 (vs V1/V2's 3) because V4
     # has only ~10 labeled recordings and val loss is dramatically noisier.
-    # Tensor-clone snapshot (NOT copy.deepcopy) — see V1 trainer for rationale.
+    # Tensor-clone snapshot (not copy.deepcopy) — see V1 trainer for rationale.
     patience: int = 5
     restore_best: bool = True
     early_stop_min_delta: float = 1e-3
@@ -243,7 +243,7 @@ def precompute_v4_samples(
 
     ``v3_anchor_norm`` (healthy mean/std from V3 training) appends the
     standardized impulse+spectral anchor to ``x_for_v3`` so the V4 gate scores
-    EXACTLY the input the conditional V3 flow was trained on (RQ2 anchor
+    exactly the input the conditional V3 flow was trained on (RQ2 anchor
     injection).  Must match ``V3Result.anchor_mean/anchor_std``.
 
     - Spatial labels come from `segment.spatial_label` if present, with an
@@ -338,7 +338,7 @@ def precompute_v4_samples(
             continue
 
         # B2 (2026-05-23) — sparse-anomaly window restriction.  RandomFault
-        # recordings carry the knock position on EVERY window even though the
+        # recordings carry the knock position on every window even though the
         # knock occupies only a sparse sub-span; training V4 to localise the
         # knock on healthy windows is label noise.  Derive weak knock
         # intervals from the impulse envelope and keep only windows that
@@ -353,7 +353,7 @@ def precompute_v4_samples(
                 # selection: use the provided per-recording intervals instead
                 # of the impulse-envelope weak GT.  Empty list for a recording
                 # means V3 flagged NOTHING there → drop the whole recording
-                # (NOT "keep all" — that is only the impulse-path fallback).
+                # (not "keep all" — that is only the impulse-path fallback).
                 knock_intervals = knock_intervals_override.get(s.recording_id, [])
                 if not knock_intervals:
                     continue
@@ -641,7 +641,7 @@ class V4Result:
     # pass on train_samples after restoring the best head.  Enables a proper
     # metres-scale generalization gap `val_mae_3d - train_mae_3d`.  The
     # `train_loss_history[-1]` values are smooth-L1 in the loss_scale-cm
-    # space and are NOT in metres, despite a legacy field of that name in
+    # space and are not in metres, despite a legacy field of that name in
     # the deep-sweep metrics.json.
     train_mae_3d: float = float("nan")
     train_p95_3d: float = float("nan")
@@ -807,7 +807,7 @@ def train_v4_localization(
     aug_gen = torch.Generator(device="cpu")
     aug_gen.manual_seed(cfg.seed)
 
-    # Early-stop bookkeeping — tensor-clone snapshot, NOT copy.deepcopy.
+    # Early-stop bookkeeping — tensor-clone snapshot, not copy.deepcopy.
     # See V1 trainer for the RAM-fragmentation rationale.  V4 has only
     # ~10 labeled recordings so val loss is dramatically noisier than
     # V1/V2's — patience=5 + min_delta=1e-3 reflect that.
@@ -1033,7 +1033,7 @@ def train_v4_localization(
     # Final TRAIN MAE pass — same forward loop as val, in metres.  Lets the
     # caller report `train_val_mae_gap_m = val_mae - train_mae` (the proper
     # metres-scale gap; the smooth-L1 loss-history values are in loss_scale-cm
-    # space and are NOT metres).
+    # space and are not metres).
     train_mae_3d_v = float("nan")
     train_p95_3d_v = float("nan")
     if train_samples:

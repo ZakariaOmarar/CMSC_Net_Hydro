@@ -93,7 +93,7 @@ def extract_mode_features(
     """
     fs = int(segment.segment.mic_sample_rate)
     # V0 baselines deliberately use `cfg.hop_length=512` (coarse 31.25 Hz
-    # acoustic frame rate) for fast baseline computation.  They do NOT go
+    # acoustic frame rate) for fast baseline computation.  They do not go
     # through V2's cross-attention, so the registry's per-dataset hop
     # (`hop_for_dataset` in v2_ssl) does not apply.
     hop = cfg.hop_length

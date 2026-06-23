@@ -6,16 +6,16 @@ produces — a Ridge probe shows the flow-input embedding cannot even predict th
 raw crest factor (R^2≈0.1; vibration R^2≈0).  A handful of cheap physical
 statistics on the raw features separate every campaign (acoustic raw-AUC up to
 0.98) and, once regime-normalised against the learned context, a single global
-detector reaches AUC 0.93–0.98 with BOTH modalities contributing — which the
+detector reaches AUC 0.93–0.98 with both modalities contributing — which the
 deep pipeline never achieved (fusion fell to 0.56 on D4).
 
-Pipeline (all fit on HEALTHY only — label-free):
+Pipeline (all fit on healthy only — label-free):
   1. physical stats per window per modality: mean, std, max, crest, kurt;
   2. regime-normalise: residual = feat - μ(c), μ from the V2 context c
      ("knn" = local healthy mean among k neighbours; "ridge" = parametric,
      deployable, no memory bank);
   3. per-modality squared-Mahalanobis on the residuals, z-scored by healthy;
-  4. SUM-fuse the per-modality z-scores → one global score + one global
+  4. sum-fuse the per-modality z-scores → one global score + one global
      threshold (the (1-target_fpr) quantile of the healthy fused score).
 """
 from __future__ import annotations
@@ -127,7 +127,7 @@ class PhysicalFeatureDetector:
         return m
 
     def fit(self, phys: dict[str, np.ndarray], ctx: np.ndarray) -> "PhysicalFeatureDetector":
-        """Fit on HEALTHY windows.  `phys` = {modality: (N, n_feat)}; `ctx` = (N, c_dim)."""
+        """Fit on healthy windows.  `phys` = {modality: (N, n_feat)}; `ctx` = (N, c_dim)."""
         self.models = {
             mod: self._fit_modality(phys[mod], ctx, self.normalizer, self.k, self.ridge_alpha)
             for mod in phys

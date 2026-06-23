@@ -279,7 +279,7 @@ def sliding_window_v3_inference(
     finer stride (e.g. 250 ms), producing one V3 score every 250 ms
     rather than every 1 s.
 
-    ``xt_pool`` MUST be the same learned ``_XtPool`` the flow was trained
+    ``xt_pool`` must be the same learned ``_XtPool`` the flow was trained
     with (``V3Result.xt_pool``).  Omitting it (None) falls back to the legacy
     mean-pool, which is INCONSISTENT with a flow trained under ``xt_pool=
     "pma2"`` and miscalibrates the scores.  Pass ``res.xt_pool`` so inference

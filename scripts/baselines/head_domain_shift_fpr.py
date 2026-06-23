@@ -1,6 +1,6 @@
 """Compute the V3 head's domain-shift healthy FPR on the V0 protocol.
 
-The three-paradigm V3 artifacts do NOT persist the learned ``xt_pool`` (pma2),
+The three-paradigm V3 artifacts do not persist the learned ``xt_pool`` (pma2),
 so a saved flow cannot be re-scored (NLL blows up; see
 ``scripts/diagnostics/probe_v3_score_scale.py``).  This script therefore
 *retrains* the three V3 pipelines (acoustic / vibration / fusion) from the
@@ -78,7 +78,7 @@ def _score_healthy_per_recording(encoder, flow, xt_pool, loaders, v2_cfg, device
     Returns ``(scores, contexts, rec_key, ds_id)`` aligned per window.  Each
     recording is scored on its own so its windows carry a single rec id.
 
-    ``win_override`` is V3's per-dataset ``window_seconds_override`` — it MUST be
+    ``win_override`` is V3's per-dataset ``window_seconds_override`` — it must be
     threaded through so the scored windows match the ones the flow trained on
     (otherwise NLL blows up exactly like the legacy mean-pool mismatch).
     """
@@ -230,7 +230,7 @@ def main() -> int:
         _log(f"training V3-{name} ...")
         res = train_v3_cnf(enc, loaders, v2_cfg=v2_cfg, v3_cfg=v3_cfg)
         # When the flow was trained with the impulse+spectral anchor, it has
-        # +N_ANCHOR input dims; the same standardized anchor MUST be appended at
+        # +N_ANCHOR input dims; the same standardized anchor must be appended at
         # scoring time or flow.dim (e.g. 72) won't match the scored x (e.g. 64).
         anchor_norm = (
             (res.anchor_mean, res.anchor_std) if res.anchor_mean is not None else None

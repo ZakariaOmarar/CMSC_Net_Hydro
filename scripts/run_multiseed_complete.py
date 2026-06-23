@@ -4,7 +4,7 @@ After a multi-seed sweep you have one full-pipeline run per encoder seed, but th
 localization cross-validation (LOPO + cross-session) and the RQ1 floor/ceiling
 were only ever produced for a single run.  This driver fills exactly those gaps
 -- the runs the Chapter 5/6 audit flagged as still missing -- and then aggregates
-everything into one median/spread report.  It does NOT re-run anything already
+everything into one median/spread report.  It does not re-run anything already
 complete.
 
 Per seed run (skipped when its output already exists; ``--force`` to redo):
@@ -24,7 +24,7 @@ Finally:
     * aggregate_multiseed median [min, max] / mean+/-std across seeds ->
                           results/reports/multiseed_complete_<ts>.{json,md}
 
-Already complete in your result set and therefore NOT re-run here:
+Already complete in your result set and therefore not re-run here:
 run_v0_anomaly, head_domain_shift_fpr, v0_domain_shift_multiseed.
 
 Usage::

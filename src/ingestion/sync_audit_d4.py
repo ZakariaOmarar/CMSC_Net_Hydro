@@ -1,7 +1,7 @@
 """F3 — D4 sync diagnostic: raw vs peak vibration cross-check.
 
-Why this exists
----------------
+Background
+----------
 
 The 2026-05-13 full-run cross-modal sync stage refused to correct any D4
 recording (9 / 9 gated out as ``low_conf`` with mean confidence 1.03 and

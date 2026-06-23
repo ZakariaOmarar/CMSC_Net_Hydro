@@ -79,7 +79,7 @@ def main() -> int:
         _PipelineState("fusion", v2, flow_f, th_f, xt_f, anc_f),
     ]
 
-    # Score each dataset's HEALTHY and ANOMALY partitions separately, so we can
+    # Score each dataset's healthy and ANOMALY partitions separately, so we can
     # compare an anomaly cohort against (a) the GLOBAL healthy baseline and
     # (b) its OWN-dataset healthy baseline.  If a dataset runs in a different
     # operating regime, the global baseline confounds "anomalous" with "different

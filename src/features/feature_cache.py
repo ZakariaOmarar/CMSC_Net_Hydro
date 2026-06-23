@@ -133,7 +133,7 @@ def disk_cached_feature(fn: Callable[..., np.ndarray]) -> Callable[..., np.ndarr
         cdir = _cache_dir()
         if cdir is None or sig is None:
             return fn(*args, **kwargs)
-        # Bind to the signature and fill defaults so the key reflects EVERY
+        # Bind to the signature and fill defaults so the key reflects every
         # effective parameter, not just the ones the caller passed explicitly.
         try:
             bound = sig.bind(*args, **kwargs)

@@ -141,7 +141,7 @@ def _d1_default_geometry() -> list[SensorPosition]:
 
     Mics B, C, D, E sit on a 0.10 m circle at z = 0.20 m at 0 / 90 / 180 / 270°.
     Vibrations B, C, D, E sit on a 0.06 m circle at z = 0.0 m offset 45°.
-    These are NOT physical positions; they exist so position embeddings remain
+    These are not physical positions; they exist so position embeddings remain
     well-defined and consistent across runs.
 
     **Scale rationale (corrected 2026-05-20):**  Two physically distinct
@@ -167,7 +167,7 @@ def _d1_default_geometry() -> list[SensorPosition]:
 
     The placeholder D1 geometry (0.10 m / 0.06 m circles) preserves the
     *role* (deterministic positional-embedding input) at a defensible scale
-    matched to D3/D4.  It is NOT a model of D1's rectangular rig — D1's true
+    matched to D3/D4.  It is not a model of D1's rectangular rig — D1's true
     sensor layout is unrecorded — and should not be used for any geometry-
     dependent computation (TDOA, SRP-PHAT, etc.).
     """

@@ -20,7 +20,7 @@ Usage:
 
 The driver expects a V2 encoder + V3 thresholds artefact from a
 previous `full_run.py` invocation (in `results/full_run/v2/` and
-`results/full_run/v3/`).  It does NOT retrain V1 / V2 / V3.  For
+`results/full_run/v3/`).  It does not retrain V1 / V2 / V3.  For
 each of the K labeled V4 recordings, it:
 
   1. Re-precomputes the V4 candidate samples on **all** labeled

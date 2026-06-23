@@ -6,7 +6,7 @@ training — no V1/V2 retraining per cell, ~5-10× cheaper than the full
 pipeline) and selects by the **real-anomaly F1** (the B4 metric, vs weak
 knock GT) under a **train/val NLL-gap guardrail**.
 
-Selection objective (the train/val gap is a guardrail, NOT the optimisation
+Selection objective (the train/val gap is a guardrail, not the optimisation
 target): maximize ``real_anomaly_f1`` (+ synthetic-AUC@+5dB as tie-break),
 **subject to** ``|val_nll − train_nll| ≤ gap_guardrail``. A cell that shrinks
 the gap by tanking F1 is rejected.
@@ -143,7 +143,7 @@ def _evaluate(res, v2_encoder, anom_loaders, anom_segments, v2_cfg, v3_cfg) -> d
             out["synthetic_auc"] = auc.snr_db_to_auc
     except Exception as e:
         out["synthetic_auc"] = {"skipped": f"{type(e).__name__}: {e}"}
-    # V3-vs-simple: per-cluster diagonal-Gaussian baseline on the SAME x/c the
+    # V3-vs-simple: per-cluster diagonal-Gaussian baseline on the same x/c the
     # flow trained on.  Δ = V3_val_NLL − baseline_val_NLL; Δ<0 ⇒ V3 beats the
     # simple density (earns its complexity).  Thesis "deep-vs-simple" number.
     try:
@@ -250,7 +250,7 @@ def main() -> None:
                          p95=res.thresholds.p95, p99=res.thresholds.p99,
                          n_per_cluster=res.thresholds.n_per_cluster)
                 # Persist the learned xt_pool so V4 gating (and any re-scoring)
-                # uses the SAME pooling the flow was trained with.  None when
+                # uses the same pooling the flow was trained with.  None when
                 # the legacy mean-pool path was used.
                 if res.xt_pool is not None:
                     torch.save(res.xt_pool.state_dict(), out_dir / "xt_pool.pt")

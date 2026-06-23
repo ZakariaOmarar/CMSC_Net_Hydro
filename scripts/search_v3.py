@@ -1,11 +1,11 @@
 """Hyperparameter search for the conditional V3 anomaly detector (RQ2).
 
-Tunes BOTH RQ2 arms fairly so the thesis ablation is best-vs-best, not
+Tunes both RQ2 arms fairly so the thesis ablation is best-vs-best, not
 tuned-vs-untuned:
   * "anchor"    — conditioning + impulse/spectral anchor (the new headline V3)
   * "cond_only" — conditioning only (no anchor; the ablation baseline)
 
-It trains the REAL pipeline V3 (``train_v3_cnf`` on the frozen V2 of an existing
+It trains the real pipeline V3 (``train_v3_cnf`` on the frozen V2 of an existing
 run, so it does not re-pay the expensive V1/V2 stages) and scores the actual
 anomaly cohorts.  Objective per trial:
 

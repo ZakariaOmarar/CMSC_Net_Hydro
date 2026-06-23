@@ -11,7 +11,7 @@ Scoped deliberately to the constants worth centralising — the ones that:
     `_PairedSegment`, log-mel time grid, CWT alignment, and V2 cross-
     attention temporal cadence — change it in one place).
 
-NOT scoped here, intentionally:
+not scoped here, intentionally:
 
   * Training schedules (LR, batch size, epochs, weight decay,
     temperature) — these belong on each stage's dataclass because they
@@ -270,7 +270,7 @@ WINDOWING = _Windowing()
 
 
 # ============================================================================
-# 7 · V3 anomaly head — architectural choices (NOT training schedule)
+# 7 · V3 anomaly head — architectural choices (not training schedule)
 # ============================================================================
 
 
@@ -324,7 +324,7 @@ V3_ANOMALY = _V3Anomaly()
 
 
 # ============================================================================
-# 8 · V4 localisation — architectural choices (NOT training schedule / aug)
+# 8 · V4 localisation — architectural choices (not training schedule / aug)
 # ============================================================================
 
 

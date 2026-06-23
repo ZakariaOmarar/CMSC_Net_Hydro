@@ -1,4 +1,4 @@
-"""Probe: is each campaign's anomaly signal PHYSICALLY present in BOTH modalities?
+"""Probe: is each campaign's anomaly signal PHYSICALLY present in both modalities?
 
 Model-free.  For every window it computes a handful of cheap, interpretable
 statistics directly on the precomputed acoustic / vibration features
@@ -15,7 +15,7 @@ Interpretation:
   * If even the best raw feature is at chance, that sensor is physically blind
     to that fault and single-modality dominance is a hard limit.
 
-AUC is computed against the SAME-dataset healthy (regime-matched) so the
+AUC is computed against the same-dataset healthy (regime-matched) so the
 operating-condition offset does not confound the comparison.
 
 Run:  python -m scripts.diagnostics.probe_raw_feature_separability
@@ -108,11 +108,11 @@ def main() -> int:
             print(f"{dn:<6} " + " ".join(f"{a:>7.3f}" for a in row)
                   + f"  {best_f}={best:.3f}")
 
-    # ----- physical-feature anomaly detector + SUM late-fusion -----
+    # ----- physical-feature anomaly detector + sum late-fusion -----
     # Per modality: fit a Gaussian on OWN-dataset healthy feature vectors,
     # score by squared Mahalanobis distance, z-score against healthy.  Fuse the
     # two modalities by SUMMING the z-scored scores (conditional-independence
-    # late fusion) so BOTH modalities contribute.  Tests whether a simple
+    # late fusion) so both modalities contribute.  Tests whether a simple
     # physical-feature detector + sum-fusion makes both modalities help.
     def _mat(d: dict) -> np.ndarray:
         return np.stack([d[f] for f in feats], axis=1)

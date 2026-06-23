@@ -53,7 +53,7 @@ def v1_config(quick: bool) -> V1SSLConfig:
         weight_decay=1e-4,
         temperature=0.1,
         val_ratio=0.3,
-        # n_mels / n_fft / hop_length intentionally NOT set here — inherited
+        # n_mels / n_fft / hop_length intentionally not set here — inherited
         # from `ACOUSTIC_FEATURES` in src/config/architecture.py:
         #   n_fft=4096, hop_length=2048, n_mels=96
         # These are the Pareto-optimal values from the empirical grid search
@@ -130,7 +130,7 @@ def v2_config(quick: bool) -> V2SSLConfig:
         # CWT enabled — see v1_config note.
         use_cwt=True,
         # Multi-scale window cadence — sourced from the dataset registry
-        # (configs/datasets/d*.yaml). V1 and V2 MUST use the same dict
+        # (configs/datasets/d*.yaml). V1 and V2 must use the same dict
         # (V1→V2 weight transfer enforces shape parity per scale).
         window_scales_seconds_per_dataset={
             m.id: m.window_scales_seconds for m in REGISTRY

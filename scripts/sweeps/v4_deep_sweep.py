@@ -1,6 +1,6 @@
 """Deep V4 localization sweep — Phase 2 of the V3-first deep campaign.
 
-Runs AFTER the Phase-1 V3 winner is chosen, because V4 is gated by V3.
+Runs after the Phase-1 V3 winner is chosen, because V4 is gated by V3.
 Trains the V4 head individually against a FROZEN V2 encoder (samples cached
 once; ~10 min/cell) and evaluates on the **held-out positions** (localise-an-
 unseen-position), **gated by the Phase-1 V3** (deployment-faithful: V4 only
@@ -287,7 +287,7 @@ def main() -> None:
         base = Path(args.samples_cache)
         cache_path = base.with_name(f"{base.stem}_{args.train_select}{base.suffix}")
 
-    # Load Phase-1 V3 up front — needed BEFORE precompute for v3gated training
+    # Load Phase-1 V3 up front — needed before precompute for v3gated training
     # selection, and after for gated eval.  c_dim from any labeled sample's
     # context dim == V2 embed_dim.
     v3_holder = None
@@ -321,7 +321,7 @@ def main() -> None:
         restrict = args.train_select != "all"
         override = None
         if args.train_select == "v3gated":
-            # Run the Phase-1 V3 over EVERY labeled recording to get its
+            # Run the Phase-1 V3 over every labeled recording to get its
             # flagged intervals → those become the training windows.  This is
             # the deployment-consistent selector (no offline impulse oracle).
             override = _v3_intervals_over_segments(
@@ -387,7 +387,7 @@ def main() -> None:
         res = train_v4_localization(v4_samples, cfg=cfg, grid=grid,
                                     explicit_split=(train_pos, holdout_pos))
         # `train_val_gap_m` is a LEGACY name — it is the |val - train| smooth-L1
-        # loss gap in loss_scale-cm space (NOT metres).  Kept for backward
+        # loss gap in loss_scale-cm space (not metres).  Kept for backward
         # compatibility with historical analyze_ablation tables.  The proper
         # metres-scale gap is `train_val_mae_gap_m`, computed from a final
         # forward pass on train_samples (see V4Result.train_mae_3d).

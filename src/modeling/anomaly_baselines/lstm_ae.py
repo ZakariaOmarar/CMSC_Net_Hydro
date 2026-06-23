@@ -151,7 +151,7 @@ def extract_log_mel_windows(
     """
     fs = int(segment.segment.mic_sample_rate)
     # V0 baselines deliberately use `cfg.hop_length=512` (coarse 31.25 Hz
-    # acoustic frame rate) for fast baseline computation.  They do NOT go
+    # acoustic frame rate) for fast baseline computation.  They do not go
     # through V2's cross-attention, so cross-modal grid alignment (the
     # registry's per-dataset hop, see `hop_for_dataset` in v2_ssl) does not
     # apply here.  Keep V0 on its own STFT params.

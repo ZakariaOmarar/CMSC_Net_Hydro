@@ -8,7 +8,7 @@ Findings driving this version:
     floor, yet mel-AUC was 0.99) -> need SPECTRAL-shape features; D3 is
     continuous so the recording-level label (all anomaly windows positive) is
     the right ground truth.
-So the detector uses BOTH feature families.  Fit on healthy ONLY (unsupervised);
+So the detector uses both feature families.  Fit on healthy only (unsupervised);
 the detector is fit on d2+d3+d4 healthy and D5 is HELD OUT to verify the theory
 on an easier campaign.
 

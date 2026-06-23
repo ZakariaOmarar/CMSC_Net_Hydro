@@ -83,7 +83,7 @@ class V2SSLConfig:
     # justification).  When the per-dataset dict is populated, each batch
     # is single-dataset × single-scale via the grouped batch sampler's
     # `(channel_count, n_frames_ac, n_frames_vib)` bucket key.  Both
-    # `n_ac` and `n_vib` are computed from the SAME per-batch scale so
+    # `n_ac` and `n_vib` are computed from the same per-batch scale so
     # the wall-clock pairing in `_PairedWindowedDataset` is preserved.
     window_scales_seconds: tuple[float, ...] = ()
     window_scales_seconds_per_dataset: dict[str, tuple[float, ...]] = field(
@@ -193,7 +193,7 @@ class V2SSLConfig:
     early_stop_min_delta: float = 1e-4
 
     # Cross-recording mixup — see V1SSLConfig docstring for the design.  V2
-    # blends BOTH modalities with the SAME λ from the SAME partner recording,
+    # blends both modalities with the same λ from the same partner recording,
     # preserving the cross-modal pairing inside each mixed window.  Default
     # 0.0 disables; recommended ablation values: {0.0, 0.2, 0.4}.
     mixup_alpha: float = 0.0
@@ -324,7 +324,7 @@ class _PairedWindowedDataset(tud.Dataset):
     (~376 Hz) keeps all 752 samples while a 2-second window over D1 peak
     vibration (4 Hz) keeps all 8.  When `cfg.window_scales_seconds[_per_dataset]`
     is set, every (segment, scale) pair materialises its own window list;
-    BOTH `n_ac` AND `n_vib` are computed from the same per-batch scale so
+    both `n_ac` AND `n_vib` are computed from the same per-batch scale so
     the wall-clock pairing (sample 0 of mic ↔ sample 0 of vib) is preserved
     inside each window.  The grouped batch sampler buckets by
     `(n_mics, n_vib, frames_ac, frames_vib)` so that a single `torch.stack`
@@ -906,7 +906,7 @@ def train_v2_fusion(
             return torch.zeros_like(ac), vib
         return ac, torch.zeros_like(vib)
 
-    # Early-stop bookkeeping — tensor-clone snapshot, NOT copy.deepcopy.
+    # Early-stop bookkeeping — tensor-clone snapshot, not copy.deepcopy.
     # See V1 trainer for the RAM-fragmentation rationale.
     def _snapshot(module: torch.nn.Module) -> dict[str, torch.Tensor]:
         return {k: v.detach().cpu().clone() for k, v in module.state_dict().items()}

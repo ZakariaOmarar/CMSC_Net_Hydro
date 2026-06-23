@@ -10,7 +10,7 @@ a simple Ridge regressor: can `x` linearly predict the raw physical features
     is the encoder (or bypassing it with physical features), not the flow.
   * High test-R^2 => the signal is in `x`; the flow / threshold is the issue.
 
-Targets are computed on the SAME windows as the embeddings, pooled over all
+Targets are computed on the same windows as the embeddings, pooled over all
 datasets (healthy + anomaly) so the regressor sees the full impulsiveness range.
 
 Run:  python -m scripts.diagnostics.probe_encoder_bottleneck [run_dir]

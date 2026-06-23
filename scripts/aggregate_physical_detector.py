@@ -2,7 +2,7 @@
 
 Reads ``physical_detector_eval.json`` from each seed's run dir (listed in the
 multiseed report, or pass --runs) and prints median [min, max] per cohort for
-ac/vib/SUM AUC and detection@thr — the thesis-table format.
+ac/vib/sum AUC and detection@thr — the thesis-table format.
 
 Run:  python -m scripts.aggregate_physical_detector
       python -m scripts.aggregate_physical_detector --runs A B C

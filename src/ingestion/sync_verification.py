@@ -792,7 +792,7 @@ def auto_sync_paired_recording(
          (default 1.0).  Below this the audio envelope is essentially
          Gaussian — there is provably no peaked structure for the
          cross-correlation to lock onto, so attempting correction is
-         meaningless.  This is a cheap early-out; note it does NOT catch
+         meaningless.  This is a cheap early-out; note it does not catch
          every uninformative recording (D4's healthy speed buckets sit at
          kurtosis ≈ 1.5–1.9 yet still fail to cross-correlate — those are
          caught by Gate 1 instead).
@@ -871,7 +871,7 @@ def auto_sync_paired_recording(
 
     # Gate 1: full-recording audit confidence.  A low confidence here means
     # the envelope cross-correlation has no clear peak — which under
-    # shared-trigger acquisition does NOT imply the streams are misaligned,
+    # shared-trigger acquisition does not imply the streams are misaligned,
     # only that envelope xcorr cannot *prove* the alignment.  The reason
     # string therefore avoids "manual review" language and reports the
     # envelope kurtosis so a reader can tell *why* the correlation failed:

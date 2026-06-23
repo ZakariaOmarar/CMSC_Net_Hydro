@@ -1,19 +1,21 @@
-"""Raw-waveform anomaly detector — impulse + spectral features, healthy density.
+"""Raw-waveform anomaly detector: impulse and spectral features, healthy density.
 
-Validated SOTA detector for the rig (scripts/diagnostics/probe_impulse_detector
-.py; thesis RQ).  The SSL/CMA deep pipeline discards the anomaly-relevant cues;
-classical condition-monitoring features on the RAW waveform recover them with no
-encoder at all:
+This is the strongest anomaly detector measured on the rig (see
+scripts/diagnostics/probe_impulse_detector.py). The SSL/CMA deep pipeline
+discards the anomaly-relevant cues, whereas classical condition-monitoring
+features on the raw waveform recover them with no encoder at all:
 
-  * IMPULSE family (amplitude transients — D2/D4/D5 knocks): crest, impulse,
-    clearance, shape factors, kurtosis, spectral kurtosis (Antoni), envelope
-    knock-count, peak/median.
-  * SPECTRAL family (spectral anomalies — D3, which is NOT impulsive): centroid,
-    spread, flatness, entropy, 85%-rolloff, low/mid/high band-energy ratios.
+  - Impulse family (amplitude transients, e.g. the D2/D4/D5 knocks): crest,
+    impulse, clearance, shape factors, kurtosis, spectral kurtosis (Antoni),
+    envelope knock-count, peak/median.
+  - Spectral family (spectral anomalies such as D3, which is not impulsive):
+    centroid, spread, flatness, entropy, 85%-rolloff, low/mid/high band-energy
+    ratios.
 
-Per modality (mic, accel): standardize → Mahalanobis vs the healthy feature
-distribution.  SUM-fuse the per-modality z-scores → one global score; threshold
-at the (1-target_fpr) quantile of the healthy fused score.  Fit on HEALTHY only
+Per modality (mic, accel) the features are standardised and scored by
+Mahalanobis distance against the healthy feature distribution. The per-modality
+z-scores are sum-fused into one global score, thresholded at the (1-target_fpr)
+quantile of the healthy fused score. Everything is fit on healthy data only
 (unsupervised, label-free).
 
 Verified: D2 ROC 0.98 (PR 0.96), D3 0.91 (spectral), D4 href-ROC 0.94, D5
@@ -126,7 +128,7 @@ class RawImpulseDetector:
     threshold: float = 0.0
 
     def fit(self, healthy: dict[str, np.ndarray]) -> "RawImpulseDetector":
-        """`healthy` = {modality: (N_windows, n_feats)} from HEALTHY recordings."""
+        """`healthy` = {modality: (N_windows, n_feats)} from healthy recordings."""
         self.models = {m: _ModalityMaha.fit(X) for m, X in healthy.items()}
         fused = self.fused_score(healthy)
         self.threshold = float(np.percentile(fused, 100.0 * (1.0 - self.target_fpr)))

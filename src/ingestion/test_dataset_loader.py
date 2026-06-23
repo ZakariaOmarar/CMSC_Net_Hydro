@@ -15,10 +15,10 @@ No code changes are needed for a new dataset that follows the
 `recorded_<sensor>[_<extra>].wav` + `vibration_<sensor>[_<extra>].csv`
 convention AND reuses an existing `label_scheme` / `position_source` pair.
 
-**`speed{N}` is NOT an operating mode.**  The `speed{N}` tokens in D3/D4
+**`speed{N}` is not an operating mode.**  The `speed{N}` tokens in D3/D4
 folder names (and the `op_condition` field they populate) are added-noise
 augmentation levels — three SNR settings used during data collection to
-test acoustic robustness.  They are NOT one of {Pump, Standstill, Turbine}.
+test acoustic robustness.  They are not one of {Pump, Standstill, Turbine}.
 Treat speed only as recording-level metadata for noise-robustness ablation
 reporting; never use it to partition the healthy pool by mode.  D5 healthy
 recordings, which carry no `speed{N}` token at all, belong to the same

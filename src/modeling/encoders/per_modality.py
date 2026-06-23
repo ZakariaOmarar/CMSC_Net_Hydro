@@ -10,7 +10,7 @@ not backbone tuning:
     rolling-kurtosis input from `src/features/vibration_temporal.py`.
 
 `PerModalityEncoder` wires a backbone to the channel-agnostic Set-Transformer
-pool (`ChannelTokenEnricher` → MAB → PMA(num_seeds=1)).  It returns BOTH:
+pool (`ChannelTokenEnricher` → MAB → PMA(num_seeds=1)).  It returns both:
 
   - per-channel tokens, shape `(B, N, embed_dim)`, for V2's cross-attention
     fusion to consume after V1 weight transfer; and
@@ -150,7 +150,7 @@ class Vibration1DCNN(nn.Module):
     Output: `(B, N_vib, feature_dim)` — per-vibration feature vector
 
     ``pool_type`` mirrors :class:`Acoustic2DCNN` — see that class for the
-    rationale.  Both backbones MUST use the same value (V1→V2 transfer
+    rationale.  Both backbones must use the same value (V1→V2 transfer
     enforces this via :func:`v2_fusion.load_v1_weights`).
     """
 
@@ -235,7 +235,7 @@ class PerModalityEncoder(nn.Module):
             self.modality_idx = 0
         elif modality == "vibration":
             # Vibration is intentionally kept at the published width — the
-            # R1 experiment changes ONLY the acoustic backbone.  Pass
+            # R1 experiment changes only the acoustic backbone.  Pass
             # `acoustic_cnn_width_mult` here to make accidental swaps loud.
             self.backbone = Vibration1DCNN(
                 in_channels=3,

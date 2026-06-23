@@ -1,4 +1,4 @@
-"""Probe: physical features + context regime-normalization + SUM fusion, GLOBAL.
+"""Probe: physical features + context regime-normalization + sum fusion, GLOBAL.
 
 Validates the proposed fix end-to-end, post-hoc and label-free:
   1. physical features per window (energy/impulsiveness) — the signal the
@@ -7,7 +7,7 @@ Validates the proposed fix end-to-end, post-hoc and label-free:
      feature over the k nearest POOLED-healthy windows in V2-context space
      (the learnable version of this is the flow's conditional base / FiLM);
   3. a single GLOBAL Mahalanobis detector per modality on the normalized
-     features, SUM-fused across modalities.
+     features, sum-fused across modalities.
 
 If the GLOBAL per-campaign AUC recovers to ~0.9+ on D3/D4 (which collapsed to
 0.69/0.73 under a plain global physical baseline), the design — physical

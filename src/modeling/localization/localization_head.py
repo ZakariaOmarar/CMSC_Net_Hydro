@@ -1,7 +1,7 @@
 """Neural source localizers — bench-top baselines for the Chapter 6 comparison.
 
 Acoustic (Transformer) and structural (3-D CNN) localization heads with
-FiLM-conditioned fusion, developed on the second/third datasets. These are NOT
+FiLM-conditioned fusion, developed on the second/third datasets. These are not
 part of the live V0-V5 pipeline — which localizes via `v4_loc_head` on top of the
 `classical` SRP-PHAT primitives — but are kept to regenerate the `loc_s2_*` /
 `loc_s3_*` baseline results that Chapter 6 reports against. The shared GCC-PHAT /

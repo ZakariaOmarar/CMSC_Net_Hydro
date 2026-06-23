@@ -244,7 +244,7 @@ class GatedPipeline:
             # ── V3: anomaly score + per-cluster gate ─────────────────
             # Append the impulse+spectral anchor (RQ2) so the flow input matches
             # its trained dimension; no-op when anchor_norm is None.  Uses the
-            # SAME windowed log-mel+CWT features the encoder consumed.
+            # same windowed log-mel+CWT features the encoder consumed.
             c_for_flow = torch.zeros_like(c_t) if self.unconditional_anomaly else c_t
             x_for_flow = append_anchor(x_t, ac_win, vib_win, self.anchor_norm)
             score = float(self.flow.anomaly_score(x_for_flow, c_for_flow).item())

@@ -2,14 +2,14 @@
 
 The SSL/CMA encoder optimises away the impulsiveness a knock produces (the
 flow-input embedding cannot predict crest factor; Ridge R^2 ~ 0).  Rather than
-abandon context-conditioning (RQ2's whole point), we AUGMENT the
+abandon context-conditioning (RQ2's whole point), we augment the
 conditional-flow input with the full condition-monitoring feature set — the same
 families that let the hand-crafted baseline recover every campaign — so the
 conditional density model sees the anomaly while still being conditioned on the
 operating context ``c_t``.
 
-Two families PER modality (matching the validated baseline, raw_impulse_detector
-.py), computed on the SAME windowed log-mel + CWT features the V2 encoder
+Two families per modality (matching the validated baseline, raw_impulse_detector
+.py), computed on the same windowed log-mel + CWT features the V2 encoder
 consumes (so the anchor is identical at every site that builds the flow input —
 V3 training, V3 eval, the V4 ``x_for_v3`` gate, sliding-window inference — no raw
 re-windowing, no id/time drift):
@@ -119,7 +119,7 @@ def _vibration(vib: np.ndarray) -> list[float]:
 
 
 # Fixed order — persisted standardization stats + the flow input dimension depend
-# on it; NEVER reorder (only append, and retrain).
+# on it; never reorder (only append, and retrain).
 ANCHOR_FEATURES = tuple(
     f"ac_{n}" for n in (
         "crest", "impulse", "clearance", "shape", "kurtosis", "knockcount",

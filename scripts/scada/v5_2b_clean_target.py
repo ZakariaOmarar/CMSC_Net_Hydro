@@ -7,7 +7,7 @@ channels live — see the report's primary caveat).  This script asks the tighte
 possible follow-up: does a *clean* anomaly target, built only from the 6 live
 accelerometer channels, recover any significant SCADA association?
 
-Clean target = transient-deviation (impulse) detector, NOT a level threshold.
+Clean target = transient-deviation (impulse) detector, not a level threshold.
 A level threshold on RMS would mostly flag high-load periods and then spuriously
 correlate with load channels (power, flow).  Instead each live channel is
 z-scored against a rolling median/MAD baseline (~5 min window); the per-second

@@ -122,7 +122,7 @@ def resolved_loader(yaml_name: str) -> TestDatasetLoader:
 
     Two things matter here that the legacy implementation missed:
 
-      1. ``vibration_format`` MUST be propagated when reconstructing
+      1. ``vibration_format`` must be propagated when reconstructing
          the spec — D4's spec sets ``vibration_format="raw"`` and the
          default-"peak" fallback would silently pick the wrong CSV
          family (and either error on missing files or, worse, load
@@ -130,7 +130,7 @@ def resolved_loader(yaml_name: str) -> TestDatasetLoader:
 
       2. ``sync_correct=True`` is set at the loader level so the
          WavVibrationAdapter applies the four-gate cross-modal sync
-         correction at load time, BEFORE the frozen ``DataSegment`` is
+         correction at load time, before the frozen ``DataSegment`` is
          built.  The legacy orchestrator pattern — load, then mutate
          ``s.segment.mic_data = mic_corr`` after a separate auto-sync
          call — was a silent no-op: the assignment raised

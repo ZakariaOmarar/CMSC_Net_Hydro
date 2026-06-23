@@ -31,7 +31,7 @@ Returns the refined `(x, y, z)` plus a confidence proxy (final residual
 sum-of-squares).
 
 Output sign convention: positive ``tdoa_s`` for pair ``(i, j)`` means
-**signal arrived at i AFTER j** (j-leads-i), matching `gcc_phat` (peak at
+**signal arrived at i after j** (j-leads-i), matching `gcc_phat` (peak at
 positive lag when j leads i).  Path difference is then
 ``r_i - r_j = c · tdoa_s`` in metres.
 """
@@ -93,7 +93,7 @@ def estimate_pairwise_tdoas(
 
     Returns ``(tdoa_seconds, pairs)`` where ``tdoa_seconds[k]`` is the
     refined TDOA for pair ``pairs[k] = (i, j)`` in seconds (positive ⇒ j
-    leads i; signal arrives at i AFTER j).  No (x, y, z) solve here — just
+    leads i; signal arrives at i after j).  No (x, y, z) solve here — just
     the per-pair time-delay estimates.
     """
     if accel_data.ndim != 2:

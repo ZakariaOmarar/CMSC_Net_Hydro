@@ -90,11 +90,13 @@ def fig18_tsne() -> None:
     v1_a = _load_v1("acoustic", cfg)
     v2 = V2FusionEncoder.from_checkpoint(RUN_DIR / "v2" / "encoder.pt", cfg)
 
-    print("gathering D1+D2 paired validation windows ...")
+    print("gathering all labelled D1+D2 windows (strict cohort) ...")
     loaders = [resolved_loader("d1.yaml"), resolved_loader("d2.yaml")]
     segments = _gather_paired_segments(loaders, cfg)
-    _, val_segs = _split_segments_by_recording(segments, cfg.val_ratio, cfg.seed)
-    ds = _PairedWindowedDataset(val_segs, cfg)
+    # Strict cohort: every labelled D1+D2 window (no held-out split), so the
+    # panel NMI matches the headline strict-cohort number of Table tab:res_rq1
+    # (fused c_t ~0.41) rather than the optimistic development/validation split.
+    ds = _PairedWindowedDataset(segments, cfg)
     loader = torch.utils.data.DataLoader(
         ds,
         batch_sampler=_PairedGroupedBatchSampler(ds, cfg.batch_size, shuffle=False, seed=0),
@@ -159,8 +161,8 @@ def fig18_tsne() -> None:
     axes[0].legend(loc="lower left", fontsize=6.5, frameon=True, framealpha=0.8,
                    handletextpad=0.2, markerscale=2.2)
     fig.suptitle(
-        "t-SNE of the label-free representations on held-out labelled D1+D2 windows: "
-        "mode structure is present and acoustically driven",
+        "t-SNE of the label-free representations on all labelled D1+D2 windows "
+        "(strict cohort): mode structure is present and acoustically driven",
         fontsize=9.5,
     )
     fig.tight_layout()

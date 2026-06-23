@@ -81,7 +81,7 @@ class V1SSLConfig:
     # `docs/chapters/chapter_3_field_data_and_preprocessing.md` §3.4.4):
     #
     #   * `window_scales_seconds`: a tuple of per-segment scales applied to
-    #     EVERY dataset.  Empty tuple means "use the legacy single scale".
+    #     every dataset.  Empty tuple means "use the legacy single scale".
     #   * `window_scales_seconds_per_dataset`: a dict
     #     `{dataset_id: (scale1, scale2, ...)}` that OVERRIDES the global
     #     tuple per dataset.  This is the publication path because the
@@ -112,7 +112,7 @@ class V1SSLConfig:
     n_heads: int = ENCODER.n_heads
     proj_dim: int = ENCODER.proj_dim
 
-    # Training schedule — tuned per experiment, NOT centralised in
+    # Training schedule — tuned per experiment, not centralised in
     # architecture.py.
     epochs: int = 30
     batch_size: int = 32
@@ -128,7 +128,7 @@ class V1SSLConfig:
     cwt_n_scales: int = ACOUSTIC_CWT.n_scales
     use_cwt: bool = True  # smoke-test override: skip CWT to speed up
     # F4 toggle — per-channel z-score of the log-mel + CWT stack before the
-    # CNN.  Default False: the 2026-05-14 audit found F4 is NOT load-bearing
+    # CNN.  Default False: the 2026-05-14 audit found F4 is not load-bearing
     # — the V1 acoustic encoder trains fine without it once BatchNorm is the
     # encoder norm (the real collapse cause was F7/GroupNorm, not F4).  Kept
     # as a knob because the log-mel-vs-CWT channel-scale mismatch is a real
@@ -154,7 +154,7 @@ class V1SSLConfig:
     # the published 32/64/128 backbone; set to 2 for the wider 64/128/256
     # variant.  V1 and V2 must use the same value so that V2 can load
     # V1 acoustic weights without shape mismatch.  Vibration backbone is
-    # NOT scaled — the R1 experiment changes acoustic only.
+    # not scaled — the R1 experiment changes acoustic only.
     acoustic_cnn_width_mult: int = ENCODER.acoustic_cnn_width_mult
 
     # Augmentations (applied in feature space) — per-experiment knobs;
@@ -872,7 +872,7 @@ def train_v1_per_modality(
     )
 
     # Augmenter sees CPU tensors (it runs before the .to(device) move below),
-    # so the generator MUST be on CPU — torch requires generator and target
+    # so the generator must be on CPU — torch requires generator and target
     # tensor device to match.
     aug_gen = torch.Generator(device="cpu")
     aug_gen.manual_seed(cfg.seed)
@@ -881,7 +881,7 @@ def train_v1_per_modality(
     train_history: list[float] = []
     val_history: list[float] = []
 
-    # Early-stop bookkeeping.  Snapshot via tensor-clone (NOT copy.deepcopy):
+    # Early-stop bookkeeping.  Snapshot via tensor-clone (not copy.deepcopy):
     # deepcopy on a state_dict allocates a fresh CPU tensor per parameter via
     # the pickling path, which fragments system RAM across many "best" updates
     # over hundreds of epochs.  The dict comprehension below is a single tight

@@ -130,7 +130,7 @@ def compute_encoder_input_stack(
     guide-vane-passing — see `src/config/constants.py`).  After
     construction both channels share the same ``(n_mels, T_frames)``
     tensor shape so the downstream ``Conv2d`` can consume them as a 2-channel
-    image, but **row index does NOT correspond to the same physical
+    image, but **row index does not correspond to the same physical
     frequency in both channels** — row 0 is ~ 20 Hz in both, row 63 is
     ~ 8 kHz in log-mel and ~ 250 Hz in CWT.  The Conv2d therefore treats
     the two channels as parallel feature streams rather than co-registered

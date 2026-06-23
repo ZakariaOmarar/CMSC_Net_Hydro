@@ -170,7 +170,7 @@ class V3Config:
     # so windows from a single recording cannot span both halves.
     threshold_fit_val_ratio: float = 0.5
     # The Youden's-J calibration helper exists in `threshold.py` for
-    # post-hoc analysis but is **NOT** wired into the orchestrator.  It
+    # post-hoc analysis but is **not** wired into the orchestrator.  It
     # would require per-window anomaly labels (or an assumption that all
     # D2 RF / D3 hit windows are anomalous), which the field-collection
     # protocol does not provide.  Threshold quality is instead validated
@@ -182,7 +182,7 @@ class V3Config:
     # CNF's val NLL is noisier (4-recording fit cohort + outlier batches —
     # see val_nll_max audit signal).  Restore-best restores the FLOW state;
     # the V2 encoder is frozen so nothing to restore there.  Tensor-clone
-    # snapshot (NOT copy.deepcopy) — see V1 trainer for rationale.
+    # snapshot (not copy.deepcopy) — see V1 trainer for rationale.
     patience: int = 5
     restore_best: bool = True
     early_stop_min_delta: float = 1e-3  # NLL units; flow loss is O(10-100)
@@ -315,7 +315,7 @@ def _cache_fused(
             out = encoder(ac, ac_xyz, vib, vib_xyz, ds_idx, mask_p=0.0)
             fused = torch.cat([out["a_fused"], out["v_fused"]], dim=1).detach().cpu()
             c = out["context"].detach().cpu()
-            # Per-window impulse+spectral anchor from the SAME windowed log-mel
+            # Per-window impulse+spectral anchor from the same windowed log-mel
             # +CWT features (RQ2: augments the conditional flow input so the
             # detector sees the knock the SSL embedding discards).  Cached so
             # the joint training loop reuses it without recompute.
@@ -470,7 +470,7 @@ def train_v3_cnf(
         raise RuntimeError("V3: zero training windows after splitting")
     if len(val_fit_ds) == 0 or len(val_eval_ds) == 0:
         # HARD ERROR — no fallback.  The threshold-fit cohort and the reportable
-        # val cohort MUST stay disjoint (Chapter 5 protocol: per-cluster
+        # val cohort must stay disjoint (Chapter 5 protocol: per-cluster
         # percentile thresholds are fitted on a held-out healthy subset, and
         # recall / FPR are reported on a *disjoint* subset).  Reusing one cohort
         # for both would fit and evaluate the thresholds on the same windows and
@@ -553,7 +553,7 @@ def train_v3_cnf(
         c_val = _stack_c_from_cache(val_eval_cache)
         val_labels = _stack_labels_from_cache(val_eval_cache)
         # Seed x tensors so flow dimensionality can be inferred below.
-        # These tensors are NOT used in training; the training loop re-pools
+        # These tensors are not used in training; the training loop re-pools
         # each epoch from `train_cache`.  We compute them with the pool's
         # initialisation so flow.__init__ sees the right shape.
         x_train = _pool_cached_x(train_cache, xt_pool, device, anchor_norm)
@@ -605,7 +605,7 @@ def train_v3_cnf(
     val_nll_min: list[float] = []
     val_nll_max: list[float] = []
 
-    # Early-stop bookkeeping — tensor-clone snapshot, NOT copy.deepcopy.
+    # Early-stop bookkeeping — tensor-clone snapshot, not copy.deepcopy.
     # See V1 trainer for the RAM-fragmentation rationale.  Snapshot covers
     # both `flow` and (when present) the learnable `xt_pool` since they are
     # co-optimised; restoring just the flow would leave the pool at a

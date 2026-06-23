@@ -1,4 +1,4 @@
-"""Phase-B helper — re-train ONLY V1 acoustic + V1 vibration + V2 fusion (+ A1
+"""Phase-B helper — re-train only V1 acoustic + V1 vibration + V2 fusion (+ A1
 + modality probe) under a named intervention, skipping V0/V3/V4/V5.
 
 Each invocation is ~50 minutes of CPU vs ~6 hours for the full pipeline.

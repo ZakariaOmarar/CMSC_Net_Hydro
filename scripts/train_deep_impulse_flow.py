@@ -1,9 +1,9 @@
-"""Train + evaluate the deep impulse-aware anomaly flow — the PRODUCTION
+"""Train + evaluate the deep impulse-aware anomaly flow — the production
 anomaly detector for the rig.
 
 Architecture (src/modeling/anomaly/deep_impulse_flow.py): a spectrogram 2-D CNN
-front-end trained END-TO-END one-class with a conditional normalizing flow on
-the HEALTHY NLL (no SSL/CMA), with the hand-crafted impulse+spectral anchor
+front-end trained end-to-end one-class with a conditional normalizing flow on
+the healthy NLL (no SSL/CMA), with the hand-crafted impulse+spectral anchor
 concatenated (recall guarantee + anti-collapse), per-window instance norm
 (regime-level invariance), strong regime-simulating augmentation (domain
 generalization), early-stop restore-best.  Per modality (mic, accel); anomaly
