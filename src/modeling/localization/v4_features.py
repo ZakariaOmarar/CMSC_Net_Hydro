@@ -170,7 +170,7 @@ def bandpass_filter(
     hi = min(float(hi_hz), nyq * 0.999) / nyq
     if not (0.0 < lo < hi < 1.0):
         return data
-    b, a = butter(order, [lo, hi], btype="band")
+    b, a = butter(order, [lo, hi], btype="band")  # type: ignore[misc]  # scipy ba-output stub
     # filtfilt needs length > 3*max(len(a),len(b)); fall back if the crop is short.
     if data.shape[-1] <= 3 * max(len(a), len(b)):
         return data

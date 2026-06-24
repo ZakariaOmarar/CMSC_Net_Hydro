@@ -60,7 +60,7 @@ def _hull_equations(points: np.ndarray) -> np.ndarray | None:
             return None
     try:
         hull = ConvexHull(points)
-    except QhullError:
+    except QhullError:  # type: ignore[misc]  # QhullError import is version-dependent
         return None
     except Exception:
         return None

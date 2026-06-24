@@ -500,7 +500,7 @@ def cluster_mode_floor(
     labels: list[str] = []
     rec_keys: set[str] = set()
     valid = set(cfg.target_classes)
-    for loader in loaders:
+    for loader in loaders:  # type: ignore[union-attr]  # normalised to a list above
         for s in loader.list_segments():
             if (s.mode_label or "") not in valid:
                 continue

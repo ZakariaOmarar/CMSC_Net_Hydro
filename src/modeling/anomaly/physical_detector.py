@@ -71,6 +71,7 @@ class _ModalityModel:
             cn = (ctx - self.ctx_mean) / self.ctx_std
             return cn @ self.ridge_w + self.ridge_b
         # knn: local healthy mean among k nearest (brute force, fine at scale)
+        assert self.bank_ctx is not None and self.bank_feat is not None
         out = np.empty((ctx.shape[0], self.bank_feat.shape[1]), dtype=np.float64)
         bn = (self.bank_ctx ** 2).sum(1)
         for i in range(ctx.shape[0]):
