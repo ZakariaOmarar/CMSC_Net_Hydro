@@ -148,7 +148,8 @@ def main() -> int:
         base_s = np.concatenate([scored_h[dn][mod]["scores"] for dn in scored_h])
         nn = NearestNeighbors(n_neighbors=K + 1).fit(base_c)
 
-        def _resid(ctx: np.ndarray, scr: np.ndarray, drop_self: bool) -> np.ndarray:
+        def _resid(ctx: np.ndarray, scr: np.ndarray, drop_self: bool,
+                   nn=nn, base_s=base_s) -> np.ndarray:
             _, idx = nn.kneighbors(ctx)
             idx = idx[:, 1:] if drop_self else idx[:, :K]
             return scr - base_s[idx].mean(axis=1)

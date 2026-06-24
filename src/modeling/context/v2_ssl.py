@@ -46,6 +46,7 @@ from ...config.dataset_registry import REGISTRY
 from ...features.audio_spectral import compute_encoder_input_stack, compute_log_mel_spectrogram
 from ...features.vibration_temporal import compute_vibration_input_stack
 from ...ingestion.test_dataset_loader import TestDatasetLoader, TestDatasetSegment
+from ..early_stopping import EarlyStopping, cpu_state_dict
 from .cluster_metric import cluster_purity_and_nmi
 from .v2_fusion import V2FusionEncoder
 
@@ -906,14 +907,10 @@ def train_v2_fusion(
             return torch.zeros_like(ac), vib
         return ac, torch.zeros_like(vib)
 
-    # Early-stop bookkeeping — tensor-clone snapshot, not copy.deepcopy.
-    # See V1 trainer for the RAM-fragmentation rationale.
-    def _snapshot(module: torch.nn.Module) -> dict[str, torch.Tensor]:
-        return {k: v.detach().cpu().clone() for k, v in module.state_dict().items()}
-
-    best_val_loss = float("inf")
-    best_encoder_state = _snapshot(encoder)
-    epochs_without_improvement = 0
+    # Early-stop bookkeeping: snapshot the best encoder weights as the val loss
+    # improves and restore them at the end (see ``modeling.early_stopping``).
+    stopper = EarlyStopping(cfg.patience, cfg.early_stop_min_delta,
+                            initial=cpu_state_dict(encoder))
     early_stopped_epoch: int | None = None
 
     epoch_iter = tqdm(
@@ -1022,19 +1019,14 @@ def train_v2_fusion(
 
         # Early stop on val total-loss.  See V1 trainer for the pattern.
         cur_val = val_history[-1]
-        if cur_val < best_val_loss - cfg.early_stop_min_delta:
-            best_val_loss = cur_val
-            best_encoder_state = _snapshot(encoder)
-            epochs_without_improvement = 0
-        else:
-            epochs_without_improvement += 1
-            if epochs_without_improvement >= cfg.patience:
-                early_stopped_epoch = _epoch + 1
-                break
+        if stopper.update(cur_val, lambda: cpu_state_dict(encoder)):
+            early_stopped_epoch = _epoch + 1
+            break
 
+    best_val_loss = stopper.best
     if cfg.restore_best:
-        encoder.load_state_dict(best_encoder_state)
-    del best_encoder_state
+        encoder.load_state_dict(stopper.best_snapshot)
+    del stopper
 
     # RQ1 cluster purity is computed on labeled-only val segments — D3/D4
     # speed-bucket recordings have no mode_label so including them in the

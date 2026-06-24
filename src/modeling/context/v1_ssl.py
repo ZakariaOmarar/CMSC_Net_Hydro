@@ -46,6 +46,7 @@ from ...ingestion.test_dataset_loader import (
     TestDatasetLoader,
     TestDatasetSegment,
 )
+from ..early_stopping import EarlyStopping, cpu_state_dict
 from ..encoders import PerModalityEncoder
 from .cluster_metric import cluster_purity_and_nmi
 
@@ -881,18 +882,10 @@ def train_v1_per_modality(
     train_history: list[float] = []
     val_history: list[float] = []
 
-    # Early-stop bookkeeping.  Snapshot via tensor-clone (not copy.deepcopy):
-    # deepcopy on a state_dict allocates a fresh CPU tensor per parameter via
-    # the pickling path, which fragments system RAM across many "best" updates
-    # over hundreds of epochs.  The dict comprehension below is a single tight
-    # loop of cloned-tensor allocations and lets the previous best_state's
-    # tensors GC the instant we overwrite the binding.
-    def _snapshot(module: torch.nn.Module) -> dict[str, torch.Tensor]:
-        return {k: v.detach().cpu().clone() for k, v in module.state_dict().items()}
-
-    best_val_loss = float("inf")
-    best_encoder_state = _snapshot(encoder)
-    epochs_without_improvement = 0
+    # Early-stop bookkeeping: snapshot the best encoder weights as the val loss
+    # improves and restore them at the end (see ``modeling.early_stopping``).
+    stopper = EarlyStopping(cfg.patience, cfg.early_stop_min_delta,
+                            initial=cpu_state_dict(encoder))
     early_stopped_epoch: int | None = None
 
     epoch_iter = tqdm(
@@ -954,19 +947,14 @@ def train_v1_per_modality(
         # head is discarded post-training) every time the val loss improves
         # past `early_stop_min_delta`.  Break when patience runs out.
         cur_val = val_history[-1]
-        if cur_val < best_val_loss - cfg.early_stop_min_delta:
-            best_val_loss = cur_val
-            best_encoder_state = _snapshot(encoder)
-            epochs_without_improvement = 0
-        else:
-            epochs_without_improvement += 1
-            if epochs_without_improvement >= cfg.patience:
-                early_stopped_epoch = epoch + 1
-                break
+        if stopper.update(cur_val, lambda: cpu_state_dict(encoder)):
+            early_stopped_epoch = epoch + 1
+            break
 
+    best_val_loss = stopper.best
     if cfg.restore_best:
-        encoder.load_state_dict(best_encoder_state)
-    del best_encoder_state  # let GC reclaim before sanity-gate eval allocates
+        encoder.load_state_dict(stopper.best_snapshot)
+    del stopper  # let GC reclaim before sanity-gate eval allocates
 
     # Sanity gate evaluates on the held-out *labeled* subset only.  D3/D4
     # healthy windows participate in training (they're inside `val_segs`

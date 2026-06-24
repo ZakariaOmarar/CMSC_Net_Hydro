@@ -36,6 +36,7 @@ from ...features.vibration_temporal import compute_vibration_input_stack
 from ...ingestion.test_dataset_loader import TestDatasetSegment
 from ..context.v2_fusion import V2FusionEncoder
 from ..context.v2_ssl import V2SSLConfig, _dataset_idx
+from ..early_stopping import EarlyStopping, cpu_state_dict
 from .v4_features import (
     GridSpec,
     compute_accel_tdoa_tokens,
@@ -807,16 +808,11 @@ def train_v4_localization(
     aug_gen = torch.Generator(device="cpu")
     aug_gen.manual_seed(cfg.seed)
 
-    # Early-stop bookkeeping — tensor-clone snapshot, not copy.deepcopy.
-    # See V1 trainer for the RAM-fragmentation rationale.  V4 has only
-    # ~10 labeled recordings so val loss is dramatically noisier than
-    # V1/V2's — patience=5 + min_delta=1e-3 reflect that.
-    def _snapshot(module: torch.nn.Module) -> dict[str, torch.Tensor]:
-        return {k: v.detach().cpu().clone() for k, v in module.state_dict().items()}
-
-    best_val_loss = float("inf")
-    best_head_state = _snapshot(head)
-    epochs_without_improvement = 0
+    # Early-stop bookkeeping (see ``modeling.early_stopping``).  V4 has only
+    # ~10 labeled recordings so val loss is dramatically noisier than V1/V2's;
+    # patience=5 + min_delta=1e-3 reflect that.
+    stopper = EarlyStopping(cfg.patience, cfg.early_stop_min_delta,
+                            initial=cpu_state_dict(head))
     early_stopped_epoch: int | None = None
 
     suffix = "unconditional" if cfg.unconditional else f"scada_dim={cfg.scada_dim}"
@@ -898,19 +894,14 @@ def train_v4_localization(
 
         # Early stop on val Smooth-L1.  Snapshot the head every improvement.
         cur_val = val_history[-1]
-        if cur_val < best_val_loss - cfg.early_stop_min_delta:
-            best_val_loss = cur_val
-            best_head_state = _snapshot(head)
-            epochs_without_improvement = 0
-        else:
-            epochs_without_improvement += 1
-            if epochs_without_improvement >= cfg.patience:
-                early_stopped_epoch = _epoch + 1
-                break
+        if stopper.update(cur_val, lambda: cpu_state_dict(head)):
+            early_stopped_epoch = _epoch + 1
+            break
 
+    best_val_loss = stopper.best
     if cfg.restore_best:
-        head.load_state_dict(best_head_state)
-    del best_head_state
+        head.load_state_dict(stopper.best_snapshot)
+    del stopper
 
     # Final val errors + per-recording diagnostic.  `return_components=True`
     # exposes (init_xyz, delta, pred) so Chapter 6 can attribute MAE to the

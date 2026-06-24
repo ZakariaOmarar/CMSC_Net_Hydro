@@ -40,6 +40,7 @@ from ..context.v2_ssl import (
     _precompute_paired,
     _split_segments_by_recording,
 )
+from ..early_stopping import EarlyStopping, cpu_state_dict
 from ..encoders.set_transformer import PMA
 from .cnf_head import ConditionalRealNVP
 from .impulse_anchor import append_anchor, impulse_spectral_anchor
@@ -605,22 +606,19 @@ def train_v3_cnf(
     val_nll_min: list[float] = []
     val_nll_max: list[float] = []
 
-    # Early-stop bookkeeping — tensor-clone snapshot, not copy.deepcopy.
-    # See V1 trainer for the RAM-fragmentation rationale.  Snapshot covers
-    # both `flow` and (when present) the learnable `xt_pool` since they are
-    # co-optimised; restoring just the flow would leave the pool at a
-    # non-best state.
+    # Early-stop bookkeeping: snapshot the best weights as the val NLL improves
+    # and restore them at the end (see ``modeling.early_stopping``).  The
+    # snapshot covers both `flow` and (when present) the learnable `xt_pool`
+    # since they are co-optimised; restoring just the flow would leave the pool
+    # at a non-best state.
     def _snapshot_combined() -> dict[str, dict[str, torch.Tensor]]:
-        out = {"flow": {k: v.detach().cpu().clone() for k, v in flow.state_dict().items()}}
+        out = {"flow": cpu_state_dict(flow)}
         if xt_pool is not None:
-            out["xt_pool"] = {
-                k: v.detach().cpu().clone() for k, v in xt_pool.state_dict().items()
-            }
+            out["xt_pool"] = cpu_state_dict(xt_pool)
         return out
 
-    best_val_nll = float("inf")
-    best_state = _snapshot_combined()
-    epochs_without_improvement = 0
+    stopper = EarlyStopping(v3_cfg.patience, v3_cfg.early_stop_min_delta,
+                            initial=_snapshot_combined())
     early_stopped_epoch: int | None = None
 
     suffix = "unconditional" if v3_cfg.unconditional else "conditional"
@@ -712,21 +710,17 @@ def train_v3_cnf(
 
         # Early stop on val mean NLL.  Snapshot flow + xt_pool jointly.
         cur_val = val_nll[-1]
-        if cur_val < best_val_nll - v3_cfg.early_stop_min_delta:
-            best_val_nll = cur_val
-            best_state = _snapshot_combined()
-            epochs_without_improvement = 0
-        else:
-            epochs_without_improvement += 1
-            if epochs_without_improvement >= v3_cfg.patience:
-                early_stopped_epoch = _epoch + 1
-                break
+        if stopper.update(cur_val, _snapshot_combined):
+            early_stopped_epoch = _epoch + 1
+            break
 
+    best_val_nll = stopper.best
     if v3_cfg.restore_best:
+        best_state = stopper.best_snapshot
         flow.load_state_dict(best_state["flow"])
         if xt_pool is not None and "xt_pool" in best_state:
             xt_pool.load_state_dict(best_state["xt_pool"])
-    del best_state
+    del stopper
 
     flow.eval()
     if xt_pool is not None:

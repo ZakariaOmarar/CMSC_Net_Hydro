@@ -122,7 +122,7 @@ def reg_grid() -> list[dict]:
         if not isinstance(ra, dict) or not ra:
             continue
 
-        def _r(k):
+        def _r(k, ra=ra):
             v = ra.get(k)
             return round(float(v), 4) if isinstance(v, (int, float)) else None
         row = {"cell": Path(p).parent.name, "f1": _r("f1"),
