@@ -48,6 +48,7 @@ import time
 import traceback
 from dataclasses import asdict, replace
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
@@ -121,104 +122,130 @@ __all__ = [
 ]
 
 
-def main(
-    quick: bool = False,
-    *,
-    run_sync_audit: bool = False,
-    run_v0_baselines: bool = False,
-) -> dict:
-    """Run the end-to-end V1-V5 pipeline and return the metrics dict.
+class PipelineContext:
+    """Mutable state threaded through the V1-V5 pipeline stages."""
 
-    Args:
-        quick: halve epoch counts at every stage for a smoke run.
-        run_sync_audit: also run the opt-in cross-modal sync audit (Stage 0).
-        run_v0_baselines: also run the opt-in V0 reference baselines (Stage 1).
-    """
-    # Determinism — Python / NumPy / PyTorch RNGs pinned, deterministic
-    # algorithms enabled where available (warn_only so non-deterministic
-    # kernels fall through rather than crash).  BLAS thread scheduling
-    # variance is bounded, not eliminated — `multi_seed.py` remains the
-    # canonical mean ± std reporter for publication numbers.
-    os.environ.setdefault("PYTHONHASHSEED", "0")
-    torch.manual_seed(42)
-    np.random.seed(42)
-    try:
-        torch.use_deterministic_algorithms(True, warn_only=True)
-    except (RuntimeError, AttributeError):
-        # Older torch lacks the API; a few ops have no deterministic kernel
-        # even under warn_only. Determinism here is best-effort.
-        pass
+    def __init__(self, quick: bool) -> None:
+        self.quick = quick
+        self.stage_t0 = [time.time()]
+        # Determinism — Python / NumPy / PyTorch RNGs pinned, deterministic
+        # algorithms enabled where available (warn_only so non-deterministic
+        # kernels fall through rather than crash).  BLAS thread scheduling
+        # variance is bounded, not eliminated — `multi_seed.py` remains the
+        # canonical mean ± std reporter for publication numbers.
+        os.environ.setdefault("PYTHONHASHSEED", "0")
+        torch.manual_seed(42)
+        np.random.seed(42)
+        try:
+            torch.use_deterministic_algorithms(True, warn_only=True)
+        except (RuntimeError, AttributeError):
+            # Older torch lacks the API; a few ops have no deterministic kernel
+            # even under warn_only. Determinism here is best-effort.
+            pass
 
-    timestamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-    label = "full_pipeline_b5_cma" + ("_quick" if quick else "")
-    out_dir = REPO_ROOT / "results" / "runs" / f"{timestamp}__{label}"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    for sub in ("v1", "v2", "v3", "v4", "v5_1"):
-        (out_dir / sub).mkdir(exist_ok=True)
+        timestamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        label = "full_pipeline_b5_cma" + ("_quick" if quick else "")
+        out_dir = REPO_ROOT / "results" / "runs" / f"{timestamp}__{label}"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for sub in ("v1", "v2", "v3", "v4", "v5_1"):
+            (out_dir / sub).mkdir(exist_ok=True)
 
-    log = _make_logger(out_dir)
-    metrics: dict = {
-        "quick": quick,
-        "variant": "b5_cma",
-        "timestamp": timestamp,
-        "stages": {},
-        "timings_s": {},
-    }
+        log = _make_logger(out_dir)
+        metrics: dict = {
+            "quick": quick,
+            "variant": "b5_cma",
+            "timestamp": timestamp,
+            "stages": {},
+            "timings_s": {},
+        }
+        log(f"REPO_ROOT = {REPO_ROOT}")
+        log(f"out_dir = {out_dir}")
+        log(f"quick = {quick}, variant = b5_cma")
 
-    stage_t0_ref = [time.time()]
+        # Result-neutral feature cache (CWT/mel + vibration stacks).  Shared across
+        # V1 / V2 / the A1 ablation / V4 — keyed on exact input bytes + params, so
+        # it only ever speeds things up, never changes a number.  Enabled by default
+        # at a stable repo-level dir; set HYDRO_FEATURE_CACHE_DIR (empty to disable).
+        if os.environ.get("HYDRO_FEATURE_CACHE_DIR") is None:
+            os.environ["HYDRO_FEATURE_CACHE_DIR"] = str(REPO_ROOT / ".feature_cache")
+        _fc = os.environ.get("HYDRO_FEATURE_CACHE_DIR")
+        log(f"feature cache = {_fc or '(disabled)'}")
 
-    def _stage_done(name: str) -> None:
-        dt = time.time() - stage_t0_ref[0]
-        metrics["timings_s"][name] = dt
-        log(f"=== stage '{name}' complete in {dt:.0f}s ===\n")
-        stage_t0_ref[0] = time.time()
+        # ----------------------------------------------------------------- data
+        # Loaders are built dynamically from the registry — adding a future
+        # dataset is a YAML edit (configs/datasets/dN.yaml).  Subsets per
+        # downstream stage are chosen below, not by hardcoding loaders here.
+        LOADERS_BY_ID: dict[str, TestDatasetLoader] = {}
+        for meta in REGISTRY:
+            if not meta.root.exists():
+                log(f"  skipping {meta.id} (root does not exist: {meta.root})")
+                continue
+            log(f"  loading {meta.id} from {meta.root.relative_to(REPO_ROOT)} ...")
+            LOADERS_BY_ID[meta.id] = resolved_loader(f"{meta.id}.yaml")
 
-    log(f"REPO_ROOT = {REPO_ROOT}")
-    log(f"out_dir = {out_dir}")
-    log(f"quick = {quick}, variant = b5_cma")
+        # SSL stages (V1, V2) — user direction: D5 has no operating-mode label
+        # and is reserved for V3/V4 only, so the SSL cohort stays D1..D4.
+        SSL_IDS = [i for i in ("d1", "d2", "d3", "d4") if i in LOADERS_BY_ID]
+        SSL_LOADERS = [LOADERS_BY_ID[i] for i in SSL_IDS]
+        # Anomaly stage (V3) — D5 contributes both healthy density-fit data and
+        # held-out knock anomalies (label_scheme=d5_healthy_or_knock).
+        ANOM_IDS = [i for i in ("d1", "d2", "d3", "d4", "d5") if i in LOADERS_BY_ID]
+        ANOM_LOADERS = [LOADERS_BY_ID[i] for i in ANOM_IDS]
+        log(f"SSL cohort: {SSL_IDS} | Anomaly cohort: {ANOM_IDS}")
 
-    # Result-neutral feature cache (CWT/mel + vibration stacks).  Shared across
-    # V1 / V2 / the A1 ablation / V4 — keyed on exact input bytes + params, so
-    # it only ever speeds things up, never changes a number.  Enabled by default
-    # at a stable repo-level dir; set HYDRO_FEATURE_CACHE_DIR (empty to disable).
-    if os.environ.get("HYDRO_FEATURE_CACHE_DIR") is None:
-        os.environ["HYDRO_FEATURE_CACHE_DIR"] = str(REPO_ROOT / ".feature_cache")
-    _fc = os.environ.get("HYDRO_FEATURE_CACHE_DIR")
-    log(f"feature cache = {_fc or '(disabled)'}")
+        # Backward-compat per-loader names used by stage-specific helpers below
+        # (transition FPR, labeled-segment gathering, RQ3 evaluation, ...).
+        # Stage-specific code paths still index loaders by their fixed role
+        # (D2 = rectangular bench rig, D3/D4 = circular rig, ...), so the
+        # aliases stay but are now dict-driven and trivially extend to D5.
+        D1 = LOADERS_BY_ID.get("d1")
+        D2 = LOADERS_BY_ID.get("d2")
+        D3 = LOADERS_BY_ID.get("d3")
+        D4 = LOADERS_BY_ID.get("d4")
+        D5 = LOADERS_BY_ID.get("d5")
+        self.timestamp = timestamp
+        self.label = label
+        self.out_dir = out_dir
+        self.log = log
+        self.metrics = metrics
+        self.LOADERS_BY_ID = LOADERS_BY_ID
+        self.SSL_LOADERS = SSL_LOADERS
+        self.ANOM_LOADERS = ANOM_LOADERS
+        self.D1 = D1
+        self.D2 = D2
+        self.D3 = D3
+        self.D4 = D4
+        self.D5 = D5
+        # Stage outputs, populated as the pipeline runs (each stage sets the
+        # ones it produces before a later stage reads them).
+        self.v1_cfg: Any = None
+        self.v2_cfg: Any = None
+        self.v2_cfg_base: Any = None
+        self.v3_cfg: Any = None
+        self.v4_cfg: Any = None
+        self.v1_a: Any = None
+        self.v1_v: Any = None
+        self.v2: Any = None
+        self.v2_a1: Any = None
+        self.v3_results: dict = {}
+        self.v3: Any = None
+        self.v4_samples: list = []
+        self.overrides: Any = None
+        self.grid: Any = None
+        self.d3_segments: Any = None
+        self.v4_results: dict = {}
+        self.metrics_path: Any = None
 
-    # ----------------------------------------------------------------- data
-    # Loaders are built dynamically from the registry — adding a future
-    # dataset is a YAML edit (configs/datasets/dN.yaml).  Subsets per
-    # downstream stage are chosen below, not by hardcoding loaders here.
-    LOADERS_BY_ID: dict[str, TestDatasetLoader] = {}
-    for meta in REGISTRY:
-        if not meta.root.exists():
-            log(f"  skipping {meta.id} (root does not exist: {meta.root})")
-            continue
-        log(f"  loading {meta.id} from {meta.root.relative_to(REPO_ROOT)} ...")
-        LOADERS_BY_ID[meta.id] = resolved_loader(f"{meta.id}.yaml")
+    def stage_done(self, name: str) -> None:
+        dt = time.time() - self.stage_t0[0]
+        self.metrics['timings_s'][name] = dt
+        self.log(f"=== stage '{name}' complete in {dt:.0f}s ===\n")
+        self.stage_t0[0] = time.time()
 
-    # SSL stages (V1, V2) — user direction: D5 has no operating-mode label
-    # and is reserved for V3/V4 only, so the SSL cohort stays D1..D4.
-    SSL_IDS = [i for i in ("d1", "d2", "d3", "d4") if i in LOADERS_BY_ID]
-    SSL_LOADERS = [LOADERS_BY_ID[i] for i in SSL_IDS]
-    # Anomaly stage (V3) — D5 contributes both healthy density-fit data and
-    # held-out knock anomalies (label_scheme=d5_healthy_or_knock).
-    ANOM_IDS = [i for i in ("d1", "d2", "d3", "d4", "d5") if i in LOADERS_BY_ID]
-    ANOM_LOADERS = [LOADERS_BY_ID[i] for i in ANOM_IDS]
-    log(f"SSL cohort: {SSL_IDS} | Anomaly cohort: {ANOM_IDS}")
 
-    # Backward-compat per-loader names used by stage-specific helpers below
-    # (transition FPR, labeled-segment gathering, RQ3 evaluation, ...).
-    # Stage-specific code paths still index loaders by their fixed role
-    # (D2 = rectangular bench rig, D3/D4 = circular rig, ...), so the
-    # aliases stay but are now dict-driven and trivially extend to D5.
-    D1 = LOADERS_BY_ID.get("d1")
-    D2 = LOADERS_BY_ID.get("d2")
-    D3 = LOADERS_BY_ID.get("d3")
-    D4 = LOADERS_BY_ID.get("d4")
-    D5 = LOADERS_BY_ID.get("d5")
-
+def _run_optional_stages(ctx, run_sync_audit, run_v0_baselines):
+    log, metrics = ctx.log, ctx.metrics
+    SSL_LOADERS, ANOM_LOADERS = ctx.SSL_LOADERS, ctx.ANOM_LOADERS
     # ===================================================== S0 / S1 (opt-in)
     # The cross-modal sync audit and the V0 reference baselines are expensive
     # and off by default; enable them with run_sync_audit / run_v0_baselines
@@ -230,13 +257,20 @@ def main(
         except Exception as e:
             log(f"sync audit failed: {type(e).__name__}: {e}")
             metrics["stages"]["sync_correction"] = {"skipped_reason": f"{type(e).__name__}: {e}"}
-        _stage_done("stage_0_sync")
+        ctx.stage_done("stage_0_sync")
 
     if run_v0_baselines:
         log("=== Stage 1 — V0 baselines (RQ2 anomaly trio+KDE / LightGBM / SRP-PHAT) ===")
         metrics["stages"]["v0"] = run_v0(SSL_LOADERS, log, anom_loaders=ANOM_LOADERS)
-        _stage_done("stage_1_v0")
+        ctx.stage_done("stage_1_v0")
 
+
+def _stage_v1_v2(ctx: PipelineContext) -> None:
+    quick = ctx.quick
+    out_dir = ctx.out_dir
+    log = ctx.log
+    metrics = ctx.metrics
+    SSL_LOADERS = ctx.SSL_LOADERS
     # ================================================================= S2
     log("=== Stage 2 — V1 + V2 with b5_cma intervention ===")
     v1_cfg = v1_config(quick)
@@ -366,8 +400,26 @@ def main(
         log(f"V2 modality probe skipped: {type(e).__name__}: {e}")
         metrics["stages"]["v2_modality_probe"] = {"skipped": f"{type(e).__name__}: {e}"}
 
-    _stage_done("stage_2_v1_v2_b5_cma")
+    ctx.stage_done("stage_2_v1_v2_b5_cma")
+    ctx.v1_cfg = v1_cfg
+    ctx.v2_cfg = v2_cfg
+    ctx.v2_cfg_base = v2_cfg_base
+    ctx.v1_a = v1_a
+    ctx.v1_v = v1_v
+    ctx.v2 = v2
+    ctx.v2_a1 = v2_a1
 
+
+def _stage_v3_paradigms(ctx: PipelineContext) -> None:
+    quick = ctx.quick
+    out_dir = ctx.out_dir
+    log = ctx.log
+    metrics = ctx.metrics
+    ANOM_LOADERS = ctx.ANOM_LOADERS
+    v2_cfg = ctx.v2_cfg
+    v1_a = ctx.v1_a
+    v1_v = ctx.v1_v
+    v2 = ctx.v2
     # ================================================================= S3
     log("=== Stage 3 — V3 three paradigms (acoustic / vibration / fusion) ===")
     v3_cfg = v3_config(quick)
@@ -414,8 +466,25 @@ def main(
             if src.exists():
                 shutil.copy2(src, out_dir / "v3" / fname)
 
-    _stage_done("stage_3_v3_three_paradigms")
+    ctx.stage_done("stage_3_v3_three_paradigms")
+    ctx.v3_cfg = v3_cfg
+    ctx.v3_results = v3_results
 
+
+def _stage_v3_depth(ctx: PipelineContext) -> None:
+    log = ctx.log
+    metrics = ctx.metrics
+    ANOM_LOADERS = ctx.ANOM_LOADERS
+    D1 = ctx.D1
+    D2 = ctx.D2
+    D3 = ctx.D3
+    D4 = ctx.D4
+    D5 = ctx.D5
+    v2_cfg = ctx.v2_cfg
+    v3_cfg = ctx.v3_cfg
+    v2 = ctx.v2
+    v3_results = ctx.v3_results
+    v3 = ctx.v3
     # ================================================================= S4
     log("=== Stage 4 — V3 fusion deeper diagnostics ===")
     if "fusion" not in v3_results:
@@ -691,8 +760,21 @@ def main(
             metrics["stages"]["v3_real_anomaly"] = {"skipped": f"{type(e).__name__}: {e}"}
 
         metrics["stages"]["v3_fusion_depth"] = v3_depth
-    _stage_done("stage_4_v3_depth")
+    ctx.stage_done("stage_4_v3_depth")
 
+
+def _stage_v4_paradigms(ctx: PipelineContext) -> None:
+    quick = ctx.quick
+    out_dir = ctx.out_dir
+    log = ctx.log
+    metrics = ctx.metrics
+    D2 = ctx.D2
+    D3 = ctx.D3
+    D4 = ctx.D4
+    D5 = ctx.D5
+    v2_cfg = ctx.v2_cfg
+    v2 = ctx.v2
+    v3 = ctx.v3
     # ================================================================= S5
     log("=== Stage 5 — V4 four paradigms + V0 classical localisation ===")
     d2_labeled = [
@@ -795,7 +877,22 @@ def main(
     metrics["stages"]["v0_multilateration"] = run_v0_multilateration(
         [D2, D3, D4], overrides, log
     )
+    ctx.v4_cfg = v4_cfg
+    ctx.v4_samples = v4_samples
+    ctx.overrides = overrides
+    ctx.grid = grid
+    ctx.d3_segments = d3_segments
+    ctx.v4_results = v4_results
 
+
+def _stage_v4_holdout(ctx: PipelineContext) -> None:
+    log = ctx.log
+    metrics = ctx.metrics
+    v3_cfg = ctx.v3_cfg
+    v4_cfg = ctx.v4_cfg
+    v3_results = ctx.v3_results
+    v4_samples = ctx.v4_samples
+    grid = ctx.grid
     # ============================================== Stage 5b — spatial holdout
     # Train fusion V4 on all positions EXCEPT the reserved held-out set,
     # then report holdout MAE (localise-an-unseen-position), the V3-GATED
@@ -892,8 +989,16 @@ def main(
         log(f"Stage 5b spatial-holdout skipped: {type(e).__name__}: {e}")
         metrics["stages"]["v4_spatial_holdout"] = {"skipped_reason": f"{type(e).__name__}: {e}"}
 
-    _stage_done("stage_5_v4_four_paradigms")
+    ctx.stage_done("stage_5_v4_four_paradigms")
 
+
+def _stage_v4_depth(ctx: PipelineContext) -> None:
+    log = ctx.log
+    metrics = ctx.metrics
+    v4_cfg = ctx.v4_cfg
+    v4_samples = ctx.v4_samples
+    grid = ctx.grid
+    v4_results = ctx.v4_results
     # ================================================================= S6
     log("=== Stage 6 — V4 fusion deeper diagnostics ===")
     if "fusion" not in v4_results:
@@ -940,8 +1045,18 @@ def main(
             v4_depth["a3_unconditional"] = {"skipped": f"{type(e).__name__}: {e}"}
 
         metrics["stages"]["v4_fusion_depth"] = v4_depth
-    _stage_done("stage_6_v4_depth")
+    ctx.stage_done("stage_6_v4_depth")
 
+
+def _stage_v5(ctx: PipelineContext) -> None:
+    quick = ctx.quick
+    out_dir = ctx.out_dir
+    log = ctx.log
+    metrics = ctx.metrics
+    D4 = ctx.D4
+    v4_samples = ctx.v4_samples
+    grid = ctx.grid
+    d3_segments = ctx.d3_segments
     # ================================================================= S7
     log("=== Stage 7 — V5.1 fan-noise robustness conditioning ===")
     try:
@@ -981,8 +1096,14 @@ def main(
     except Exception as e:
         log(f"V5.1 skipped: {type(e).__name__}: {e}")
         metrics["stages"]["v5_1"] = {"skipped_reason": f"{type(e).__name__}: {e}"}
-    _stage_done("stage_7_v5_1")
+    ctx.stage_done("stage_7_v5_1")
 
+
+def _stage_deep_vs_simple(ctx: PipelineContext) -> None:
+    log = ctx.log
+    metrics = ctx.metrics
+    v3_cfg = ctx.v3_cfg
+    v3_results = ctx.v3_results
     # =============================================== deep-vs-simple summary
     # One-stop comparison block for the thesis chapter: each deep stage's
     # headline metric vs the closed-form / classical baseline already
@@ -1083,8 +1204,20 @@ def main(
         deep_vs_simple["mode_clustering"] = {"skipped_reason": f"{type(e).__name__}: {e}"}
 
     metrics["deep_vs_simple"] = deep_vs_simple
-    _stage_done("stage_7b_deep_vs_simple")
+    ctx.stage_done("stage_7b_deep_vs_simple")
 
+
+def _persist(ctx: PipelineContext) -> None:
+    quick = ctx.quick
+    timestamp = ctx.timestamp
+    label = ctx.label
+    out_dir = ctx.out_dir
+    log = ctx.log
+    metrics = ctx.metrics
+    v1_cfg = ctx.v1_cfg
+    v2_cfg = ctx.v2_cfg
+    v3_cfg = ctx.v3_cfg
+    v4_cfg = ctx.v4_cfg
     # ============================================================ persist
     metrics_path = out_dir / "metrics.json"
     metrics_path.write_text(json.dumps(metrics, indent=2))
@@ -1107,7 +1240,13 @@ def main(
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str))
     log(f"Wrote manifest to {out_dir / 'manifest.json'}")
+    ctx.metrics_path = metrics_path
 
+
+def _stage_rq2_lf(ctx: PipelineContext) -> None:
+    out_dir = ctx.out_dir
+    log = ctx.log
+    metrics = ctx.metrics
     # ================================================================= S8
     log("\n=== Stage 8 — late-fusion (AND / OR / score-weighted / MAX) eval ===")
     try:
@@ -1128,8 +1267,14 @@ def main(
     except Exception as e:
         log(f"rq2 eval skipped: {type(e).__name__}: {e}")
         metrics["stages"]["rq2_paradigm_comparison"] = {"skipped_reason": f"{type(e).__name__}: {e}"}
-    _stage_done("stage_8_rq2_lf_eval")
+    ctx.stage_done("stage_8_rq2_lf_eval")
 
+
+def _stage_rq3_lf(ctx: PipelineContext) -> None:
+    out_dir = ctx.out_dir
+    log = ctx.log
+    metrics = ctx.metrics
+    metrics_path = ctx.metrics_path
     # ================================================================= S9
     log("=== Stage 9 — RQ3 LF confidence-gated localisation eval ===")
     try:
@@ -1150,14 +1295,47 @@ def main(
     except Exception as e:
         log(f"rq3 eval skipped: {type(e).__name__}: {e}")
         metrics["stages"]["rq3_paradigm_comparison"] = {"skipped_reason": f"{type(e).__name__}: {e}"}
-    _stage_done("stage_9_rq3_lf_eval")
+    ctx.stage_done("stage_9_rq3_lf_eval")
 
     metrics_path.write_text(json.dumps(metrics, indent=2))
     log(f"Final metrics written to {metrics_path}")
 
     total = sum(metrics["timings_s"].values())
     log(f"\nTotal wall-clock: {total:.0f}s ({total/60:.1f} min)")
-    return metrics
+
+
+def main(
+    quick: bool = False,
+    *,
+    run_sync_audit: bool = False,
+    run_v0_baselines: bool = False,
+) -> dict:
+    """Run the end-to-end V1-V5 pipeline and return the metrics dict.
+
+    Args:
+        quick: halve epoch counts at every stage for a smoke run.
+        run_sync_audit: also run the opt-in cross-modal sync audit (Stage 0).
+        run_v0_baselines: also run the opt-in V0 reference baselines (Stage 1).
+    """
+    ctx = PipelineContext(quick)
+    _run_optional_stages(ctx, run_sync_audit, run_v0_baselines)
+    _stage_v1_v2(ctx)
+    _stage_v3_paradigms(ctx)
+    ctx.v3 = ctx.v3_results.get('fusion')
+    _stage_v3_depth(ctx)
+    _stage_v4_paradigms(ctx)
+    _stage_v4_holdout(ctx)
+    _stage_v4_depth(ctx)
+    _stage_v5(ctx)
+    _stage_deep_vs_simple(ctx)
+    _persist(ctx)
+    _stage_rq2_lf(ctx)
+    _stage_rq3_lf(ctx)
+    ctx.metrics_path.write_text(json.dumps(ctx.metrics, indent=2))
+    ctx.log(f'Final metrics written to {ctx.metrics_path}')
+    total = sum(ctx.metrics['timings_s'].values())
+    ctx.log(f'\nTotal wall-clock: {total:.0f}s ({total / 60:.1f} min)')
+    return ctx.metrics
 
 
 if __name__ == "__main__":
