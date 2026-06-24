@@ -293,7 +293,12 @@ class GatedPipeline:
             decisions.append(
                 StreamingDecision(
                     t_start_s=float(t_start),
-                    t_end_s=float(t_start + cfg.window_seconds),
+                    # Use the effective per-dataset window length actually sliced
+                    # (`win_s`), not the base `cfg.window_seconds`: under a
+                    # per-stage window override (the publication config tightens
+                    # V3/V4 to 1.0 s on D3/D4) the two differ, and using cfg here
+                    # reported a window end inconsistent with the scored span.
+                    t_end_s=float(t_start + win_s),
                     cluster_id=cluster_id,
                     mode_label=mode_label,
                     anomaly_score=score,

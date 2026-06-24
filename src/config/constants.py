@@ -36,6 +36,17 @@ CASING_RADIUS_M = 1.5
 GENERATOR_LEVEL_Z_M = 3.0
 TURBINE_LEVEL_Z_M = 0.0
 
+# Structure-borne wave speed for the 3D-printed PLA/ABS bench-top rig, used by
+# every accelerometer-TDOA path (multilateration init + V4 TDOA tokens +
+# synthetic-knock generator).  Single source of truth so the two consumers
+# (``localization.multilateration`` and ``localization.v4_features``) can never
+# disagree — a thesis-load-bearing constant: an over-estimate compresses the
+# TDOA geometry and suppresses the vibration localization channel (Results §setup).
+# The earlier steel value (5100 m/s) was wrong for plastic and inflated the
+# path-difference scaling ~2.55×; a ±25 % sensitivity sweep is reported in
+# Chapter 6 because plastic wave speed varies with infill / layer adhesion.
+C_PLASTIC_3DP_MS = 2000.0
+
 SENSOR_LAYOUT = {
     "microphones": {
         "level_1": [

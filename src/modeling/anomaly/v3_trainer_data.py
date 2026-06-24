@@ -144,6 +144,11 @@ def _cache_fused(
                     "c": c,
                     "anchor": anchor,
                     "labels": list(batch["mode_label"]),
+                    # Per-window recording id (kept in cache order) so the
+                    # held-out NLL paired test (V3 vs A2) can resample at the
+                    # recording level instead of the window level — see
+                    # `eval.statistics.paired_bootstrap_test(groups=)`.
+                    "recording_ids": list(batch["recording_id"]),
                 }
             )
     return cache
@@ -174,6 +179,22 @@ def _stack_labels_from_cache(cache: list[dict]) -> list[str]:
     out: list[str] = []
     for entry in cache:
         out.extend(entry["labels"])
+    return out
+def _stack_recording_ids_from_cache(cache: list[dict]) -> list[str]:
+    """Per-window recording ids in cache order (mirrors `_stack_labels_from_cache`).
+
+    Used to attach a recording-level group label to each held-out val window so
+    the V3-vs-A2 NLL paired test can use a block bootstrap.  Tolerates older
+    caches written before `recording_ids` was added by returning ``""`` for
+    those windows (which the paired test then treats as a single fallback group).
+    """
+    out: list[str] = []
+    for entry in cache:
+        rec = entry.get("recording_ids")
+        if rec is None:
+            out.extend([""] * len(entry["labels"]))
+        else:
+            out.extend(rec)
     return out
 
 

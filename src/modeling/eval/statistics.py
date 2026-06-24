@@ -42,6 +42,29 @@ from typing import Literal
 import numpy as np
 
 
+def _group_index_lists(groups: np.ndarray, n: int) -> list[np.ndarray]:
+    """Return one index array per unique group label, for the block bootstrap.
+
+    The *cluster* (a.k.a. block) bootstrap resamples whole groups with
+    replacement and pools every member of each chosen group.  This is the
+    correct resampling unit when the elementary observations are *not*
+    independent — e.g. per-window errors that share a recording, or per-knock
+    NLLs from the same physical position.  Resampling the windows directly
+    (the naive bootstrap) treats correlated observations as independent draws,
+    which is statistical *pseudoreplication*: it overstates the effective
+    sample size and produces anti-conservative (too narrow) intervals and
+    too-small p-values (Davison & Hinkley 1997, §3.8; Cameron et al. 2008,
+    "Bootstrap-based improvements for inference with clustered errors").
+    """
+    groups = np.asarray(groups).reshape(-1)
+    if groups.shape[0] != n:
+        raise ValueError(
+            f"groups length {groups.shape[0]} must match values length {n}"
+        )
+    uniq = np.unique(groups)
+    return [np.flatnonzero(groups == g) for g in uniq]
+
+
 @dataclass(frozen=True)
 class BootstrapCI:
     """Result of a percentile-bootstrap CI computation."""
@@ -51,6 +74,7 @@ class BootstrapCI:
     ci_high: float
     n_boot: int
     method: str = "percentile_bootstrap"
+    n_groups: int | None = None
 
 
 def percentile_bootstrap_ci(
@@ -60,6 +84,7 @@ def percentile_bootstrap_ci(
     n_boot: int = 1000,
     alpha: float = 0.05,
     seed: int = 0,
+    groups: np.ndarray | None = None,
 ) -> BootstrapCI:
     """Percentile bootstrap CI on a scalar statistic of a 1-D sample.
 
@@ -83,6 +108,16 @@ def percentile_bootstrap_ci(
         recommend ≥ 1000.
       alpha: two-tailed confidence level (default 0.05 → 95 % CI).
       seed: RNG seed for reproducibility.
+      groups: optional per-observation group label (same length as
+        ``values``).  When given, a **block (cluster) bootstrap** resamples
+        whole groups with replacement instead of individual observations —
+        the statistically correct unit when observations within a group are
+        correlated (per-window errors sharing a recording, per-knock errors
+        sharing a position).  The naive window-level bootstrap (``groups=None``)
+        is *pseudoreplicated* on such data and yields anti-conservative
+        intervals; pass the recording/position id here to get an honest CI.
+        With fewer than two distinct groups the CI is degenerate (a single
+        block carries no between-group information).
     """
     values = np.asarray(values, dtype=np.float64).reshape(-1)
     n = int(values.shape[0])
@@ -90,6 +125,31 @@ def percentile_bootstrap_ci(
         point = float(statistic(values)) if n == 1 else float("nan")
         return BootstrapCI(point=point, ci_low=point, ci_high=point, n_boot=0)
     rng = np.random.default_rng(int(seed))
+
+    if groups is not None:
+        block_idx = _group_index_lists(groups, n)
+        n_groups = len(block_idx)
+        point = float(statistic(values))
+        if n_groups < 2:
+            # One block ⇒ no between-group variability to resample.  Report the
+            # point estimate with a degenerate interval rather than a falsely
+            # tight window-level one.
+            return BootstrapCI(
+                point=point, ci_low=point, ci_high=point, n_boot=0,
+                method="grouped_percentile_bootstrap", n_groups=n_groups,
+            )
+        boots = np.empty(int(n_boot), dtype=np.float64)
+        for i in range(int(n_boot)):
+            chosen = rng.integers(0, n_groups, size=n_groups)
+            idx = np.concatenate([block_idx[g] for g in chosen])
+            boots[i] = float(statistic(values[idx]))
+        low = float(np.percentile(boots, 100.0 * (alpha / 2.0)))
+        high = float(np.percentile(boots, 100.0 * (1.0 - alpha / 2.0)))
+        return BootstrapCI(
+            point=point, ci_low=low, ci_high=high, n_boot=int(n_boot),
+            method="grouped_percentile_bootstrap", n_groups=n_groups,
+        )
+
     boots = np.empty(int(n_boot), dtype=np.float64)
     for i in range(int(n_boot)):
         idx = rng.integers(0, n, size=n)
@@ -115,6 +175,7 @@ class PairedBootstrapResult:
     n_boot: int
     direction: Literal["A<B", "A>B", "inconclusive"]
     method: str = "paired_percentile_bootstrap"
+    n_groups: int | None = None
 
 
 def paired_bootstrap_test(
@@ -126,6 +187,7 @@ def paired_bootstrap_test(
     n_boot: int = 1000,
     alpha: float = 0.05,
     seed: int = 0,
+    groups: np.ndarray | None = None,
 ) -> PairedBootstrapResult:
     """Paired bootstrap on Δ = statistic(A) − statistic(B) when A and B
     are evaluated on the same underlying samples (paired observations).
@@ -165,6 +227,18 @@ def paired_bootstrap_test(
       n_boot: number of bootstrap resamples.
       alpha: two-tailed confidence level (default 0.05).
       seed: RNG seed.
+      groups: optional per-observation group label (same length as the
+        value arrays).  When given, a **block (cluster) bootstrap** resamples
+        whole groups (e.g. recordings, positions) with replacement rather than
+        individual paired windows.  This is the correct unit when the paired
+        observations are autocorrelated within a group — e.g. the V3-vs-A2
+        per-window NLLs that share a recording, or the V4-vs-A3 per-knock
+        errors that share a position.  The naive ``groups=None`` test treats
+        every window as an independent paired draw, which is pseudoreplication
+        and inflates significance (understates the p-value).  Pass the
+        recording/position id to obtain an honest, recording-level test.
+        With fewer than two distinct groups the CI/p-value are undefined and
+        the result is reported ``inconclusive``.
     """
     a = np.asarray(a_values, dtype=np.float64).reshape(-1)
     b = np.asarray(b_values, dtype=np.float64).reshape(-1)
@@ -186,10 +260,37 @@ def paired_bootstrap_test(
 
     delta_point = float(statistic(a)) - float(statistic(b))
     rng = np.random.default_rng(int(seed))
-    boots = np.empty(int(n_boot), dtype=np.float64)
-    for i in range(int(n_boot)):
-        idx = rng.integers(0, n, size=n)
-        boots[i] = float(statistic(a[idx])) - float(statistic(b[idx]))
+
+    n_groups: int | None = None
+    method = "paired_percentile_bootstrap"
+    if groups is not None:
+        block_idx = _group_index_lists(groups, n)
+        n_groups = len(block_idx)
+        method = "grouped_paired_percentile_bootstrap"
+        if n_groups < 2:
+            # A single block carries no between-group information; the
+            # recording-level test is undefined.  Report the point estimate
+            # but flag the result inconclusive rather than fabricate a CI.
+            return PairedBootstrapResult(
+                delta_point=delta_point,
+                delta_ci_low=float("nan"),
+                delta_ci_high=float("nan"),
+                p_value_two_sided=float("nan"),
+                n_boot=0,
+                direction="inconclusive",
+                method=method,
+                n_groups=n_groups,
+            )
+        boots = np.empty(int(n_boot), dtype=np.float64)
+        for i in range(int(n_boot)):
+            chosen = rng.integers(0, n_groups, size=n_groups)
+            idx = np.concatenate([block_idx[g] for g in chosen])
+            boots[i] = float(statistic(a[idx])) - float(statistic(b[idx]))
+    else:
+        boots = np.empty(int(n_boot), dtype=np.float64)
+        for i in range(int(n_boot)):
+            idx = rng.integers(0, n, size=n)
+            boots[i] = float(statistic(a[idx])) - float(statistic(b[idx]))
     low = float(np.percentile(boots, 100.0 * (alpha / 2.0)))
     high = float(np.percentile(boots, 100.0 * (1.0 - alpha / 2.0)))
 
@@ -222,6 +323,8 @@ def paired_bootstrap_test(
         p_value_two_sided=p_two,
         n_boot=int(n_boot),
         direction=direction,
+        method=method,
+        n_groups=n_groups,
     )
 
 

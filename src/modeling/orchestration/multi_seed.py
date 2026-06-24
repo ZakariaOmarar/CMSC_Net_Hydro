@@ -3,8 +3,8 @@ headline numbers (mean ± std) for the publication tables.
 
 Usage:
     python -m src.modeling.orchestration.multi_seed \
-        --seeds 42 1337 2718 \
         --quick   # optional, halves epoch counts
+    # defaults to the five canonical thesis seeds; override with --seeds.
 
 Each seed runs to completion and is archived under `results/runs/`.
 After every seed finishes the script prints the running mean ± std for
@@ -13,6 +13,12 @@ long) sweep.
 
 Final output: `results/runs/multi_seed_summary.json` with mean / std
 per metric across all seeds.
+
+Reproducibility: the thesis tables report a distribution over the five
+seeds in :data:`THESIS_SEEDS`.  These are the documented defaults so that
+``python -m src.modeling.orchestration.multi_seed`` reproduces the reported
+multi-seed numbers without any extra arguments.  See ``REPRODUCING.md`` for
+the full table → command → artifact mapping.
 """
 
 from __future__ import annotations
@@ -28,6 +34,12 @@ from .archive import ARCHIVE_ROOT
 from .full_run import (
     main as full_run_main,
 )
+
+# Canonical thesis seed set.  Every five-seed "median [min, max]" table in the
+# Results chapter is computed over exactly these seeds; they are the documented
+# default so the reported numbers reproduce with no extra arguments.  Do not
+# change without re-running and re-reporting every multi-seed table.
+THESIS_SEEDS = (42, 1337, 2024, 7, 99)
 
 HEADLINE_KEYS = (
     "v1_acoustic_purity",
@@ -152,8 +164,9 @@ def main(seeds: list[int], quick: bool = False, run_v0_baselines: bool = False) 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--seeds", type=int, nargs="+", default=[42, 1337, 2718],
-        help="Seeds to run sequentially.  Default: 42 1337 2718",
+        "--seeds", type=int, nargs="+", default=list(THESIS_SEEDS),
+        help="Seeds to run sequentially.  Default: the canonical thesis seeds "
+             f"{list(THESIS_SEEDS)}.",
     )
     parser.add_argument(
         "--quick", action="store_true",

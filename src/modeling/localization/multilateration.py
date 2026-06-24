@@ -11,9 +11,10 @@ acoustic-only classical baseline.  Used as:
 Pipeline:
 
   1. **Parabolic sub-sample GCC-PHAT TDOAs** per accelerometer pair.  The
-     bench-top rig samples vibration at 376 Hz; structure-borne wave speed
-     is ~5100 m/s, so one integer-sample step corresponds to ~13.6 m of
-     path-difference — useless on a ~10 cm rig.  Parabolic interpolation
+     bench-top rig samples vibration at 376 Hz; the structure-borne wave speed
+     for the 3D-printed plastic casing is ~2000 m/s (``C_PLASTIC_3DP_MS``), so
+     one integer-sample step corresponds to ~5.3 m of path-difference — useless
+     on a ~10 cm rig.  Parabolic interpolation
      around the GCC peak buys ~10× finer effective resolution (Jacovitti &
      Scarano 1993, "Discrete time techniques for time delay estimation",
      IEEE TSP).
@@ -42,15 +43,14 @@ from itertools import combinations
 
 import numpy as np
 
+from ...config.constants import C_PLASTIC_3DP_MS
 from .classical import gcc_phat
 
-# Wave-speed default for the 3D-printed PLA/ABS bench-top rig.  The
-# prior `C_STEEL_MS = 5100` constant was removed (2026-05-20): the rig
-# is plastic, not steel, and the wrong value inflated the path-difference
-# scaling by ~2.55×.  Report a ±25 % sensitivity sweep in Chapter 6
-# because plastic wave speed varies with infill, layer adhesion, and
-# surface- vs bulk-mode coupling.
-C_PLASTIC_3DP_MS = 2000.0
+# Wave-speed default for the 3D-printed PLA/ABS bench-top rig.  Single source of
+# truth is `src/config/constants.C_PLASTIC_3DP_MS` (re-exported here so existing
+# `from .multilateration import C_PLASTIC_3DP_MS` call sites keep working).  The
+# prior `C_STEEL_MS = 5100` was removed (2026-05-20): the rig is plastic, not
+# steel, and the wrong value inflated the path-difference scaling ~2.55×.
 
 
 def _parabolic_subsample_peak(gcc: np.ndarray, peak_idx: int) -> float:

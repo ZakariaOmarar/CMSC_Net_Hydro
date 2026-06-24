@@ -112,3 +112,79 @@ def test_wilson_proportion_ci_matches_v3_healthy_rate() -> None:
 def test_paired_bootstrap_test_raises_on_length_mismatch() -> None:
     with pytest.raises(ValueError, match="equal-length"):
         paired_bootstrap_test(np.array([1.0, 2.0]), np.array([1.0]))
+
+
+# ---------------------------------------------------------------------------
+# Block (cluster) bootstrap — guards against window-level pseudoreplication.
+# ---------------------------------------------------------------------------
+
+
+def test_grouped_ci_is_wider_than_window_level_on_correlated_data() -> None:
+    """Pseudoreplication demonstration: when 300 windows come from 5 recordings
+    with strong between-recording variance and negligible within-recording
+    variance, the naive window-level CI is falsely tight.  The recording-level
+    block bootstrap (groups=) must produce a substantially wider, honest CI.
+    The point estimate is identical (same statistic of the same data)."""
+    rng = np.random.default_rng(0)
+    group_means = rng.normal(0.16, 0.05, size=5)
+    groups = np.repeat(np.arange(5), 60)
+    values = np.concatenate([gm + rng.normal(0.0, 0.001, size=60) for gm in group_means])
+
+    ci_window = percentile_bootstrap_ci(values, n_boot=1000, seed=0)
+    ci_block = percentile_bootstrap_ci(values, n_boot=1000, seed=0, groups=groups)
+
+    assert abs(ci_window.point - ci_block.point) < 1e-12  # same point estimate
+    width_window = ci_window.ci_high - ci_window.ci_low
+    width_block = ci_block.ci_high - ci_block.ci_low
+    assert width_block > 3.0 * width_window  # honest CI is much wider
+    assert ci_block.n_groups == 5
+    assert ci_block.method == "grouped_percentile_bootstrap"
+    assert ci_window.n_groups is None
+
+
+def test_grouped_paired_test_preserves_sign_but_widens_interval() -> None:
+    """A recording-consistent positive Δ (B always worse) must keep
+    direction='A<B' under both resamplings, but the block bootstrap — which
+    treats the recording, not the window, as the independent unit — must give
+    a wider Δ interval than the pseudoreplicated window-level test."""
+    rng = np.random.default_rng(1)
+    groups = np.repeat(np.arange(6), 40)
+    a = rng.normal(0.16, 0.02, size=240)
+    group_offsets = rng.uniform(0.01, 0.05, size=6)  # per-recording, B worse
+    b = a + np.repeat(group_offsets, 40)
+
+    res_w = paired_bootstrap_test(a, b, n_boot=1000, seed=0)
+    res_g = paired_bootstrap_test(a, b, n_boot=1000, seed=0, groups=groups)
+
+    assert res_w.direction == "A<B"
+    assert res_g.direction == "A<B"  # conclusion (sign) preserved
+    assert res_g.n_groups == 6
+    assert res_g.method == "grouped_paired_percentile_bootstrap"
+    width_w = res_w.delta_ci_high - res_w.delta_ci_low
+    width_g = res_g.delta_ci_high - res_g.delta_ci_low
+    assert width_g > width_w  # honest, recording-level interval is wider
+
+
+def test_grouped_ci_single_group_is_degenerate() -> None:
+    """One recording carries no between-group information → degenerate CI,
+    not a falsely tight window-level one."""
+    vals = np.array([0.1, 0.2, 0.3, 0.4])
+    ci = percentile_bootstrap_ci(vals, groups=np.zeros(4, dtype=int), seed=0)
+    assert ci.n_groups == 1
+    assert ci.ci_low == ci.point == ci.ci_high
+    assert ci.n_boot == 0
+
+
+def test_grouped_paired_single_group_is_inconclusive() -> None:
+    a = np.array([0.1, 0.2, 0.3])
+    b = np.array([0.2, 0.3, 0.4])
+    res = paired_bootstrap_test(a, b, groups=np.zeros(3, dtype=int), seed=0)
+    assert res.n_groups == 1
+    assert res.direction == "inconclusive"
+    assert np.isnan(res.p_value_two_sided)
+    assert res.delta_point < 0.0  # point Δ still computed
+
+
+def test_grouped_bootstrap_raises_on_group_length_mismatch() -> None:
+    with pytest.raises(ValueError, match="must match"):
+        percentile_bootstrap_ci(np.array([1.0, 2.0, 3.0]), groups=np.array([0, 1]))

@@ -95,6 +95,21 @@ class V3Config:
     restore_best: bool = True
     early_stop_min_delta: float = 1e-3  # NLL units; flow loss is O(10-100)
 
+    # Cohort the early-stopping / restore-best selection minimises.
+    #   * "val_eval" (default, legacy): selects the epoch on the SAME held-out
+    #     cohort whose NLL is reported.  This couples model selection to the
+    #     reported metric, so `val_nll` is a (mildly optimistic) selection
+    #     metric, not an unbiased generalisation estimate.  Kept as the default
+    #     so existing thesis runs reproduce bit-for-bit.
+    #   * "val_fit": selects on the threshold-fit cohort instead, leaving
+    #     `val_eval` a never-selected hold-out.  This is the unbiased protocol;
+    #     enable it for runs that want an honest held-out NLL.  It changes which
+    #     epoch is chosen and therefore the reported numbers, so it is opt-in.
+    # The headline RQ2 metrics (per-cluster threshold FPR / recall) are already
+    # protected: thresholds are fit on `val_fit` and scored on the disjoint
+    # `val_eval`, so this flag only affects the auxiliary `val_nll` figure.
+    select_on_fit_cohort: bool = False
+
     # CNF coupling MLP dropout — defends against the +56 % train/val NLL gap
     # the audit identified.  Default 0.0 keeps the dataclass byte-equivalent
     # to pre-fix behaviour; the orchestrator `v3_config` builder sets 0.1.
@@ -134,6 +149,12 @@ class V3Result:
     val_contexts: np.ndarray
     val_labels: list[str]
     unconditional: bool
+    # Per-window recording id for the reportable val cohort, aligned to
+    # `val_scores` / `val_contexts`.  Enables the held-out NLL paired test
+    # (V3 vs A2) to resample at the recording level rather than the window
+    # level — see `eval.statistics.paired_bootstrap_test(groups=)`.  None on
+    # the legacy mean-pool path (which does not cache per-window recording ids).
+    val_recording_ids_per_window: list[str] | None = None
     # `_XtPool` module trained jointly with the flow.  None when the legacy
     # mean-pool path was used (`xt_pool="mean"`).  Carries learned PMA-2
     # weights that scoring / streaming inference must reuse to obtain

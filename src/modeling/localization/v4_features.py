@@ -29,12 +29,14 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from ...config.constants import C_PLASTIC_3DP_MS
 from .classical import gcc_phat, srp_phat_3d
 
 C_AIR_MS = 343.0
-# Default structure-borne wave speed for the 3D-printed plastic rig
-# casing.  See module docstring for the correction history.
-C_PLASTIC_3DP_MS = 2000.0
+# Structure-borne wave speed for the 3D-printed plastic rig casing.  Single
+# source of truth is `src/config/constants.C_PLASTIC_3DP_MS`; re-exported here
+# (and from `multilateration`) for backward-compatible imports.  See module
+# docstring for the correction history.
 
 
 @dataclass(frozen=True)

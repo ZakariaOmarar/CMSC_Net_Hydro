@@ -512,21 +512,38 @@ def _stage_v3_depth(ctx: PipelineContext) -> None:
                 v3.val_scores.shape[0] == v3_a2.val_scores.shape[0]
                 and v3.val_scores.shape[0] >= 4
             ):
+                # Resample held-out windows at the RECORDING level: per-window
+                # NLLs within a recording are autocorrelated, so a window-level
+                # paired test is pseudoreplicated (it overstates n and shrinks
+                # the p-value).  V3 and A2 share the same recording split, so
+                # v3's per-window recording ids align with both score arrays.
+                # Falls back to window-level when ids are unavailable (legacy
+                # mean-pool path).
+                v3_groups = None
+                rec_ids = getattr(v3, "val_recording_ids_per_window", None)
+                if rec_ids is not None and len(rec_ids) == v3.val_scores.shape[0]:
+                    v3_groups = np.asarray(rec_ids)
                 pt = paired_bootstrap_test(
                     v3.val_scores, v3_a2.val_scores,
                     lower_is_better=True, n_boot=1000, seed=v3_cfg.seed,
+                    groups=v3_groups,
                 )
                 log(f"  V3 vs A2 paired test: Δ={pt.delta_point:.3f} "
                     f"[{pt.delta_ci_low:.3f}, {pt.delta_ci_high:.3f}] "
-                    f"p={pt.p_value_two_sided:.4f}")
+                    f"p={pt.p_value_two_sided:.4f} "
+                    f"({pt.method}, n_groups={pt.n_groups})")
                 v3_depth["v3_vs_a2_paired_test"] = {
                     "delta_point": pt.delta_point,
                     "delta_ci95_low": pt.delta_ci_low,
                     "delta_ci95_high": pt.delta_ci_high,
                     "p_value_two_sided": pt.p_value_two_sided,
                     "direction": pt.direction,
+                    # `n_paired` kept (windows) for backward compat with
+                    # scripts/baselines/assemble_comparison.py; `n_recordings`
+                    # is the block-bootstrap's true independent-unit count.
                     "n_paired": int(v3.val_scores.shape[0]),
-                    "method": "paired_percentile_bootstrap_1000",
+                    "n_recordings": pt.n_groups,
+                    "method": pt.method,
                 }
         except Exception as e:
             log(f"V3 A2 / paired test skipped: {type(e).__name__}: {e}")
@@ -1025,12 +1042,24 @@ def _stage_v4_depth(ctx: PipelineContext) -> None:
             ):
                 err_v4 = np.linalg.norm(v4.val_predictions - v4.val_targets, axis=-1).astype(np.float64)
                 err_a3 = np.linalg.norm(v4_a3.val_predictions - v4_a3.val_targets, axis=-1).astype(np.float64)
+                # Resample at the RECORDING level (block bootstrap): V4 and A3
+                # share the same recording-level val split (same seed), so the
+                # per-window recording ids align across both error arrays.
+                # Window-level resampling here would be pseudoreplication — the
+                # per-knock errors within a recording are correlated.  Falls
+                # back to window-level only if the group ids are unavailable.
+                v4_groups = (
+                    np.asarray(v4.val_groups)
+                    if len(v4.val_groups) == err_v4.shape[0] else None
+                )
                 pt = paired_bootstrap_test(
-                    err_v4, err_a3, lower_is_better=True, n_boot=1000, seed=v4_cfg.seed,
+                    err_v4, err_a3, lower_is_better=True, n_boot=1000,
+                    seed=v4_cfg.seed, groups=v4_groups,
                 )
                 log(f"  V4 vs A3 paired test: Δ_MAE={pt.delta_point*1000:.1f} mm "
                     f"[{pt.delta_ci_low*1000:.1f}, {pt.delta_ci_high*1000:.1f}] mm "
-                    f"p={pt.p_value_two_sided:.4f}")
+                    f"p={pt.p_value_two_sided:.4f} "
+                    f"({pt.method}, n_groups={pt.n_groups})")
                 v4_depth["v4_vs_a3_paired_test"] = {
                     "delta_mae_m": pt.delta_point,
                     "delta_mae_ci95_low_m": pt.delta_ci_low,
@@ -1038,7 +1067,8 @@ def _stage_v4_depth(ctx: PipelineContext) -> None:
                     "p_value_two_sided": pt.p_value_two_sided,
                     "direction": pt.direction,
                     "n_paired_windows": int(err_v4.shape[0]),
-                    "method": "paired_percentile_bootstrap_1000",
+                    "n_recordings": pt.n_groups,
+                    "method": pt.method,
                 }
         except Exception as e:
             log(f"V4 A3 skipped: {type(e).__name__}: {e}")

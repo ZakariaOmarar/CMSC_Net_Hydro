@@ -37,6 +37,7 @@ from ...ingestion.test_dataset_loader import TestDatasetSegment
 from ..context.v2_fusion import V2FusionEncoder
 from ..context.v2_ssl import V2SSLConfig, _dataset_idx
 from ..early_stopping import EarlyStopping, cpu_state_dict
+from ..eval.statistics import percentile_bootstrap_ci
 from .v4_features import (
     GridSpec,
     compute_accel_tdoa_tokens,
@@ -362,7 +363,12 @@ def precompute_v4_samples(
                 try:
                     from ..anomaly.weak_labels import derive_knock_events
                     knock_intervals = derive_knock_events(s, burst_seconds=burst_seconds)
-                except Exception:
+                except (ValueError, RuntimeError, FloatingPointError):
+                    # Expected weak-label failures (no impulse, degenerate
+                    # envelope) → conservative fallback "keep all windows".
+                    # Narrowed from `except Exception` so a genuine bug
+                    # (shape/typing error) surfaces instead of silently
+                    # disabling the sparse-anomaly window restriction.
                     knock_intervals = []
 
         ds_idx = torch.tensor(
@@ -449,7 +455,12 @@ def precompute_v4_samples(
                         acc_seg, s.vib_positions, fs=accel_fs_raw,
                     )
                     multilat_xyz = pos.astype(np.float32)
-                except Exception:  # multilateration is best-effort here
+                except (np.linalg.LinAlgError, ValueError, RuntimeError):
+                    # Expected solver failures (singular geometry, non-convergent
+                    # L-BFGS-B, too few usable pairs) → no spatial init for the
+                    # vibration-only-learned head on this window.  Narrowed from
+                    # `except Exception` so an unexpected fault is not masked as
+                    # "best-effort skipped".
                     multilat_xyz = None
 
             samples.append(
@@ -628,14 +639,23 @@ class V4Result:
     val_init_xyz: np.ndarray  # (n_val, 3) — pure soft-argmax output
     val_residuals: np.ndarray  # (n_val, 3) — FiLM-residual contribution
     val_recording_breakdown: dict  # recording_id -> {n, mae, target, pred_mean}
-    # Bootstrap 95 % CI on val MAE — percentile method, 1000 resamples at
-    # the window level.  With ~ 3 val recordings and ~ 300 val windows
-    # the single-point MAE has high variance; reporting `MAE ± CI` is
-    # the standard small-sample regression discipline (Efron & Tibshirani,
-    # 1993, "An Introduction to the Bootstrap").
+    # Bootstrap 95 % CI on val MAE — percentile method, 1000 resamples at the
+    # RECORDING level (block / cluster bootstrap).  Per-knock windows from one
+    # recording are correlated, so resampling whole recordings rather than
+    # individual windows avoids pseudoreplication and gives an honest interval
+    # (Davison & Hinkley 1997 §3.8).  With a single val recording the CI is
+    # degenerate by design (no between-recording information to resample).
     val_mae_ci_low: float = float("nan")
     val_mae_ci_high: float = float("nan")
-    val_mae_ci_method: str = "percentile_bootstrap_1000"
+    val_mae_ci_method: str = "recording_block_percentile_bootstrap_1000"
+    # Number of distinct val recordings the block bootstrap resampled (the CI's
+    # true independent-unit count).  None when no val windows were scored.
+    val_mae_ci_n_groups: int | None = None
+    # Per-window recording id (``source_dir_name/recording_id``), aligned to
+    # ``val_predictions`` / ``val_targets``.  Lets downstream paired tests
+    # (e.g. V4 vs A3 in full_run) resample at the recording level instead of
+    # the window level — see `eval.statistics.paired_bootstrap_test(groups=)`.
+    val_groups: list[str] = field(default_factory=list)
     early_stopped_epoch: int | None = None
     best_val_loss: float = float("nan")
     # Train MAE/P95 in metres (3-D Euclidean) — computed via a final forward
@@ -938,26 +958,20 @@ def train_v4_localization(
         val_delta = np.concatenate(val_deltas, axis=0)
         val_targets = np.concatenate(val_tgts, axis=0)
         errs = np.linalg.norm(val_predictions - val_targets, axis=-1)
-        val_mae = float(errs.mean())  # per-knock error mean — backs the window-level CI only
-        # 95 % percentile-bootstrap CI on MAE, 1000 window-level resamples.
-        # Standard small-sample uncertainty quantification on a regression
-        # head (Efron & Tibshirani, 1993).  Resamples at the window level
-        # rather than the recording level because window-level resampling
-        # treats every val window as an independent draw from the head's
-        # output distribution; recording-level CI would require ≥ 10 val
-        # recordings, which the V4 cohort does not have.
-        rng_ci = np.random.default_rng(cfg.seed)
-        n_boot = 1000
-        n_err = errs.shape[0]
-        if n_err >= 2:
-            boot_maes = np.empty(n_boot, dtype=np.float64)
-            for i in range(n_boot):
-                idx = rng_ci.integers(0, n_err, size=n_err)
-                boot_maes[i] = float(errs[idx].mean())
-            ci_low = float(np.percentile(boot_maes, 2.5))
-            ci_high = float(np.percentile(boot_maes, 97.5))
-        else:
-            ci_low = ci_high = val_mae
+        # 95 % percentile-bootstrap CI on MAE, resampled at the RECORDING level
+        # (block / cluster bootstrap).  Per-knock windows from one recording are
+        # strongly correlated, so resampling individual windows is statistical
+        # pseudoreplication — it treats correlated knocks as independent draws
+        # and yields an anti-conservative (falsely tight) interval (Davison &
+        # Hinkley 1997 §3.8).  `val_keys` is the per-window recording id, so the
+        # block bootstrap resamples whole recordings.  With a single val
+        # recording the CI is honestly degenerate (no between-recording
+        # information to resample), rather than falsely narrow.
+        ci = percentile_bootstrap_ci(
+            errs, n_boot=1000, seed=cfg.seed, groups=np.asarray(val_keys),
+        )
+        ci_low, ci_high = ci.ci_low, ci.ci_high
+        ci_n_groups = ci.n_groups
         # Per-recording breakdown: mean(pred) vs target, recording-level MAE.
         breakdown: dict = {}
         for k in set(val_keys):
@@ -1018,6 +1032,7 @@ def train_v4_localization(
         agg_errs = np.zeros((0,), dtype=np.float64)
         ci_low = float("nan")
         ci_high = float("nan")
+        ci_n_groups = None
         breakdown = {}
         pos_breakdown = {}
 
@@ -1074,6 +1089,8 @@ def train_v4_localization(
         val_recording_breakdown=breakdown,
         val_mae_ci_low=ci_low,
         val_mae_ci_high=ci_high,
+        val_mae_ci_n_groups=ci_n_groups,
+        val_groups=list(val_keys),
         early_stopped_epoch=early_stopped_epoch,
         best_val_loss=best_val_loss,
         train_mae_3d=train_mae_3d_v,

@@ -152,13 +152,18 @@ entry point:
 # End-to-end run; add --quick for a ~25 min CPU smoke run:
 python -m src.modeling.orchestration.full_run
 
-# Repeat across seeds for the mean ± std numbers in the thesis tables:
-python -m src.modeling.orchestration.multi_seed --seeds 42 1337 2718
+# Repeat across the five canonical thesis seeds (42, 1337, 2024, 7, 99) for the
+# median [min, max] numbers in the thesis tables — these are the defaults:
+python -m src.modeling.orchestration.multi_seed
 ```
 
 Each run writes a timestamped directory under `results/runs/`. The sweeps,
 ablations, and diagnostics in [`scripts/`](scripts/README.md) are supporting
 investigations around this run, not prerequisites for it.
+
+The canonical seed set lives in `multi_seed.THESIS_SEEDS`. The exact
+command → seed → artifact mapping for every reported table is documented in
+[`REPRODUCING.md`](REPRODUCING.md).
 
 ## Tests
 

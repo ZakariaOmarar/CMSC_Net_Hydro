@@ -35,6 +35,7 @@ from .v3_trainer_data import (
     _resolve_v3_override,
     _stack_c_from_cache,
     _stack_labels_from_cache,
+    _stack_recording_ids_from_cache,
     precompute_paired,
 )
 from .v3_trainer_model import _augment_anchor, _fit_anchor_norm, _XtPool
@@ -159,6 +160,10 @@ def train_v3_cnf(
             )
         anchor_norm = _fit_anchor_norm(train_cache)
 
+    # Per-window recording id for the reportable val cohort (for the
+    # recording-level NLL paired test).  Only the pma2 cache path carries it;
+    # the legacy mean path leaves it None (window-level fallback).
+    val_rec_ids_per_window: list[str] | None = None
     if xt_pool is None:
         # Legacy mean-pool: extract once, then train flow on tensors.
         x_train, c_train, _ = _extract_xc(v2_encoder, train_loader, device)
@@ -172,6 +177,7 @@ def train_v3_cnf(
         c_val_fit = _stack_c_from_cache(val_fit_cache)
         c_val = _stack_c_from_cache(val_eval_cache)
         val_labels = _stack_labels_from_cache(val_eval_cache)
+        val_rec_ids_per_window = _stack_recording_ids_from_cache(val_eval_cache)
         # Seed x tensors so flow dimensionality can be inferred below.
         # These tensors are not used in training; the training loop re-pools
         # each epoch from `train_cache`.  We compute them with the pool's
@@ -327,8 +333,22 @@ def train_v3_cnf(
             train_nll=f"{train_nll[-1]:.3f}", val_nll=f"{val_nll[-1]:.3f}"
         )
 
-        # Early stop on val mean NLL.  Snapshot flow + xt_pool jointly.
-        cur_val = val_nll[-1]
+        # Early stop on the selection cohort's mean NLL.  Snapshot flow +
+        # xt_pool jointly.  By default the selection cohort IS the reportable
+        # val_eval cohort (legacy, reproduces thesis runs); when
+        # `select_on_fit_cohort` is set the threshold-fit cohort is used
+        # instead, leaving val_eval a never-selected hold-out so its NLL is an
+        # unbiased generalisation estimate (see V3Config docstring).
+        if v3_cfg.select_on_fit_cohort:
+            with torch.no_grad():
+                if xt_pool is not None:
+                    x_fit_epoch = _pool_cached_x(val_fit_cache, xt_pool, device, anchor_norm)
+                else:
+                    x_fit_epoch = x_val_fit
+                fit_log_p = flow.log_prob(x_fit_epoch.to(device), c_val_fit_used.to(device))
+                cur_val = float((-fit_log_p).mean().item())
+        else:
+            cur_val = val_nll[-1]
         if stopper.update(cur_val, _snapshot_combined):
             early_stopped_epoch = _epoch + 1
             break
@@ -404,6 +424,7 @@ def train_v3_cnf(
         val_scores=scores_val,
         val_contexts=c_val.numpy(),
         val_labels=val_labels,
+        val_recording_ids_per_window=val_rec_ids_per_window,
         unconditional=v3_cfg.unconditional,
         xt_pool=xt_pool,
         anchor_mean=(anchor_norm[0] if anchor_norm is not None else None),
