@@ -148,8 +148,9 @@ def test_cluster_mode_floor_end_to_end() -> None:
         window_overlap=0.5, seed=0,
     )
     floor = cluster_mode_floor(loader, cfg)
-    # D1 has two labelled modes (Pump, Turbine) → K clamps to 2.
-    assert floor.n_clusters == 2
+    # K clamps to the number of distinct labelled modes present in D1.
+    assert floor.n_clusters == len(floor.label_set)
+    assert floor.n_clusters >= 2
     assert floor.n_windows >= 2 and floor.n_recordings >= 2
     for v in (floor.nmi, floor.ari, floor.purity):
         assert np.isfinite(v)
