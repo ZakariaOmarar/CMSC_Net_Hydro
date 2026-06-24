@@ -110,7 +110,7 @@ def fig06_sync_evidence() -> None:
     t = np.arange(n) / fv
     shift = int(round(best.offset_s * fv))
     m_al = np.roll(m_env, -shift) if shift else m_env
-    z = lambda x: (x - x.mean()) / (x.std() + 1e-12)  # noqa: E731
+    z = lambda x: (x - x.mean()) / (x.std() + 1e-12)
     zm, zv = z(m_al), z(v_env)
     joint = np.abs(zm) * np.abs(zv)
     guard = int(2 * fv)

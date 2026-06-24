@@ -37,7 +37,8 @@ FEATS = IMPULSE_FEATS + SPECTRAL_FEATS
 def _impulse_feats(w: np.ndarray, fs: float) -> list[float]:
     aw = np.abs(w)
     rms = np.sqrt(np.mean(w * w)) + 1e-12
-    peak = float(aw.max()); mean_abs = float(aw.mean()) + 1e-12
+    peak = float(aw.max())
+    mean_abs = float(aw.mean()) + 1e-12
     mu, sd = w.mean(), w.std() + 1e-12
     sk = 0.0
     try:
@@ -46,7 +47,8 @@ def _impulse_feats(w: np.ndarray, fs: float) -> list[float]:
         _, _, Z = stft(w, fs=fs, nperseg=nper, noverlap=nper // 2)
         mag = np.abs(Z)
         if mag.shape[1] >= 4:
-            m = mag.mean(1, keepdims=True); s = mag.std(1, keepdims=True) + 1e-12
+            m = mag.mean(1, keepdims=True)
+            s = mag.std(1, keepdims=True) + 1e-12
             sk = float(np.nanmax((((mag - m) / s) ** 4).mean(1) - 3.0))
     except Exception:
         sk = 0.0
@@ -67,7 +69,8 @@ def _spectral_feats(w: np.ndarray, fs: float) -> list[float]:
     spread = float(np.sqrt(((fr - centroid) ** 2 * Wn).sum()))
     flatness = float(np.exp(np.mean(np.log(W))) / np.mean(W))
     entropy = float(-(Wn * np.log(Wn)).sum())
-    cs = np.cumsum(W); rolloff = float(fr[np.searchsorted(cs, 0.85 * cs[-1])])
+    cs = np.cumsum(W)
+    rolloff = float(fr[np.searchsorted(cs, 0.85 * cs[-1])])
     th = fr.max() / 3.0 + 1e-9
     return [centroid, spread, flatness, entropy, rolloff,
             float(W[fr < th].sum() / W.sum()),
@@ -87,7 +90,8 @@ def recording_windows(signal_1d: np.ndarray, fs: float,
                       win_s: float = 1.0, stride_s: float = 0.5):
     """Window a 1-D signal; yield (t_start, t_end, feature_vector)."""
     T = signal_1d.size
-    wlen = int(win_s * fs); step = max(1, int(stride_s * fs))
+    wlen = int(win_s * fs)
+    step = max(1, int(stride_s * fs))
     for i0 in range(0, max(1, T - wlen + 1), step):
         seg = signal_1d[i0:i0 + wlen]
         yield i0 / fs, (i0 + wlen) / fs, window_features(seg, fs)
@@ -104,7 +108,8 @@ class _ModalityMaha:
 
     @classmethod
     def fit(cls, X: np.ndarray) -> _ModalityMaha:
-        mean = X.mean(0); std = X.std(0) + 1e-8
+        mean = X.mean(0)
+        std = X.std(0) + 1e-8
         Z = (X - mean) / std
         rm = Z.mean(0)
         cov = np.cov(Z - rm, rowvar=False) + 1e-6 * np.eye(Z.shape[1])
