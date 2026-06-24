@@ -1,5 +1,7 @@
 # CMSC_Net_Hydro
 
+[![CI](https://github.com/ZakariaOmarar/CMSC_Net_Hydro/actions/workflows/ci.yml/badge.svg)](https://github.com/ZakariaOmarar/CMSC_Net_Hydro/actions/workflows/ci.yml)
+
 Multimodal acoustic + vibration anomaly detection and source localization for
 reversible Francis pump-turbines. This is the implementation accompanying a
 Master's thesis; it realizes the chained **V0 → V5** label-free pipeline.
@@ -186,8 +188,9 @@ off because the modelling code uses maths/ML conventions (`X`, `W`,
 
 The package ships `py.typed` and is type-checked with `pyright` in *basic* mode
 (config in `[tool.pyright]`); a handful of numpy/torch-driven categories are
-relaxed with documented reasons. `make check` bundles the same lint, type-check,
-and data-free test gate into one command to run before pushing.
+relaxed with documented reasons. The same lint, type-check, and data-free test
+gate runs in [CI](.github/workflows/ci.yml) on every push and pull request;
+`make check` runs the identical gate locally before pushing.
 
 ## Notes on the previous repo state
 

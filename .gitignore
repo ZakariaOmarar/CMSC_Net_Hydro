@@ -38,7 +38,6 @@ data/
 artifacts/
 .venv/
 .pytest_cache/
-.github/
 __pycache__/
 results/
 docs/
