@@ -8,7 +8,7 @@ they had each copied: the CPU state-dict snapshot and the patience counter.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TypeVar
+from typing import Generic, TypeVar
 
 import torch
 
@@ -27,7 +27,7 @@ def cpu_state_dict(module: torch.nn.Module) -> dict[str, torch.Tensor]:
     return {k: v.detach().cpu().clone() for k, v in module.state_dict().items()}
 
 
-class EarlyStopping:
+class EarlyStopping(Generic[S]):
     """Track the lowest validation value seen and the snapshot taken there.
 
     Call :meth:`update` once per epoch with the validation value and a callable

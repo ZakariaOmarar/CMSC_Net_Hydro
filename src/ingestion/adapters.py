@@ -10,8 +10,9 @@ from datetime import datetime
 try:  # ``datetime.UTC`` exists only on Python 3.11+; shim it for 3.10 and earlier.
     from datetime import UTC
 except ImportError:  # pragma: no cover - exercised on Python <= 3.10
+    from datetime import timezone as _timezone
 
-    UTC = UTC
+    UTC = _timezone.utc  # noqa: UP017
 from pathlib import Path
 
 import numpy as np
